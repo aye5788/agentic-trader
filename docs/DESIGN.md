@@ -49,12 +49,19 @@ through a persisted **Research Store**:
 
 | Source | Role | Status |
 | ------ | ---- | ------ |
-| **Schwab API** | Fundamentals, price history, options+greeks, movers, quotes | ✅ connected (Market Data only) |
-| **Alpaca MCP** | News, movers, bars, snapshots | available |
-| **Robinhood MCP** | Fundamentals, earnings, its own screeners | available |
+| **Schwab API** | Fundamentals, price history, options+greeks, movers, quotes (true SIP/NBBO) | ✅ connected (Market Data only) |
+| **Finnhub API** | Analyst recommendation *trends*, earnings *surprises*, 133 basic-financial metrics | ✅ connected (free tier) |
+| **Alpaca MCP** | News (live, free), movers, most-active screeners | ✅ available (news = free tier) |
+| **Robinhood MCP** | Fundamentals, earnings calendar/results, its own screeners | available |
 | **Web Search / Fetch** | Filings, analyst commentary, macro | available |
 | **CryptoQuant / HF** | On-chain, models/papers | available (thematic) |
 | **Airtable / Drive** | Structured research DB / store | available |
+
+> **Feed notes.** Alpaca's *price* data is IEX-only on the free plan (single-venue,
+> not full NBBO) — so we lean on **Schwab/RH for quotes** and use Alpaca purely for
+> **news + screeners**. Finnhub's **price-target** and **forward EPS-estimate**
+> endpoints are premium-only; we deliberately skip the price-target *level* (weak,
+> biased signal) and treat forward consensus estimates as a deferred maybe.
 
 ### Schwab scope (verified empirically — see `scripts/schwab_scope_full.py`)
 
@@ -72,8 +79,12 @@ maps **with greeks**, IV, rates), `option_expiration_chain`, `movers`
 - ❌ **Analyst ratings / price targets / research reports** — no such endpoint
   exists in the Schwab developer API at all. Fundamentals yes, analysts no.
 
-**Open gap:** analyst / news sentiment. Must come from web/news or a vendor
-(e.g. Finnhub, FMP) — Schwab cannot provide it.
+**Gap — now filled (free):** analyst / news sentiment. Schwab can't provide it, so:
+- **News** → **Alpaca** (`get_news`, live on the free tier — verified).
+- **Analyst signal** → **Finnhub** free tier (verified live): recommendation
+  *trends* + earnings *surprises* + 133 basic-financial metrics. Only the
+  price-target *level* and forward EPS consensus are paywalled — the former we
+  don't want anyway, the latter is a deferred maybe.
 
 ## Layer 4 — Execution (Robinhood)
 
@@ -111,15 +122,17 @@ External data providers sit outside it; the runtime sits inside.
 
 1. **Research Store** — file memory (simple, private) vs. Airtable (structured, UI).
 2. **Verify depth** — single-pass research vs. full bull/bear/judge adversarial layer.
-3. **Analyst-data source** — web/news scraping vs. a ratings vendor.
+3. ~~**Analyst-data source**~~ — RESOLVED: Finnhub free (recommendation trends +
+   earnings surprises) + Alpaca free (news). Paid consensus estimates deferred.
 
 ## Status
 
 - [x] Repo scaffold + Schwab research adapter
 - [x] Schwab connected (Market Data), fundamentals verified live
 - [x] Full read-only API scope documented
+- [x] Analyst/news source — Finnhub adapter connected (free tier verified live)
 - [ ] Wrap remaining Schwab endpoints (price history, options, movers, quotes)
-- [ ] Analyst/news source
+- [ ] Wire Alpaca news into the sensing layer (repo code, not just MCP)
 - [ ] Research store + slow/fast loops
 - [ ] Governance + orchestration
 - [ ] VPS deployment

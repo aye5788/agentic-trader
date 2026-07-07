@@ -25,8 +25,25 @@ The Schwab **developer** API exposes:
 | `movers`, `market_hours`                       | ❌ research reports                  |
 | `instruments` + `fundamental` projection       | (UI-only, not in the public API)    |
 
-So Schwab's role here is **fundamentals**, not analysts. (Analyst signal, if wanted,
-must come from another source — e.g. web/news.)
+So Schwab's role here is **fundamentals**, not analysts.
+
+## Finnhub adapter — the analyst slice
+
+Schwab has no analyst data, so **Finnhub** (free tier) fills it. Verified live:
+
+| Available (free tier)                                   | Premium-only        |
+| ------------------------------------------------------- | ------------------- |
+| recommendation *trends* (strongBuy…strongSell by month) | ❌ price targets     |
+| earnings *surprises* (actual vs estimate, % beat/miss)  | ❌ forward EPS est.  |
+| basic financials (133 metrics)                          |                     |
+
+Slow-loop only (~60 calls/min). Get a free key at
+[finnhub.io/register](https://finnhub.io/register), put it in `.env` as
+`FINNHUB_API_KEY`, then confirm your plan's access with:
+
+```bash
+python scripts/finnhub_scope.py AAPL
+```
 
 ## Setup
 
