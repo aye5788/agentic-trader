@@ -108,14 +108,50 @@ moves). Fires the slow and fast loops on their own clocks.
 
 ## Deployment (VPS)
 
-The dashed boundary in the diagram = this repo, deployed **headless on a VPS**.
-External data providers sit outside it; the runtime sits inside.
+The dashed boundary in the diagram = this repo, deployed **headless on a VPS**
+(a DigitalOcean droplet). External data providers sit outside it; the runtime
+sits inside.
 
-- **Headless auth**: Schwab uses OAuth 2.0 with a manual paste flow (no local
-  browser server needed) — see `scripts/schwab_auth.py`.
-- **⚠️ 7-day token expiry**: Schwab refresh tokens expire every 7 days. The auth
-  script must be re-run weekly to keep an unattended deployment alive. This is
-  the single biggest operational constraint.
+### In plain English
+
+The droplet is just a small always-on computer in a data center. Today the
+"worker" is a human + Claude in a chat; on the droplet the work runs **by itself,
+on a timer, with nobody watching**. Three things make that work:
+
+1. **The brain runs on the droplet and bills the right wallet.** Claude Code can
+   authenticate two ways: the flat-fee **subscription** (what we want) or a
+   **pay-per-token API key** (billed separately, per word). We run on the
+   subscription. ⚠️ **The footgun:** if an `ANTHROPIC_API_KEY` is set *anywhere*
+   on the box, it silently overrides the subscription and you get billed
+   per-token. Rule: ensure `ANTHROPIC_API_KEY` is unset everywhere (crontab,
+   `.bashrc`, `.env`, systemd).
+2. **Robinhood lets the droplet trade.** RH's Agentic Trading is *designed for*
+   unattended automation (their own example: "buy $100 of X every time it drops
+   2% in a day"). It's a standard **remote HTTP MCP** (`claude mcp add
+   robinhood-trading --transport http https://agent.robinhood.com/mcp/trading`),
+   so it works from a headless CLI — not a claude.ai-web-only connector.
+3. **A timer (cron) kicks it off** on the slow/fast cadences.
+
+### Auth & billing specifics
+
+- **Claude on the droplet (subscription, not API):** run `claude setup-token` on
+  a real machine → produces a ~1-year OAuth token → set
+  `CLAUDE_CODE_OAUTH_TOKEN` on the droplet → drive with `claude -p "..."` under
+  cron. Keeps usage on the plan. Verify `ANTHROPIC_API_KEY` is absent.
+- **Robinhood auth:** desktop needed **once** to open the agentic account +
+  complete the OAuth paste flow (verify on the RH mobile app). After that,
+  ongoing operation is headless. Token lifetime / re-auth cadence is **not
+  documented by RH — treat as unknown and watch for it** (like Schwab's 7 days).
+- **Schwab headless auth**: OAuth 2.0 manual paste flow (no local browser
+  server) — see `scripts/schwab_auth.py`.
+- **⚠️ Schwab 7-day token expiry**: Schwab refresh tokens expire every 7 days;
+  re-run the auth script weekly to keep an unattended deployment alive.
+- **Fair use**: RH explicitly supports automation, and Anthropic is an official
+  launch partner for exactly this — so *policy* is not the concern. Plan
+  *rate limits* (throughput per window) are real but a pacing problem: space the
+  loops out, don't hammer.
+- **Liability**: RH disclaims all responsibility for agent decisions/losses —
+  "you assume all risk." Fine at $20 demo scale; the right mindset before more.
 - **Secrets**: `.env` and `secrets/` are git-ignored; never committed.
 
 ## Open decisions
