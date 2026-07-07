@@ -208,10 +208,16 @@ backtestability):
   daily-close / T-1 data) → wrap in **retry + cache-last-good** so an outage
   degrades to "trend-gate only", never blocks the run. Free key, `.env` as
   `FRED_API_KEY`; rate limit ~120/min (we use a handful nightly).
-- **Macro + earnings event calendar** (planned) — the scheduled event spine:
-  FOMC (static list) + FRED release dates (CPI/jobs) + **RH/Finnhub earnings
-  dates**. Deterministic date lookups → drives both the event-risk veto and the
-  *timing of PEAD entries* (it says which names report when). Zero tokens.
+- **Earnings event calendar** — ✅ built (`src/event_calendar/`). Finnhub REST
+  spine (per-symbol, code-callable) cross-checked against an agent-supplied
+  **Robinhood snapshot** (RH's `report.verified` = the confirmed/estimated flag).
+  Tags `confirmed` vs `estimated` (never infers confirmed from agreement;
+  disagreement → estimated + earliest/conservative date), and **logs date
+  revisions** (a pushed-back report skews negative). Never reads the clock (caller
+  passes `as_of`/`today`) → reproducible + backtestable. Drives both the event-risk
+  veto (`reports_within`) and PEAD entry timing (`fresh_reports`). Verified live.
+- **Macro event calendar** (planned, with FRED) — FOMC (static list) + FRED release
+  dates (CPI/jobs) for the macro-side event veto. Deterministic, zero tokens.
 - **v1 = deterministic-only regime** (mechanical floor + calendar). Defer the agent
   qualitative overlay to v2, once the floor has earned trust.
 
@@ -301,8 +307,10 @@ on a timer, with nobody watching**. Three things make that work:
 - [x] Strategy foundation decided — PEAD-anchored swing, equities-first, cash acct
 - [x] Trade-management + risk rules speced — IBD-derived, vol-adjusted stops, R:R gate
 - [x] Regime-gate design — mechanical floor + agent overlay; FRED vetted as supplement
-- [ ] Build FRED macro adapter (`src/adapters/fred/`) — cached + retry, supplementary
-- [ ] Build macro + earnings **event calendar** (deterministic regime/timing spine)
+- [x] Build **earnings event calendar** (`src/event_calendar/`) — Finnhub spine +
+      agent RH snapshot; confirmed/estimated tagging + revision log; verified live
+- [ ] Build FRED macro adapter (`src/adapters/fred/`) + macro event calendar
+      (FOMC/CPI dates) — cached + retry, supplementary
 - [ ] Research store (file-memory, belief + journal) + slow/fast loops
 - [ ] Governance + orchestration (incl. mechanical regime floor)
 - [ ] VPS deployment
