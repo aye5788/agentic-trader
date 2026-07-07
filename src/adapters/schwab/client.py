@@ -10,7 +10,10 @@ from pathlib import Path
 import schwabdev
 from dotenv import load_dotenv
 
-load_dotenv()
+# Anchor everything to the repo root so behavior is identical regardless of the
+# current working directory (interactive shell, cron, or systemd on a VPS).
+REPO_ROOT = Path(__file__).resolve().parents[3]
+load_dotenv(REPO_ROOT / ".env")
 
 
 def _require(name: str) -> str:
@@ -23,7 +26,10 @@ def _require(name: str) -> str:
 
 
 def tokens_db_path() -> str:
-    return os.environ.get("SCHWAB_TOKENS_DB", "./secrets/tokens.db")
+    configured = os.environ.get("SCHWAB_TOKENS_DB")
+    if configured:
+        return configured
+    return str(REPO_ROOT / "secrets" / "tokens.db")
 
 
 def build_client(*, interactive_auth: bool) -> "schwabdev.Client":
