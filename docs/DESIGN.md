@@ -26,6 +26,37 @@ LAYER 1  SENSING         multi-source data ingestion
 LAYER 4  EXECUTION       Robinhood MCP: review -> place  (thin, dumb, reliable)
 ```
 
+## Strategy foundation
+
+**Horizon: swing (multi-day to a few weeks).** Chosen for structural fit, not
+regulation — our data is EOD-shaped, the slow loop runs nightly, and the edge
+below plays out over days-to-weeks. Day trading is off the table on *data cadence
++ loop design*, **not** PDT: the Pattern-Day-Trader rule was eliminated Jun 4 2026,
+and in any case it only ever applied to *margin* accounts. Ours is a **cash
+account**, so the sole intraday constraint is **T+1 settlement** — a non-issue for
+a days-to-weeks hold.
+
+**Edge: PEAD-anchored (post-earnings-announcement drift).** Horizon ≠ edge —
+"swing" is how long we hold, not why we profit. The signal stack, each source with
+exactly one job:
+
+| Signal | Role | Source |
+| ------ | ---- | ------ |
+| **Post-earnings drift (PEAD)** | **primary edge** — beats/misses drift for weeks | Finnhub surprises + RH earnings |
+| Estimate-revision momentum | confirming edge | Finnhub recommendation *trends* |
+| Price momentum / structure | *timing* of entry & exit | Schwab price history |
+| Fundamental quality | *universe filter* (don't swing garbage) | Schwab + Finnhub metrics |
+| News / catalysts | context + risk flag | Alpaca news |
+
+**Instrument: equities-first** (fractional / dollar-notional). Options Level 2
+(long-only) exists on RH but is **deferred** — theta bleed fights a multi-week
+hold; prove the equity logic first, add options later only for tightly-timed
+post-earnings plays where drift outpaces decay.
+
+**Validate before trust.** PEAD is well-documented, but *our* implementation isn't
+proven until backtested against Schwab history and tracked via outcome feedback
+(see Research Store). Lean: backtest the drift signal before it touches live money.
+
 ## The two-clock model (the key decoupling)
 
 Do **not** run deep research at trade time. Split into two cadences that hand off
@@ -42,8 +73,40 @@ through a persisted **Research Store**:
 
 - **Slow loop** does the expensive thinking and writes a *research product*.
 - **Fast loop** is cheap and deterministic; it only acts on that product.
-- **Research Store** = the handoff (file memory or Airtable): ranked watchlist +
-  written theses + target weights.
+
+### Research Store design
+
+The handoff is the keystone — it's the basis for *every* trade, so it's designed to
+stay coherent as history grows past any single context window.
+
+- **Backend: file-memory** (JSON on the droplet) behind a small typed interface
+  (`read_current` / `write_product`), so Airtable stays a drop-in later if a UI is
+  wanted. Context window = working memory (RAM); the store = long-term memory
+  (disk). You never load all of it — only the current watchlist's theses + recent
+  fills + guardrails — so nightly context stays **bounded regardless of total
+  history**.
+- **Two stores, not one:**
+  - **Beliefs** — the *current* view; small, curated, always loaded; one
+    self-contained record per name.
+  - **Journal** — append-only log of every run + fill; grows forever, *never*
+    fully loaded (queried / summarized on demand for audit + backtest).
+- **The slow loop revises, it doesn't append.** Each run, per name: does new
+  evidence confirm / break / not-touch the existing thesis → **update / retire /
+  keep**. The store is a *maintained set of beliefs*, not an accumulation. (This is
+  what the bull/bear adversarial step is *for*.)
+- **Staleness is mechanically detectable, not remembered.** Every record carries
+  `as_of` + evidence `provenance` + a `review_by` trigger (for PEAD: "next
+  earnings" / "drift window elapsed"), so rot is *visible* without the model
+  recalling it.
+- **Outcome tracking closes the loop.** Each thesis points to its `outcome` once
+  known → confidence is calibrated against reality, not internal consistency.
+  Guards against the confirmation-loop failure (entrenching your own past theses).
+- **Model-independent:** plain structured data + prose, so any future agent (or a
+  human) can pick it up cold — same "repo = single source of truth" principle.
+
+Thesis record (draft): `symbol, rank, verdict, entry_zone, stop, targets[],
+target_weight, confidence, thesis (prose), signals{evidence + provenance}, as_of,
+review_by, outcome`.
 
 ## Layer 1 — Sensing (data sources)
 
@@ -52,7 +115,8 @@ through a persisted **Research Store**:
 | **Schwab API** | Fundamentals, price history, options+greeks, movers, quotes (true SIP/NBBO) | ✅ connected (Market Data only) |
 | **Finnhub API** | Analyst recommendation *trends*, earnings *surprises*, 133 basic-financial metrics | ✅ connected (free tier) |
 | **Alpaca API** | News (live, free, symbol-tagged); movers/screeners via MCP | ✅ connected (news adapter, free tier) |
-| **Robinhood MCP** | Fundamentals, earnings calendar/results, its own screeners | available |
+| **Robinhood MCP** | Fundamentals, **earnings calendar/results**, its own screeners | available |
+| **FRED API** | Macro regime indicators (VIX, `T10Y2Y` curve, `BAMLH0A0HYM2` HY spread) + economic release calendar | planned (supplementary; cached + retry) |
 | **Web Search / Fetch** | Filings, analyst commentary, macro | available |
 | **CryptoQuant / HF** | On-chain, models/papers | available (thematic) |
 | **Airtable / Drive** | Structured research DB / store | available |
@@ -101,6 +165,58 @@ maps **with greeks**, IV, rates), `option_expiration_chain`, `movers`
 Mandate (universe, rules, weights), journal (every run + fills), guardrails
 (max % per name, min/max holdings, halt-on-drawdown, whitelist universe), and a
 kill-switch. Persisted so it survives across runs.
+
+## Trade management & risk rules (IBD-SwingTrader-derived)
+
+The *signal* is ours (PEAD); the *trade management* is adapted from IBD
+SwingTrader, whose entry/exit discipline is edge-agnostic and battle-tested. Each
+rule becomes a hard field on the thesis record and/or a governance guardrail:
+
+| Rule | Setting | Where enforced |
+| ---- | ------- | -------------- |
+| Entry zone | defined buy-price range; never chase above it | `entry_zone`; fast loop only buys if live price in-zone |
+| Stop loss | defined + enforced, **volatility-adjusted** (below post-earnings low / ATR mult) — *not* IBD's flat 2–3% (too tight for earnings names) | `stop`; governance auto-exits on breach |
+| Profit targets | tiered (IBD ≈ 5% / 10%); scale out | `targets: [t1, t2]` |
+| Moving-average exit | exit if close < short-term MA (e.g. 21-day), even if stop not hit | daily fast-loop check (Schwab price history) |
+| Position size | ≤ **10% / name** (IBD "full" = 10%; most trades ½–¾) | `target_weight`, capped in guardrails |
+| Reward:risk | ≥ **2:1** = (target−entry)/(entry−stop) | **store validation gate** — reject bad-geometry theses on write |
+
+The reward:risk gate is the key one: the store **structurally cannot** accept a
+bad-geometry trade, so quality can't silently rot.
+
+## Regime gate (macro) — mechanical floor + agent overlay
+
+Both PEAD and IBD-style swing have **negative expectancy in down/sideways tape**,
+so new entries are gated on market regime. The design is **asymmetric**:
+
+- **Mechanical floor = the ON switch (backtestable, non-negotiable).** No new
+  entries unless the broad market passes a mechanical trend test (SPX/QQQ > 50-day
+  MA, optionally a VIX ceiling). Computed from **Schwab** — the load-bearing gate
+  has **no FRED dependency**. Pure code, provable against history, immune to
+  narrative.
+- **Agent overlay = the OFF switch only (judgment; veto / downsize).** A tiny
+  nightly read may *veto or downsize* on context the numbers can't see ("CPI
+  tomorrow → stand down"; "macro-driven tape, stock-specific edge suppressed"). It
+  **never green-lights on its own** — blocks the "news sounds great at the top"
+  failure (sentiment peaks at tops/bottoms).
+
+**Macro is a deterministic compiler, not agent news-reading** (token discipline +
+backtestability):
+
+- **`src/adapters/fred/`** (planned) — supplementary macro (VIX daily, curve, HY
+  spread). ⚠️ FRED is **"as-is"** (Fed disclaims uptime; occasional throttling;
+  daily-close / T-1 data) → wrap in **retry + cache-last-good** so an outage
+  degrades to "trend-gate only", never blocks the run. Free key, `.env` as
+  `FRED_API_KEY`; rate limit ~120/min (we use a handful nightly).
+- **Macro + earnings event calendar** (planned) — the scheduled event spine:
+  FOMC (static list) + FRED release dates (CPI/jobs) + **RH/Finnhub earnings
+  dates**. Deterministic date lookups → drives both the event-risk veto and the
+  *timing of PEAD entries* (it says which names report when). Zero tokens.
+- **v1 = deterministic-only regime** (mechanical floor + calendar). Defer the agent
+  qualitative overlay to v2, once the floor has earned trust.
+
+Store the regime call **+ its rationale** each night → auditable, and
+outcome-tracking applies to it ("on risk-off nights, did trades do worse?").
 
 ## Layer 6 — Orchestration
 
@@ -157,10 +273,21 @@ on a timer, with nobody watching**. Three things make that work:
 
 ## Open decisions
 
-1. **Research Store** — file memory (simple, private) vs. Airtable (structured, UI).
-2. **Verify depth** — single-pass research vs. full bull/bear/judge adversarial layer.
-3. ~~**Analyst-data source**~~ — RESOLVED: Finnhub free (recommendation trends +
+1. ~~**Research Store**~~ — RESOLVED: **file-memory** behind a swappable
+   `read_current`/`write_product` interface; Airtable a drop-in later if a UI is
+   wanted.
+2. ~~**Analyst-data source**~~ — RESOLVED: Finnhub free (recommendation trends +
    earnings surprises) + Alpaca free (news). Paid consensus estimates deferred.
+3. ~~**Regime approach**~~ — RESOLVED: mechanical floor (ON, Schwab-computed) +
+   agent overlay (OFF-only); **v1 deterministic-only**, agent overlay in v2.
+4. **Single edge vs. blend** — earnings-drift alone first (clean, testable) vs.
+   drift + price-momentum co-equal from day one. *Leaning single-edge-first.*
+5. **Trust before proof** — backtest the drift signal against Schwab history before
+   live vs. trade live-tiny and learn from fills. *Leaning backtest-first.*
+6. **Verify depth** — single-pass research vs. full bull/bear/judge adversarial
+   layer.
+7. **Same-day catalyst entries** — act the morning after a beat vs. pure nightly
+   cadence for v1. *Leaning nightly-only v1* (drift persists for weeks).
 
 ## Status
 
@@ -171,6 +298,11 @@ on a timer, with nobody watching**. Three things make that work:
 - [x] Wrap remaining Schwab endpoints — quote, price history, option chain,
       movers, market hours (all verified live)
 - [x] Wire Alpaca news into the sensing layer (repo adapter, verified live)
-- [ ] Research store + slow/fast loops
-- [ ] Governance + orchestration
+- [x] Strategy foundation decided — PEAD-anchored swing, equities-first, cash acct
+- [x] Trade-management + risk rules speced — IBD-derived, vol-adjusted stops, R:R gate
+- [x] Regime-gate design — mechanical floor + agent overlay; FRED vetted as supplement
+- [ ] Build FRED macro adapter (`src/adapters/fred/`) — cached + retry, supplementary
+- [ ] Build macro + earnings **event calendar** (deterministic regime/timing spine)
+- [ ] Research store (file-memory, belief + journal) + slow/fast loops
+- [ ] Governance + orchestration (incl. mechanical regime floor)
 - [ ] VPS deployment
