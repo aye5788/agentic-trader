@@ -45,6 +45,26 @@ Slow-loop only (~60 calls/min). Get a free key at
 python scripts/finnhub_scope.py AAPL
 ```
 
+## Alpaca adapter — the news slice
+
+Schwab and Finnhub give hard numbers; **Alpaca** (free tier) gives the live
+narrative — symbol-tagged market news. Verified live:
+
+| Available (free tier)                                   | Not used here        |
+| ------------------------------------------------------- | -------------------- |
+| symbol news (`get_news("AAPL")`) — headline, summary, url | ❌ quotes (IEX-only)  |
+| market-wide news feed (`get_news()`)                    | ❌ execution          |
+| transparent paging past the 50-article/request cap      |                      |
+
+Data-only by design — this adapter points at Alpaca's *data* host and has no
+order surface. Get a free key pair at
+[app.alpaca.markets](https://app.alpaca.markets/) → **Home → API Keys**, put them
+in `.env` as `ALPACA_API_KEY` / `ALPACA_SECRET_KEY`, then confirm with:
+
+```bash
+python scripts/alpaca_scope.py AAPL
+```
+
 ## Setup
 
 ```bash

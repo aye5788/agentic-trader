@@ -51,7 +51,7 @@ through a persisted **Research Store**:
 | ------ | ---- | ------ |
 | **Schwab API** | Fundamentals, price history, options+greeks, movers, quotes (true SIP/NBBO) | ✅ connected (Market Data only) |
 | **Finnhub API** | Analyst recommendation *trends*, earnings *surprises*, 133 basic-financial metrics | ✅ connected (free tier) |
-| **Alpaca MCP** | News (live, free), movers, most-active screeners | ✅ available (news = free tier) |
+| **Alpaca API** | News (live, free, symbol-tagged); movers/screeners via MCP | ✅ connected (news adapter, free tier) |
 | **Robinhood MCP** | Fundamentals, earnings calendar/results, its own screeners | available |
 | **Web Search / Fetch** | Filings, analyst commentary, macro | available |
 | **CryptoQuant / HF** | On-chain, models/papers | available (thematic) |
@@ -80,7 +80,8 @@ maps **with greeks**, IV, rates), `option_expiration_chain`, `movers`
   exists in the Schwab developer API at all. Fundamentals yes, analysts no.
 
 **Gap — now filled (free):** analyst / news sentiment. Schwab can't provide it, so:
-- **News** → **Alpaca** (`get_news`, live on the free tier — verified).
+- **News** → **Alpaca** (`src/adapters/alpaca/`, `get_news`, live on the free
+  tier — verified: symbol-tagged + market-wide feed both return real-time).
 - **Analyst signal** → **Finnhub** free tier (verified live): recommendation
   *trends* + earnings *surprises* + 133 basic-financial metrics. Only the
   price-target *level* and forward EPS consensus are paywalled — the former we
@@ -169,7 +170,7 @@ on a timer, with nobody watching**. Three things make that work:
 - [x] Analyst/news source — Finnhub adapter connected (free tier verified live)
 - [x] Wrap remaining Schwab endpoints — quote, price history, option chain,
       movers, market hours (all verified live)
-- [ ] Wire Alpaca news into the sensing layer (repo code, not just MCP)
+- [x] Wire Alpaca news into the sensing layer (repo adapter, verified live)
 - [ ] Research store + slow/fast loops
 - [ ] Governance + orchestration
 - [ ] VPS deployment

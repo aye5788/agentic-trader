@@ -37,7 +37,7 @@ Full scope + verified availability is in `docs/DESIGN.md` (Layer 1). Summary:
 | ------ | ---- | ----- |
 | **Schwab** (`src/adapters/schwab/`) | Fundamentals, NBBO quotes, price history, options+greeks, movers | Market Data only. OAuth, **refresh token expires every 7 days** → weekly re-auth. |
 | **Finnhub** (`src/adapters/finnhub/`) | Analyst *recommendation trends*, earnings *surprises*, 133 basic-financial metrics | Free tier. Price-target *level* and forward EPS estimates are **premium (403) — skipped**. Slow-loop only (~60 calls/min). |
-| **Alpaca** (MCP) | News + screeners (movers, most-active) | Free tier. Price data is **IEX-only (not full NBBO)** → do not use it for quotes; use Schwab/RH. |
+| **Alpaca** (`src/adapters/alpaca/`) | Live symbol-tagged news; screeners (movers, most-active) via MCP | Free tier. Price data is **IEX-only (not full NBBO)** → do not use it for quotes; use Schwab/RH. |
 | **Robinhood** (MCP) | **Execution** + its own fundamentals/earnings | The only execution venue. Agentic account only. |
 
 ---
@@ -62,6 +62,7 @@ The operationally critical bit:
 ```
 src/adapters/schwab/    Schwab Market Data client + research functions
 src/adapters/finnhub/   Finnhub analyst/estimates client + research functions
+src/adapters/alpaca/    Alpaca news client + get_news (data-only, no trading)
 scripts/                One-off + weekly auth and API-scope probe scripts
 docs/DESIGN.md          Full architecture (6 layers, two-clock model, scope tables)
 docs/architecture.*     The architecture diagram (svg + excalidraw source)
@@ -72,5 +73,6 @@ secrets/                OAuth token store (git-ignored)
 ## Setup / env
 
 Copy `.env.example` → `.env` and fill in credentials. Required keys:
-`SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, `SCHWAB_CALLBACK_URL`, `FINNHUB_API_KEY`.
+`SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, `SCHWAB_CALLBACK_URL`, `FINNHUB_API_KEY`,
+`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`.
 See `README.md` for the Schwab weekly-login and API-scope commands.
