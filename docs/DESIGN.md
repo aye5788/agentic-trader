@@ -167,7 +167,8 @@ on a timer, with nobody watching**. Three things make that work:
 - [x] Schwab connected (Market Data), fundamentals verified live
 - [x] Full read-only API scope documented
 - [x] Analyst/news source — Finnhub adapter connected (free tier verified live)
-- [ ] Wrap remaining Schwab endpoints (price history, options, movers, quotes)
+- [x] Wrap remaining Schwab endpoints — quote, price history, option chain,
+      movers, market hours (all verified live)
 - [ ] Wire Alpaca news into the sensing layer (repo code, not just MCP)
 - [ ] Research store + slow/fast loops
 - [ ] Governance + orchestration
