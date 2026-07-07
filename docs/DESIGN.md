@@ -308,9 +308,13 @@ on a timer, with nobody watching**. Three things make that work:
 - [x] Trade-management + risk rules speced — IBD-derived, vol-adjusted stops, R:R gate
 - [x] Regime-gate design — mechanical floor + agent overlay; FRED vetted as supplement
 - [x] Build **earnings event calendar** (`src/event_calendar/`) — Finnhub spine +
-      agent RH snapshot; confirmed/estimated tagging + revision log; verified live
+      RH snapshot normalizer; confirmed/estimated tagging + revision log; verified live
+- [x] Build **Research Store** (`src/research_store/`) — file-memory, belief +
+      journal, mandate-validated (≤10%/name, R:R ≥ 2:1); verified live
+- [ ] Codify the strategy into a **mandate config** (externalize `DEFAULT_MANDATE`
+      + universe + signal params) that the store + slow loop load
 - [ ] Build FRED macro adapter (`src/adapters/fred/`) + macro event calendar
-      (FOMC/CPI dates) — cached + retry, supplementary
-- [ ] Research store (file-memory, belief + journal) + slow/fast loops
+      (FOMC/CPI dates) — cached + retry, supplementary  *(needs FRED_API_KEY)*
+- [ ] Slow loop (research → theses) + fast loop (theses → sized orders)
 - [ ] Governance + orchestration (incl. mechanical regime floor)
 - [ ] VPS deployment
