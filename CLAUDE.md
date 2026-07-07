@@ -63,6 +63,11 @@ The operationally critical bit:
 src/adapters/schwab/    Schwab Market Data client + research functions
 src/adapters/finnhub/   Finnhub analyst/estimates client + research functions
 src/adapters/alpaca/    Alpaca news client + get_news (data-only, no trading)
+src/event_calendar/     Earnings/event calendar compiler (timing + risk spine).
+                        Deterministic: Finnhub REST spine + optional agent-supplied
+                        RH snapshot; tags confirmed/estimated, logs date revisions.
+                        (Named `event_calendar`, NOT `calendar` — avoids shadowing
+                        the Python stdlib module, which breaks imports.)
 scripts/                One-off + weekly auth and API-scope probe scripts
 docs/DESIGN.md          Full architecture (6 layers, two-clock model, scope tables)
 docs/architecture.*     The architecture diagram (svg + excalidraw source)

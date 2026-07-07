@@ -3,6 +3,9 @@
 secrets/
 *.db
 
+# runtime state — regenerated on the box each run
+research_store/
+
 # python
 __pycache__/
 *.pyc
