@@ -1,0 +1,10 @@
+# secrets & tokens — never commit
+.env
+secrets/
+*.db
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
