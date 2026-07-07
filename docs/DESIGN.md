@@ -28,6 +28,16 @@ LAYER 4  EXECUTION       Robinhood MCP: review -> place  (thin, dumb, reliable)
 
 ## Strategy foundation
 
+> ⚠️ **EDGE UNDER REVISION (in progress).** The PEAD (post-earnings drift) edge
+> described below was a first pass; we are moving the edge to **momentum** —
+> specifically the **hybrid "dual momentum"** (cross-sectional ranking + an
+> absolute-trend filter). Horizon stays swing. Design is being worked axis-by-axis
+> (axis 1 = relative-vs-absolute → *hybrid*, decided; axis 2 = lookback, next).
+> The PEAD-specific `config/strategy.toml [signal]` and the earnings-calendar-as-
+> *primary*-signal are correspondingly stale; most infra (Schwab price history =
+> the momentum engine, Research Store, regime gate, config loader) carries over
+> unchanged. This section will be rewritten once the momentum axes are settled.
+
 **Horizon: swing (multi-day to a few weeks).** Chosen for structural fit, not
 regulation — our data is EOD-shaped, the slow loop runs nightly, and the edge
 below plays out over days-to-weeks. Day trading is off the table on *data cadence
@@ -321,8 +331,9 @@ on a timer, with nobody watching**. Three things make that work:
       journal, mandate-validated (≤10%/name, R:R ≥ 2:1); verified live
 - [x] Codify the strategy into a **mandate config** (`config/strategy.toml`) —
       risk gates + universe + signal + regime; wired into the store; verified live
-- [ ] Build FRED macro adapter (`src/adapters/fred/`) + macro event calendar
-      (FOMC/CPI dates) — cached + retry, supplementary  *(needs FRED_API_KEY)*
+- [x] Build FRED macro adapter (`src/adapters/fred/`) — VIX / 10y-2y curve / HY
+      spread, retry + cache-last-good; verified live
+- [ ] Macro event calendar (FOMC/CPI dates) — deterministic event-risk feed
 - [ ] Slow loop (research → theses) + fast loop (theses → sized orders)
 - [ ] Governance + orchestration (incl. mechanical regime floor)
 - [ ] VPS deployment
