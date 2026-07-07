@@ -62,6 +62,13 @@ The operationally critical bit:
 ```
 src/adapters/schwab/    Schwab Market Data client + research functions
 src/adapters/finnhub/   Finnhub analyst/estimates client + research functions
+config/strategy.toml    CODIFIED STRATEGY — single source of truth: risk gates,
+                        universe, PEAD signal, trade management, regime floor.
+                        Tune the strategy HERE, not in code. `[risk]` = the store's
+                        validation mandate. Load via src/strategy.py.
+src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
+src/research_store/     Research Store — validated slow→fast handoff (belief +
+                        journal). write_product enforces the [risk] mandate.
 src/adapters/alpaca/    Alpaca news client + get_news (data-only, no trading)
 src/event_calendar/     Earnings/event calendar compiler (timing + risk spine).
                         Deterministic: Finnhub REST spine + optional agent-supplied

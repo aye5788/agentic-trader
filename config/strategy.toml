@@ -1,0 +1,61 @@
+# ============================================================================
+# STRATEGY MANDATE  —  the single source of truth for WHAT the system does.
+#
+# Loaded by the Research Store (the [risk] table = its validation gates) and by
+# the slow/fast loops (universe, signal, regime). Human-editable; change the
+# strategy HERE, not in code. See docs/DESIGN.md → "Strategy foundation" /
+# "Trade management & risk rules" / "Regime gate".
+# ============================================================================
+
+[meta]
+name       = "pead-swing-v1"
+horizon    = "swing"              # multi-day to a few weeks
+edge       = "pead"              # post-earnings-announcement drift (single edge, v1)
+instrument = "equities"          # options deferred (theta fights the hold)
+account    = "robinhood-agentic" # execution: RH Agentic account ONLY
+
+# --- Risk gates: enforced by the Research Store on every write_product() -----
+# (These ARE research_store.validate.DEFAULT_MANDATE, externalized.)
+[risk]
+max_weight_per_name = 0.10        # IBD "full position" = 10% of the sleeve
+max_total_weight    = 1.0         # fully-invested ceiling (sum of weights)
+min_reward_risk     = 2.0         # require >= 2:1 reward:risk geometry
+max_holdings        = 10          # concentration guard
+
+# --- Trade management (IBD-SwingTrader-derived), applied per thesis ----------
+[trade_management]
+stop_style   = "volatility_adjusted"  # below post-earnings low / ATR mult (NOT flat 2-3%)
+target_tiers = [0.05, 0.10]           # scale-out at ~+5% then ~+10%
+ma_exit_days = 21                     # exit if close < 21-day MA, even pre-target
+no_chase     = true                   # only enter within the thesis entry_zone
+
+# --- The PEAD signal --------------------------------------------------------
+[signal]
+min_surprise_pct           = 3.0    # only names that beat/missed by >= this %
+drift_window_days          = 30     # expected hold horizon for the drift
+confirm_with_surprise_data = true   # entry trigger = Finnhub surprise ROW landing,
+                                    # not merely the calendar date passing
+require_revision_up         = false # estimate-revision momentum: confirming, not required (v1)
+
+# --- Tradeable universe -----------------------------------------------------
+[universe]
+mode                  = "earnings_dynamic"  # nightly: names that just reported, filtered
+min_price             = 5.0
+min_avg_dollar_volume = 20_000_000          # liquidity floor
+# Always-eligible liquid ETFs. ROLE = core exposure / ballast, NOT a PEAD edge:
+# a place to hold broad risk (sized under [risk]) when single-name setups are
+# thin and regime is risk-on. Sector-level earnings-drift use is a v2 idea.
+core_etfs             = ["SPY", "QQQ", "IWM", "DIA"]
+etf_role              = "core_exposure"
+
+# --- Regime floor (mechanical ON switch; agent overlay deferred to v2) -------
+[regime]
+index          = "$SPX"
+trend_ma_days  = 50      # no NEW entries unless index > its 50-day MA
+vix_ceiling    = 28.0    # no NEW entries if VIX above this
+agent_overlay  = false   # v1 = deterministic-only; qualitative veto in v2
+
+# --- How much proof before / during live trading ----------------------------
+[proof]
+mode          = "backtest_first"  # validate drift vs Schwab history before the $20
+entry_cadence = "nightly"          # v1: no same-day catalyst reaction

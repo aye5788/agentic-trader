@@ -286,14 +286,22 @@ on a timer, with nobody watching**. Three things make that work:
    earnings surprises) + Alpaca free (news). Paid consensus estimates deferred.
 3. ~~**Regime approach**~~ — RESOLVED: mechanical floor (ON, Schwab-computed) +
    agent overlay (OFF-only); **v1 deterministic-only**, agent overlay in v2.
-4. **Single edge vs. blend** — earnings-drift alone first (clean, testable) vs.
-   drift + price-momentum co-equal from day one. *Leaning single-edge-first.*
-5. **Trust before proof** — backtest the drift signal against Schwab history before
-   live vs. trade live-tiny and learn from fills. *Leaning backtest-first.*
+4. ~~**Single edge vs. blend**~~ — RESOLVED: **PEAD only** for v1 (clean, testable);
+   price-momentum as a co-signal is a later add.
+5. ~~**Trust before proof**~~ — RESOLVED: **backtest-first** (validate drift vs.
+   Schwab history before the $20; seeds outcome-tracking).
 6. **Verify depth** — single-pass research vs. full bull/bear/judge adversarial
-   layer.
-7. **Same-day catalyst entries** — act the morning after a beat vs. pure nightly
-   cadence for v1. *Leaning nightly-only v1* (drift persists for weeks).
+   layer. *(still open)*
+7. ~~**Same-day catalyst entries**~~ — RESOLVED: **nightly-only for v1** (drift
+   persists for weeks; same-day reaction is a later add).
+8. ~~**Universe**~~ — RESOLVED: **earnings-driven dynamic screen** (fresh reporters,
+   liquidity + quality filtered) **+ a handful of liquid ETFs** as *core exposure /
+   ballast* (not a PEAD edge). Codified in `config/strategy.toml`.
+
+> **Strategy is codified** in [`config/strategy.toml`](../config/strategy.toml) —
+> the single source of truth for risk gates, universe, PEAD signal thresholds,
+> trade management, and the regime floor. The `[risk]` table IS the Research
+> Store's validation mandate (`strategy.risk_mandate()`).
 
 ## Status
 
@@ -311,8 +319,8 @@ on a timer, with nobody watching**. Three things make that work:
       RH snapshot normalizer; confirmed/estimated tagging + revision log; verified live
 - [x] Build **Research Store** (`src/research_store/`) — file-memory, belief +
       journal, mandate-validated (≤10%/name, R:R ≥ 2:1); verified live
-- [ ] Codify the strategy into a **mandate config** (externalize `DEFAULT_MANDATE`
-      + universe + signal params) that the store + slow loop load
+- [x] Codify the strategy into a **mandate config** (`config/strategy.toml`) —
+      risk gates + universe + signal + regime; wired into the store; verified live
 - [ ] Build FRED macro adapter (`src/adapters/fred/`) + macro event calendar
       (FOMC/CPI dates) — cached + retry, supplementary  *(needs FRED_API_KEY)*
 - [ ] Slow loop (research → theses) + fast loop (theses → sized orders)
