@@ -16,6 +16,8 @@ Two kinds of source, by necessity:
   doesn't contribute (Finnhub-only), which is a graceful degrade, not an error.
 """
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from adapters.finnhub.client import get as finnhub_get
@@ -80,3 +82,59 @@ def load_rh_snapshot(path: Path = RH_SNAPSHOT) -> dict:
             "fiscal_period": rec.get("fiscal_period"),
         }
     return normalized
+
+
+def normalize_rh_entry(entry: dict) -> dict:
+    """Map one raw RH earnings-calendar entry to our normalized source shape.
+
+    RH raw shape (from the get_earnings_calendar MCP tool), verified live:
+      {"symbol","year","quarter","eps":{"estimate":"1.23","actual":None},
+       "report":{"date":"YYYY-MM-DD","timing":"am"|"pm"|None,"verified":bool}}
+    """
+    report = entry.get("report") or {}
+    eps = entry.get("eps") or {}
+    est = eps.get("estimate")
+    try:
+        est = float(est) if est is not None else None
+    except (TypeError, ValueError):
+        est = None
+    q, y = entry.get("quarter"), entry.get("year")
+    return {
+        "date": report.get("date"),
+        "session": _norm_session(report.get("timing")),
+        "confirmed": report.get("verified"),
+        "eps_estimate": est,
+        "fiscal_period": f"Q{q} {y}" if q and y else None,
+    }
+
+
+def write_rh_snapshot(raw_entries, *, as_of: str, path: Path = RH_SNAPSHOT) -> Path:
+    """Normalize raw RH earnings entries and atomically write the snapshot.
+
+    This is the ONE step the slow-loop agent performs for the calendar: it calls
+    the RH get_earnings_calendar MCP tool (agent-only), then hands the raw entry
+    list here. We map each entry, keep the nearest upcoming report per symbol, and
+    write the file the deterministic compiler reads. Pure Python → unit-testable
+    with a captured RH payload, and the compiler stays agent-free.
+    """
+    events: dict = {}
+    for entry in raw_entries:
+        symbol = (entry.get("symbol") or "").upper()
+        norm = normalize_rh_entry(entry)
+        if not symbol or not norm["date"]:
+            continue
+        cur = events.get(symbol)
+        if cur is None or norm["date"] < cur["date"]:  # keep nearest upcoming
+            events[symbol] = norm
+
+    payload = {"as_of": as_of, "count": len(events), "events": events}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return path
