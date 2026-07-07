@@ -50,15 +50,15 @@ def build_client(*, interactive_auth: bool) -> "schwabdev.Client":
             f"    python scripts/schwab_auth.py"
         )
 
+    # NB: do NOT pass call_on_auth here. When schwabdev is given that callback it
+    # uses the callback's RETURN VALUE as the pasted redirect URL — a print-only
+    # callback returns None and crashes the flow. With no callback and
+    # open_browser_for_auth=False, schwabdev prints the auth URL and reads the
+    # pasted redirect URL via input() — the headless flow we want.
     return schwabdev.Client(
         _require("SCHWAB_APP_KEY"),
         _require("SCHWAB_APP_SECRET"),
         os.environ.get("SCHWAB_CALLBACK_URL", "https://127.0.0.1"),
         tokens_db=db,
         open_browser_for_auth=False,  # headless / VPS friendly
-        call_on_auth=lambda url: print(
-            "\n>>> Open this URL, log in + approve, then copy the FULL "
-            "redirected URL from the address bar and paste it back here:\n"
-            f"{url}\n"
-        ),
     )
