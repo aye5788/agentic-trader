@@ -13,6 +13,8 @@ An agentic trading research → execution system. Deployable to a VPS.
 
 This repo currently implements the **Schwab research adapter** (first sensing source).
 
+📐 **Full architecture & rationale: [`docs/DESIGN.md`](docs/DESIGN.md)** (with diagram).
+
 ## Schwab adapter — scope
 
 The Schwab **developer** API exposes:
