@@ -82,6 +82,39 @@ before this touches money:
    - **Order cap:** rejects any single order >15% of account value.
    - **Whitelist:** only names in `config/universe.csv` + `etf_universe.csv`.
 
+## Dashboard (Cloudflare Tunnel + Access)
+
+A read-only monitor of the live account, served from the droplet and gated to you.
+
+```bash
+# 1. dashboard service (Flask, binds 127.0.0.1:8787 only — never exposed directly)
+.venv/bin/pip install -r requirements.txt          # picks up flask
+cp deploy/agentic-dashboard.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now agentic-dashboard
+curl -s localhost:8787 | head -c 200               # sanity: HTML comes back
+
+# 2. Cloudflare Tunnel — hides the droplet IP, free TLS, on your domain
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+  -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
+cloudflared tunnel login                            # browser: pick your domain
+cloudflared tunnel create agentic-dash
+cloudflared tunnel route dns agentic-dash dash.YOURDOMAIN.com
+# ~/.cloudflared/config.yml:
+#   tunnel: <tunnel-id>
+#   credentials-file: /root/.cloudflared/<tunnel-id>.json
+#   ingress:
+#     - hostname: dash.YOURDOMAIN.com
+#       service: http://127.0.0.1:8787
+#     - service: http_status:404
+cloudflared service install                         # run the tunnel as a service
+
+# 3. Cloudflare Access (Zero Trust dashboard, free) — REQUIRED, it's a money page:
+#    add an Access application for dash.YOURDOMAIN.com, policy = allow your email only.
+```
+
+The equity curve fills in from `scripts/log_equity.py`, which the fast loop runs
+daily — so history accrues one point per trading day from first run.
+
 ## What is NOT yet automated (know before unattended live)
 
 - **Nightly *exits-only* mode** — the slow loop currently re-ranks fully each run

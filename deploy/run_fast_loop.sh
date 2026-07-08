@@ -17,3 +17,5 @@ fi
 
 mkdir -p logs
 claude -p "$(cat prompts/fast_loop.md)"
+# record a daily equity point for the dashboard (best-effort; never fail the run)
+.venv/bin/python scripts/log_equity.py || true

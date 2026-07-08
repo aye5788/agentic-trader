@@ -1,0 +1,21 @@
+# systemd unit for the dashboard (Flask). Binds 127.0.0.1 ONLY — it is never
+# exposed directly; a Cloudflare Tunnel fronts it with TLS + Access auth.
+# install:
+#   cp deploy/agentic-dashboard.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now agentic-dashboard
+[Unit]
+Description=agentic-trader dashboard (Flask, localhost only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/agentic-trader
+Environment=HOME=/root
+ExecStart=/opt/agentic-trader/.venv/bin/python dashboard/app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

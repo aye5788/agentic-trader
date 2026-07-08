@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Agentic · Account Monitor</title>
+<style>
+  :root{
+    --ground:#f5f7fa;--surface:#fff;--surface-2:#eef1f6;--border:#dde2ea;
+    --text:#0f151d;--dim:#586374;--faint:#8b95a4;
+    --accent:#0e7f9b;--accent-soft:rgba(14,127,155,.12);
+    --pos:#137a3a;--neg:#c32a30;--warn:#8a6100;
+    --pos-soft:rgba(19,122,58,.12);--neg-soft:rgba(195,42,48,.12);--warn-soft:rgba(138,97,0,.14);
+    --shadow:0 1px 2px rgba(16,24,40,.04),0 4px 16px rgba(16,24,40,.05);
+    --ui:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --ground:#0a0d12;--surface:#111620;--surface-2:#161c27;--border:#232b38;
+    --text:#e7edf4;--dim:#9aa6b4;--faint:#68727f;
+    --accent:#38bdf8;--accent-soft:rgba(56,189,248,.14);
+    --pos:#3fb950;--neg:#f85149;--warn:#d6a327;
+    --pos-soft:rgba(63,185,80,.15);--neg-soft:rgba(248,81,73,.15);--warn-soft:rgba(214,163,39,.16);
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 6px 22px rgba(0,0,0,.35);}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--text);font-family:var(--ui);-webkit-font-smoothing:antialiased;line-height:1.5}
+  .wrap{max-width:1220px;margin:0 auto;padding:28px 24px 64px}
+  .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .eyebrow{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);font-weight:600}
+  header.top{display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start;justify-content:space-between;padding-bottom:22px;border-bottom:1px solid var(--border);margin-bottom:24px}
+  .acct .name{display:flex;align-items:baseline;gap:10px;margin-top:4px}
+  .acct h1{font-size:15px;font-weight:650;margin:0}
+  .acct .num{font-size:12px;color:var(--faint)}
+  .value{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:40px;font-weight:600;letter-spacing:-.02em;margin:10px 0 2px;line-height:1}
+  .delta{font-size:13px;color:var(--dim)}
+  .status{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:flex-end;max-width:360px}
+  .asof{width:100%;text-align:right;font-size:11px;color:var(--faint);margin-top:6px}
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;letter-spacing:.03em;padding:5px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface-2);color:var(--dim);white-space:nowrap}
+  .pill .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+  .pill.on{color:var(--pos);background:var(--pos-soft);border-color:transparent}
+  .pill.off{color:var(--neg);background:var(--neg-soft);border-color:transparent}
+  .pill.live{color:var(--accent);background:var(--accent-soft);border-color:transparent}
+  .pill.warn{color:var(--warn);background:var(--warn-soft);border-color:transparent}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow)}
+  .card .hd{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;border-bottom:1px solid var(--border)}
+  .card .hd h2{font-size:13px;font-weight:650;margin:0}
+  .card .hd .meta{font-size:12px;color:var(--faint)}
+  .hero{margin-bottom:20px}
+  .chartwrap{position:relative;padding:14px 8px 8px}
+  canvas{display:block;width:100%;height:230px}
+  .chart-note{position:absolute;top:16px;right:18px;font-size:11px;color:var(--faint);background:var(--surface);padding:2px 8px;border-radius:6px;border:1px solid var(--border)}
+  .grid{display:grid;grid-template-columns:1.72fr 1fr;gap:20px;align-items:start}
+  @media (max-width:880px){.grid{grid-template-columns:1fr}}
+  .tablewrap{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px;min-width:560px}
+  thead th{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;padding:10px 12px;border-bottom:1px solid var(--border)}
+  thead th:first-child,tbody td:first-child{text-align:left}
+  tbody td{padding:10px 12px;text-align:right;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:var(--surface-2)}
+  .tkr{font-family:var(--mono);font-weight:600;font-size:13px}
+  .sub{display:block;font-size:10.5px;color:var(--faint);font-weight:400}
+  .tag{font-size:10px;font-weight:600;letter-spacing:.04em;padding:2px 7px;border-radius:5px;background:var(--surface-2);color:var(--dim)}
+  .tag.etf{color:var(--accent);background:var(--accent-soft)}
+  .rr{font-family:var(--mono);color:var(--pos);font-weight:600}
+  .mo{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+  .mo .bar{width:52px;height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden}
+  .mo .bar i{display:block;height:100%;background:var(--accent)}
+  .mo span{font-family:var(--mono);font-size:12px;color:var(--dim);width:30px;text-align:right}
+  .st{font-size:11px;font-weight:600}.st.held{color:var(--pos)}.st.pending{color:var(--warn)}
+  aside{display:flex;flex-direction:column;gap:20px}
+  .rows{padding:6px 18px 14px}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--border)}
+  .row:last-child{border-bottom:none}
+  .row .k{font-size:12.5px;color:var(--dim)}
+  .row .v{font-size:12.5px;font-weight:600;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .meter{padding:12px 18px 4px}
+  .meter .lab{display:flex;justify-content:space-between;font-size:12px;color:var(--dim)}
+  .meter .lab b{color:var(--text);font-family:var(--mono);font-weight:600}
+  .gauge{width:100%;height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden;margin-top:7px}
+  .gauge i{display:block;height:100%}
+  .feed{padding:6px 18px 12px}
+  .ev{display:flex;gap:11px;padding:11px 0;border-bottom:1px solid var(--border)}
+  .ev:last-child{border-bottom:none}
+  .ev .ic{flex:0 0 auto;width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font-size:13px;background:var(--surface-2);margin-top:1px}
+  .ev.ok .ic{background:var(--pos-soft);color:var(--pos)}
+  .ev.info .ic{background:var(--accent-soft);color:var(--accent)}
+  .ev.warn .ic{background:var(--warn-soft);color:var(--warn)}
+  .ev .bd{flex:1;min-width:0}
+  .ev .t{font-size:12.5px;font-weight:600}
+  .ev .d{font-size:11.5px;color:var(--dim);margin-top:1px}
+  .ev .ts{font-size:10.5px;color:var(--faint);white-space:nowrap;margin-top:1px}
+  .empty{padding:22px 18px;color:var(--faint);font-size:12.5px;text-align:center}
+  footer{margin-top:26px;font-size:11px;color:var(--faint);text-align:center;line-height:1.7}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="acct">
+      <span class="eyebrow">Momentum book · Robinhood cash</span>
+      <div class="name"><h1 id="acctName">Agentic</h1><span class="num mono" id="acctNum">••••4924</span></div>
+      <div class="value" id="acctValue">—</div>
+      <div class="delta" id="acctDelta"></div>
+    </div>
+    <div class="status" id="statusPills"></div>
+  </header>
+
+  <section class="card hero">
+    <div class="hd"><h2>Account value</h2><span class="meta" id="equityMeta"></span></div>
+    <div class="chartwrap"><span class="chart-note" id="chartNote"></span><canvas id="eq"></canvas></div>
+  </section>
+
+  <div class="grid">
+    <main class="card">
+      <div class="hd"><h2>Holdings</h2><span class="meta" id="holdMeta"></span></div>
+      <div class="tablewrap">
+        <table><thead><tr>
+          <th>Ticker</th><th>Wt</th><th>Value</th><th>Entry</th><th>Stop</th><th>R:R</th><th>Momentum</th><th>Type</th>
+        </tr></thead><tbody id="rows"></tbody></table>
+      </div>
+    </main>
+    <aside>
+      <section class="card"><div class="hd"><h2>Guardrails</h2><span class="meta">Layer 5</span></div>
+        <div class="meter"><div class="lab"><span>Drawdown from peak</span><b id="ddLab"></b></div><div class="gauge"><i id="ddBar"></i></div></div>
+        <div class="rows" id="guardRows"></div>
+      </section>
+      <section class="card"><div class="hd"><h2>Regime floor</h2><span class="meta">mechanical</span></div>
+        <div class="rows" id="regimeRows"></div>
+      </section>
+      <section class="card"><div class="hd"><h2>Recent activity</h2><span class="meta">journal</span></div>
+        <div class="feed" id="feed"></div>
+      </section>
+    </aside>
+  </div>
+  <footer><div>dual-momentum-v1 · equities only, options off · deterministic signal</div>
+    <div id="gen"></div></footer>
+</div>
+
+<script>
+const DATA = __DASHBOARD_DATA__;
+const fmt=(n,d=2)=>(n==null?"—":Number(n).toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d}));
+const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;};
+
+// header
+document.getElementById("acctName").textContent=DATA.account.nickname||"Agentic";
+document.getElementById("acctNum").textContent=DATA.account.masked||"";
+document.getElementById("acctValue").textContent="$"+fmt(DATA.account.value);
+document.getElementById("acctDelta").innerHTML=
+  `invested $${fmt(DATA.account.invested)} · cash $${fmt(DATA.account.cash)}`;
+const eq=(DATA.equity||[]).filter(p=>p.value!=null);
+if(eq.length>1){const first=eq[0].value,last=eq[eq.length-1].value,pct=first?(last/first-1)*100:0;
+  document.getElementById("acctDelta").innerHTML+=
+    ` · <b style="color:var(--${pct>=0?'pos':'neg'})">${pct>=0?'+':''}${pct.toFixed(1)}% since ${eq[0].date}</b>`;}
+
+const pills=[];
+const reg=(DATA.regime&&DATA.regime.status)||"unknown";
+pills.push(`<span class="pill ${reg==='on'?'on':reg==='off'?'off':''}"><span class="dot"></span>REGIME ${reg.toUpperCase()}</span>`);
+pills.push(DATA.flags.live_approved
+  ?`<span class="pill live"><span class="dot"></span>LIVE</span>`
+  :`<span class="pill warn"><span class="dot"></span>PAUSED</span>`);
+pills.push(DATA.flags.kill_switch
+  ?`<span class="pill off"><span class="dot"></span>KILL-SWITCH ON</span>`
+  :`<span class="pill"><span class="dot"></span>KILL-SWITCH CLEAR</span>`);
+document.getElementById("statusPills").innerHTML=pills.join("")+
+  `<div class="asof mono">as of ${DATA.asof||"—"} · refreshed ${(DATA.generated||"").replace('T',' ').replace('+00:00','')} UTC</div>`;
+
+// holdings
+const rows=document.getElementById("rows");
+(DATA.holdings||[]).forEach(h=>{
+  const tr=el("tr");
+  tr.innerHTML=`<td><span class="tkr">${h.ticker}</span></td>
+    <td class="mono">${fmt(h.weight*100)}%</td>
+    <td class="mono">$${fmt(h.value)}</td>
+    <td class="mono">${fmt(h.entry)}</td>
+    <td class="mono">${fmt(h.stop)}</td>
+    <td class="rr">${h.rr!=null?fmt(h.rr):"—"}</td>
+    <td><div class="mo"><div class="bar"><i style="width:${Math.round((h.score||0)*100)}%"></i></div><span>${h.score!=null?Number(h.score).toFixed(2):"—"}</span></div></td>
+    <td><span class="tag ${h.type==='etf'?'etf':''}">${(h.type||'stock').toUpperCase()}</span></td>`;
+  rows.appendChild(tr);
+});
+document.getElementById("holdMeta").textContent=`${(DATA.holdings||[]).length} names · ${DATA.holdings&&DATA.holdings.some(h=>h.state==='held')?'live':'target'}`;
+
+// guardrails
+const g=DATA.guardrails||{};const dd=(g.drawdown||0)*100,lim=(g.dd_limit||.25)*100;
+document.getElementById("ddLab").textContent=`${dd.toFixed(1)}% / ${lim.toFixed(0)}%`;
+const ddi=document.getElementById("ddBar");ddi.style.width=Math.min(100,Math.abs(dd)/lim*100||2)+"%";
+ddi.style.background=Math.abs(dd)>=lim?"var(--neg)":Math.abs(dd)>lim*.6?"var(--warn)":"var(--pos)";
+document.getElementById("guardRows").innerHTML=
+  `<div class="row"><span class="k">Max order size</span><span class="v">$${fmt(g.max_order)} · ${Math.round((g.max_order_pct||0)*100)}%</span></div>
+   <div class="row"><span class="k">Live trading</span><span class="v" style="color:var(--${DATA.flags.live_approved?'pos':'warn'})">${DATA.flags.live_approved?'ARMED':'PAUSED'}</span></div>
+   <div class="row"><span class="k">Kill-switch</span><span class="v">${DATA.flags.kill_switch?'ENGAGED':'clear'}</span></div>
+   <div class="row"><span class="k">Cooldown (stopped-out)</span><span class="v">${(g.cooldown&&g.cooldown.length)?g.cooldown.join(', '):'none'}</span></div>`;
+
+// regime
+const r=DATA.regime||{};
+document.getElementById("regimeRows").innerHTML=
+  `<div class="row"><span class="k">Status</span><span class="v" style="color:var(--${reg==='on'?'pos':'neg'})">${reg.toUpperCase()}</span></div>
+   <div class="row"><span class="k">Floor</span><span class="v">${r.floor||'SPY>50DMA'}</span></div>
+   <div class="row"><span class="k">Notes</span><span class="v" style="color:var(--faint);font-weight:400">${r.notes||''}</span></div>`;
+
+// activity feed
+const feed=document.getElementById("feed");
+const acts=DATA.activity||[];
+if(!acts.length){feed.innerHTML=`<div class="empty">No journal events yet.</div>`;}
+acts.forEach(a=>{
+  let cls="info",ic="•",t=a.event||"event",d="";
+  if(a.event==="execution"){cls="ok";ic="✓";t=`Filled — ${a.n||(a.fills||[]).length} order(s)`;
+    d=(a.fills||[]).map(f=>`${(f.side||'').toUpperCase()} ${f.symbol} $${f.amount||f.quantity_or_amount||''}`).join(" · ");}
+  else if(a.event==="exit_signal"){cls="warn";ic="⚠";const tr=(a.triggers||[])[0]||{};
+    t=`${(tr.reason||'exit').toUpperCase()} signal — ${(a.triggers||[]).map(x=>x.symbol).join(', ')}`;
+    d=`${a.armed?'executed':'alert-only'} @ ${tr.price||''}`;}
+  else if(a.event==="product"||a.event==="write"){cls="info";ic="✎";t="Book written";d=`regime ${(a.regime&&a.regime.status)||''}`;}
+  else if(a.event==="outcome"){cls="info";ic="◷";t=`Outcome — ${a.symbol||''}`;}
+  const ts=(a.ts||"").replace('T',' ').slice(5,16);
+  feed.appendChild(el("div","ev "+cls,`<div class="ic">${ic}</div><div class="bd"><div class="t">${t}</div><div class="d">${d}</div></div><div class="ts">${ts}</div>`));
+});
+
+// equity curve
+const eqMeta=document.getElementById("equityMeta"),note=document.getElementById("chartNote");
+eqMeta.textContent="70 / 30 book & sleeve · weekly rebalance";
+const series=eq.map(p=>p.value);
+if(series.length<2){note.textContent="collecting — live history begins now";}
+else{note.textContent=`${series.length} days`;}
+const cv=document.getElementById("eq");
+function css(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
+function draw(){
+  const dpr=window.devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;
+  cv.width=w*dpr;cv.height=h*dpr;const c=cv.getContext("2d");c.scale(dpr,dpr);c.clearRect(0,0,w,h);
+  const pad={l:8,r:8,t:14,b:22};
+  const data=series.length?series:[DATA.account.value||0];
+  const n=data.length;const lo=Math.min(...data)*0.999,hi=Math.max(...data)*1.001||1;
+  const X=i=>pad.l+(w-pad.l-pad.r)*(n<2?0.5:i/(n-1));
+  const Y=v=>pad.t+(h-pad.t-pad.b)*(1-(v-lo)/((hi-lo)||1));
+  const acc=css("--accent"),bd=css("--border"),fa=css("--faint");
+  c.strokeStyle=bd;c.lineWidth=1;c.font="10px "+css("--mono");c.fillStyle=fa;
+  for(let k=0;k<=3;k++){const v=lo+(hi-lo)*k/3,y=Y(v);c.globalAlpha=.5;c.beginPath();c.moveTo(pad.l,y);c.lineTo(w-pad.r,y);c.stroke();c.globalAlpha=1;c.fillText("$"+v.toFixed(2),pad.l+2,y-3);}
+  if(n>=2){
+    c.beginPath();c.moveTo(X(0),Y(data[0]));data.forEach((s,i)=>c.lineTo(X(i),Y(s)));
+    c.lineTo(X(n-1),h-pad.b);c.lineTo(X(0),h-pad.b);c.closePath();
+    const gr=c.createLinearGradient(0,pad.t,0,h-pad.b);gr.addColorStop(0,acc+"38");gr.addColorStop(1,acc+"00");c.fillStyle=gr;c.fill();
+    c.beginPath();data.forEach((s,i)=>i?c.lineTo(X(i),Y(s)):c.moveTo(X(i),Y(s)));c.strokeStyle=acc;c.lineWidth=2;c.lineJoin="round";c.stroke();
+  }
+  c.beginPath();c.arc(X(n-1),Y(data[n-1]),3.5,0,7);c.fillStyle=acc;c.fill();c.strokeStyle=css("--surface");c.lineWidth=2;c.stroke();
+}
+draw();let raf;addEventListener("resize",()=>{cancelAnimationFrame(raf);raf=requestAnimationFrame(draw);});
+document.getElementById("gen").textContent="live from the Research Store · auto-refreshes on reload";
+</script>
+</body>
+</html>
