@@ -72,6 +72,10 @@ config/universe.csv     Fixed 150-name momentum universe (human-seed reconciled
                         with dollar-volume liquidity fill). `flag` col marks
                         adr/micro/spec/fresh-ipo model-caveats. Referenced by
                         [universe] in strategy.toml.
+config/etf_universe.csv 18-ETF dual-momentum rotation sleeve (11 SPDR sectors +
+                        broad + intl + defensive). A SECOND parallel engine to the
+                        single-name book; defensive assets rank in-sleeve as the
+                        built-in off-switch. Referenced by [etf_sleeve].
 src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
 src/research_store/     Research Store — validated slow→fast handoff (belief +
                         journal). write_product enforces the [risk] mandate.

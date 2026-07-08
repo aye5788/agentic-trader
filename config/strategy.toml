@@ -47,11 +47,24 @@ mode      = "fixed_list"
 source    = "config/universe.csv"   # 150 US single names; `flag` col marks
                                     #   adr/micro/spec/fresh-ipo model-caveats
 size      = 150
-# ETFs: intentionally NOT in the ranked single-name list — a broad ETF almost
-# never out-momentums an individual winner, so it would sit as a dead slot.
-# Their role in a dual-momentum design (defensive off-switch leg? sector-rotation
-# sleeve? core ballast?) is an OPEN decision — see docs/DESIGN.md open items.
-# core_etfs = []   # TBD
+# ETFs are NOT mixed into this single-name rank (a broad basket never
+# out-momentums an individual winner -> dead slot). They run as their own
+# parallel rotation sleeve, below.
+
+# --- ETF rotation sleeve ----------------------------------------------------
+# A SECOND, self-contained dual-momentum engine (the classic footprint): rank
+# the sleeve by the same hybrid logic, hold the top few that also pass absolute
+# trend. Defensive assets (bonds/gold) sit INSIDE the rank -> in risk-off they
+# win the ranking and become the destination automatically (built-in off-switch;
+# no separate cash-vs-bond rule). Members + roles: config/etf_universe.csv.
+[etf_sleeve]
+enabled  = true
+source   = "config/etf_universe.csv"
+members  = 18            # 11 SPDR sectors + 2 broad (SPY,IWM) + 2 intl (EFA,EEM)
+                         #   + 3 asset/defensive (GLD,TLT,AGG)
+hold_top = 4             # concurrent ETF holdings (tune with the single-name book)
+# NOTE: capital split between this sleeve and the single-name book is a separate
+# open axis (portfolio construction) — not set here yet.
 
 # --- Regime floor (mechanical ON switch; agent overlay deferred to v2) -------
 [regime]

@@ -1,0 +1,19 @@
+ticker,role,name,as_of
+XLK,sector,Technology,2026-07-08
+XLF,sector,Financials,2026-07-08
+XLE,sector,Energy,2026-07-08
+XLV,sector,Health Care,2026-07-08
+XLI,sector,Industrials,2026-07-08
+XLY,sector,Consumer Discretionary,2026-07-08
+XLP,sector,Consumer Staples,2026-07-08
+XLU,sector,Utilities,2026-07-08
+XLB,sector,Materials,2026-07-08
+XLRE,sector,Real Estate,2026-07-08
+XLC,sector,Communication Services,2026-07-08
+SPY,broad,S&P 500,2026-07-08
+IWM,broad,Russell 2000 small-cap,2026-07-08
+EFA,intl,Developed ex-US,2026-07-08
+EEM,intl,Emerging markets,2026-07-08
+GLD,asset_defensive,Gold,2026-07-08
+TLT,asset_defensive,20+yr Treasuries,2026-07-08
+AGG,asset_defensive,US Aggregate Bond,2026-07-08
