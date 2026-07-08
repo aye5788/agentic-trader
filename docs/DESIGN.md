@@ -352,10 +352,17 @@ on a timer, with nobody watching**. Three things make that work:
       Sweep verdict: **edge is robust** (Sharpe 0.97–1.33 across 16 configs, all beat
       SPY). ⚠️ **survivorship-biased upper bound** (today's 150 names run over history)
       + no intra-week stops modeled — NOT a forecast yet.
-- [ ] **Point-in-time universe rebuild** — kill survivorship bias ← next. Dead-name
-      price history is free/available (Alpaca IEX bars serve delisted tickers, e.g.
-      SIVB/BBBY); the open problem is reconstructing historical liquid-universe
-      membership (which ~150 names were most-traded as-of each date, incl. since-dead).
+- [x] **Point-in-time universe rebuild** — survivorship bias killed. Pool of 816
+      (`scripts/build_pool.py` → `config/pit_pool.csv`: S&P-500 PIT members + our
+      150 + ETFs + hand-listed dead names) pulled from Alpaca IEX
+      (`scripts/fetch_pool.py`, the only free feed serving delisted names); PIT
+      backtest (`scripts/backtest_pit.py`) ranks top-150 by trailing $-vol per date.
+      **Honest result (matched window/data 2021-08..2026-07): CAGR 23.2% / Sharpe
+      0.97 vs SPY 12.4% / 0.80** — the edge survives. Biased fixed-150 over the same
+      window was 37.7%/1.25, so survivorship inflated CAGR ~14.5pts/yr. Risk
+      framework validated: held-into-death=0 (collapsing names ejected by the
+      absolute gate + trend filter before delisting). Caveats: 5yr window (Alpaca
+      free floor), noisy IEX-slice volume for ranking, no intra-week stops modeled.
 - [ ] Macro event calendar (FOMC/CPI dates) — deterministic event-risk feed
 - [ ] Slow loop (research → theses) + fast loop (theses → sized orders)
 - [ ] Governance + orchestration (incl. mechanical regime floor)

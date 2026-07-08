@@ -93,6 +93,18 @@ scripts/backtest.py     Weekly walk-forward sim of the 70/30 book/sleeve vs SPY.
 scripts/sweep.py        One-knob-at-a-time sensitivity sweep. Verdict: edge robust
                         (Sharpe 0.97-1.33 across 16 configs). Read the spread, not
                         the level — every row carries the same survivorship caveat.
+scripts/build_pool.py   Assemble config/pit_pool.csv (816) = S&P-500 point-in-time
+                        members + our 150 + ETFs + hand-listed dead names. The
+                        survivorship-free candidate pool for the PIT backtest.
+scripts/fetch_pool.py   Pull close + dollar-volume for the pool from Alpaca IEX
+                        (only free feed serving DELISTED names). 2020-07 floor;
+                        IEX volume = noisy-but-consistent liquidity proxy.
+scripts/backtest_pit.py SURVIVORSHIP-CORRECTED backtest: ranks top-150 by trailing
+                        $-vol AS OF each date from the pool (dead names included).
+                        Honest result: CAGR 23.2% / Sharpe 0.97 vs SPY 12.4%/0.80
+                        (2021-2026). This is the number to trust, not backtest.py's
+                        biased 34%. held-into-death=0 (risk framework works).
+config/pit_pool.csv     816-name survivorship-free pool (ticker, source, in_sp500_ever).
 src/research_store/     Research Store — validated slow→fast handoff (belief +
                         journal). write_product enforces the [risk] mandate.
 src/adapters/alpaca/    Alpaca news client + get_news (data-only, no trading)
