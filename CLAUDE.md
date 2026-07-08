@@ -66,8 +66,8 @@ config/strategy.toml    CODIFIED STRATEGY — single source of truth: risk gates
                         universe, signal, trade management, regime floor.
                         Tune the strategy HERE, not in code. `[risk]` = the store's
                         validation mandate. Load via src/strategy.py.
-                        NOTE: edge is migrating PEAD -> momentum; [signal]/[meta]
-                        still PEAD-era pending remaining design axes.
+                        Edge = momentum (settled); [signal]/[meta]/[portfolio] all
+                        momentum. PEAD is fully retired — see docs/DESIGN.md.
 config/universe.csv     Fixed 150-name momentum universe (human-seed reconciled
                         with dollar-volume liquidity fill). `flag` col marks
                         adr/micro/spec/fresh-ipo model-caveats. Referenced by

@@ -25,7 +25,7 @@ max_holdings        = 10          # concentration guard
 
 # --- Trade management (IBD-SwingTrader-derived), applied per thesis ----------
 [trade_management]
-stop_style   = "volatility_adjusted"  # below post-earnings low / ATR mult (NOT flat 2-3%)
+stop_style   = "volatility_adjusted"  # below recent swing low / ATR mult (NOT flat 2-3%)
 target_tiers = [0.05, 0.10]           # scale-out at ~+5% then ~+10%
 ma_exit_days = 21                     # exit if close < 21-day MA, even pre-target
 no_chase     = true                   # only enter within the thesis entry_zone
@@ -88,5 +88,5 @@ agent_overlay  = false   # v1 = deterministic-only; qualitative veto in v2
 
 # --- How much proof before / during live trading ----------------------------
 [proof]
-mode          = "backtest_first"  # validate drift vs Schwab history before the $20
+mode          = "backtest_first"  # validate the signal vs history before the $20
 entry_cadence = "nightly"          # v1: no same-day catalyst reaction

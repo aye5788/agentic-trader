@@ -36,9 +36,8 @@ LAYER 4  EXECUTION       Robinhood MCP: review -> place  (thin, dumb, reliable)
 > (banded to 15) + top-4 ETF sleeve; weekly rebalance, nightly risk exits;
 > off-switch = cash; **70/30 book/sleeve** capital split. The operational spec —
 > written for the deployed agent — is [`docs/STRATEGY.md`](STRATEGY.md); params
-> are in `config/strategy.toml`. **The PEAD prose in this section below is
-> superseded** and kept only for design-history context; earnings-calendar use
-> demotes from *primary signal* to *defensive event-awareness*. Infra (Schwab
+> are in `config/strategy.toml`. Earnings-calendar use demotes from *primary
+> signal* (the old PEAD first pass) to *defensive event-awareness*. Infra (Schwab
 > price history, Research Store, regime gate, config loader) carries over intact.
 
 **Horizon: swing (multi-day to a few weeks).** Chosen for structural fit, not
@@ -49,26 +48,29 @@ and in any case it only ever applied to *margin* accounts. Ours is a **cash
 account**, so the sole intraday constraint is **T+1 settlement** — a non-issue for
 a days-to-weeks hold.
 
-**Edge: PEAD-anchored (post-earnings-announcement drift).** Horizon ≠ edge —
-"swing" is how long we hold, not why we profit. The signal stack, each source with
-exactly one job:
+**Edge: hybrid dual momentum.** Horizon ≠ edge — "swing" is how long we hold, not
+why we profit. Two independent momentum signals must **agree** to hold a name: it
+is strong **relative to its peers** (cross-sectional rank) **and** in its **own
+uptrend** (absolute-trend filter). The signal stack, each source with one job:
 
 | Signal | Role | Source |
 | ------ | ---- | ------ |
-| **Post-earnings drift (PEAD)** | **primary edge** — beats/misses drift for weeks | Finnhub surprises + RH earnings |
-| Estimate-revision momentum | confirming edge | Finnhub recommendation *trends* |
-| Price momentum / structure | *timing* of entry & exit | Schwab price history |
-| Fundamental quality | *universe filter* (don't swing garbage) | Schwab + Finnhub metrics |
+| **Relative-rank momentum** (risk-adj 12mo return + trend) | **primary edge** — winners keep winning over 6–12mo | Schwab price history |
+| **Absolute-trend filter** (close/SMA200; 12mo return > 0) | the **off-switch** — long-only rotates to cash when the trend breaks | Schwab price history |
+| ETF rotation sleeve (same signal) | parallel engine; defensive assets rank in as the risk-off destination | Schwab price history |
+| Fundamental quality | light universe hygiene (the 150 are already liquid large-caps) | Schwab + Finnhub metrics |
+| Earnings calendar | **defensive** event-awareness — don't hold a swing into a print | Finnhub + RH |
 | News / catalysts | context + risk flag | Alpaca news |
 
 **Instrument: equities-first** (fractional / dollar-notional). Options Level 2
 (long-only) exists on RH but is **deferred** — theta bleed fights a multi-week
-hold; prove the equity logic first, add options later only for tightly-timed
-post-earnings plays where drift outpaces decay.
+hold; prove the equity logic first, add options later only if a clear edge
+justifies it.
 
-**Validate before trust.** PEAD is well-documented, but *our* implementation isn't
-proven until backtested against Schwab history and tracked via outcome feedback
-(see Research Store). Lean: backtest the drift signal before it touches live money.
+**Validate before trust.** Momentum is the best-evidenced cross-sectional equity
+anomaly, but *our* implementation isn't proven until backtested against history
+and tracked via outcome feedback (see Research Store). Backtest the signal — full
+trade management included — before it touches live money.
 
 ## The two-clock model (the key decoupling)
 
@@ -108,8 +110,8 @@ stay coherent as history grows past any single context window.
   keep**. The store is a *maintained set of beliefs*, not an accumulation. (This is
   what the bull/bear adversarial step is *for*.)
 - **Staleness is mechanically detectable, not remembered.** Every record carries
-  `as_of` + evidence `provenance` + a `review_by` trigger (for PEAD: "next
-  earnings" / "drift window elapsed"), so rot is *visible* without the model
+  `as_of` + evidence `provenance` + a `review_by` trigger (for momentum: "weekly
+  rebalance due" / "rank fell below the band"), so rot is *visible* without the model
   recalling it.
 - **Outcome tracking closes the loop.** Each thesis points to its `outcome` once
   known → confidence is calibrated against reality, not internal consistency.
@@ -181,14 +183,14 @@ kill-switch. Persisted so it survives across runs.
 
 ## Trade management & risk rules (IBD-SwingTrader-derived)
 
-The *signal* is ours (PEAD); the *trade management* is adapted from IBD
+The *signal* is ours (momentum); the *trade management* is adapted from IBD
 SwingTrader, whose entry/exit discipline is edge-agnostic and battle-tested. Each
 rule becomes a hard field on the thesis record and/or a governance guardrail:
 
 | Rule | Setting | Where enforced |
 | ---- | ------- | -------------- |
 | Entry zone | defined buy-price range; never chase above it | `entry_zone`; fast loop only buys if live price in-zone |
-| Stop loss | defined + enforced, **volatility-adjusted** (below post-earnings low / ATR mult) — *not* IBD's flat 2–3% (too tight for earnings names) | `stop`; governance auto-exits on breach |
+| Stop loss | defined + enforced, **volatility-adjusted** (below recent swing low / ATR mult) — *not* IBD's flat 2–3% (too tight for volatile momentum names) | `stop`; governance auto-exits on breach |
 | Profit targets | tiered (IBD ≈ 5% / 10%); scale out | `targets: [t1, t2]` |
 | Moving-average exit | exit if close < short-term MA (e.g. 21-day), even if stop not hit | daily fast-loop check (Schwab price history) |
 | Position size | ≤ **10% / name** (IBD "full" = 10%; most trades ½–¾) | `target_weight`, capped in guardrails |
@@ -199,8 +201,9 @@ bad-geometry trade, so quality can't silently rot.
 
 ## Regime gate (macro) — mechanical floor + agent overlay
 
-Both PEAD and IBD-style swing have **negative expectancy in down/sideways tape**,
-so new entries are gated on market regime. The design is **asymmetric**:
+Long-only momentum and IBD-style swing both have **negative expectancy in
+down/sideways tape**, so new entries are gated on market regime. The design is
+**asymmetric**:
 
 - **Mechanical floor = the ON switch (backtestable, non-negotiable).** No new
   entries unless the broad market passes a mechanical trend test (SPX/QQQ > 50-day
@@ -227,8 +230,9 @@ backtestability):
   Tags `confirmed` vs `estimated` (never infers confirmed from agreement;
   disagreement → estimated + earliest/conservative date), and **logs date
   revisions** (a pushed-back report skews negative). Never reads the clock (caller
-  passes `as_of`/`today`) → reproducible + backtestable. Drives both the event-risk
-  veto (`reports_within`) and PEAD entry timing (`fresh_reports`). Verified live.
+  passes `as_of`/`today`) → reproducible + backtestable. Under momentum it drives
+  the **defensive** event-risk veto (`reports_within` — don't hold a swing into a
+  print); the offense path (`fresh_reports`, a PEAD relic) is dormant. Verified live.
 - **Macro event calendar** (planned, with FRED) — FOMC (static list) + FRED release
   dates (CPI/jobs) for the macro-side event veto. Deterministic, zero tokens.
 - **v1 = deterministic-only regime** (mechanical floor + calendar). Defer the agent
@@ -302,12 +306,12 @@ on a timer, with nobody watching**. Three things make that work:
 4. ~~**Single edge vs. blend**~~ — RESOLVED (revised): **hybrid dual momentum**
    is the edge (relative rank + absolute trend). PEAD was the first pass and was
    dropped; earnings data demotes to defensive event-awareness. See STRATEGY.md.
-5. ~~**Trust before proof**~~ — RESOLVED: **backtest-first** (validate drift vs.
-   Schwab history before the $20; seeds outcome-tracking).
+5. ~~**Trust before proof**~~ — RESOLVED: **backtest-first** (validate the signal
+   vs. history before the $20; seeds outcome-tracking).
 6. **Verify depth** — single-pass research vs. full bull/bear/judge adversarial
    layer. *(still open)*
-7. ~~**Same-day catalyst entries**~~ — RESOLVED: **nightly-only for v1** (drift
-   persists for weeks; same-day reaction is a later add).
+7. ~~**Same-day catalyst entries**~~ — RESOLVED: **nightly-only for v1** (momentum
+   trends persist for weeks; same-day reaction is a later add).
 8. ~~**Universe**~~ — RESOLVED (revised for momentum): **fixed 150 single names**
    (`config/universe.csv`, human-seed reconciled with dollar-volume fill) **+ an
    18-ETF dual-momentum sleeve** (`config/etf_universe.csv`), run as two parallel
@@ -317,7 +321,7 @@ on a timer, with nobody watching**. Three things make that work:
    in-sleeve as the built-in off-switch destination.
 
 > **Strategy is codified** in [`config/strategy.toml`](../config/strategy.toml) —
-> the single source of truth for risk gates, universe, PEAD signal thresholds,
+> the single source of truth for risk gates, universe, momentum signal params,
 > trade management, and the regime floor. The `[risk]` table IS the Research
 > Store's validation mandate (`strategy.risk_mandate()`).
 
@@ -330,7 +334,7 @@ on a timer, with nobody watching**. Three things make that work:
 - [x] Wrap remaining Schwab endpoints — quote, price history, option chain,
       movers, market hours (all verified live)
 - [x] Wire Alpaca news into the sensing layer (repo adapter, verified live)
-- [x] Strategy foundation decided — PEAD-anchored swing, equities-first, cash acct
+- [x] Strategy foundation decided — momentum swing (pivoted from a PEAD first pass), equities-first, cash acct
 - [x] Trade-management + risk rules speced — IBD-derived, vol-adjusted stops, R:R gate
 - [x] Regime-gate design — mechanical floor + agent overlay; FRED vetted as supplement
 - [x] Build **earnings event calendar** (`src/event_calendar/`) — Finnhub spine +
