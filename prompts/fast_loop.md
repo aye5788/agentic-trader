@@ -24,7 +24,8 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    quantity × price. Total account value from `get_portfolio.total_value`.
 4. **Snapshot.** Write `research_store/rh/positions.json`:
    `{"account_number":"<num>","account_value":<total>,"positions":{"SYM":<mktval>,...},"as_of":"<YYYY-MM-DD>"}`
-5. **Plan.** Run `python scripts/fast_loop.py`. It applies governance (drawdown
+5. **Plan.** Run `.venv/bin/python scripts/fast_loop.py` (the project venv — the
+   system `python` is too old for this code). It applies governance (drawdown
    halt, per-order caps, whitelist) and writes `research_store/rh/order_plan.json`
    with `approved`, `blocked`, and the `live_approved` flag.
 6. **Gate.** Read `order_plan.json`.
