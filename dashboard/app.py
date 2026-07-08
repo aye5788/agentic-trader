@@ -4,12 +4,14 @@ behind a Cloudflare Tunnel + Access (auth-gated), see docs/DEPLOY.md.
 
     .venv/bin/python dashboard/app.py           # serve on 127.0.0.1:8787
 """
+import hmac
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask
+from flask import Flask, Response, request
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -17,9 +19,31 @@ import strategy as strat                              # noqa: E402
 from research_store import read_current               # noqa: E402
 from research_store.validate import reward_risk       # noqa: E402
 
+try:                                                  # load DASH_USER/DASH_PASS from .env
+    from dotenv import load_dotenv
+    load_dotenv(REPO / ".env")
+except Exception:
+    pass
+
 RS = REPO / "research_store"
 TEMPLATE = (Path(__file__).parent / "dashboard.html")
+DASH_USER = os.environ.get("DASH_USER", "admin")
+DASH_PASS = os.environ.get("DASH_PASS")               # unset -> serve nothing (fail closed)
 app = Flask(__name__)
+
+
+@app.before_request
+def _require_auth():
+    """Password-gate the whole dashboard. Fails CLOSED: with no DASH_PASS set it
+    serves nothing, so it can never accidentally be public."""
+    if not DASH_PASS:
+        return Response("Dashboard password not set — add DASH_USER/DASH_PASS to "
+                        ".env and restart.", 503)
+    a = request.authorization
+    ok = a and a.username == DASH_USER and hmac.compare_digest(a.password or "", DASH_PASS)
+    if not ok:
+        return Response("Authentication required.", 401,
+                        {"WWW-Authenticate": 'Basic realm="agentic-trader"'})
 
 
 def _read_json(path, default):
