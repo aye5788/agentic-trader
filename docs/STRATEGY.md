@@ -88,7 +88,10 @@ excluded from the held set (it can still be computed, but never held).
   is outside it, skip.
 - **Stop:** volatility-adjusted (below the recent swing low / an ATR multiple) —
   **not** a flat 2–3%.
-- **Targets:** tiered scale-out ~+5% then ~+10%.
+- **Targets:** tiered scale-out at **multiples of risk** (R = entry−stop):
+  ~2.2R then ~4R. Scaling targets to each name's volatility (not a fixed +5/+10%)
+  keeps reward:risk ≥ 2:1 by construction — a fixed +5% target is unreachable at
+  2:1 for a 5%/day mover and would reject the whole book.
 - **MA exit:** exit if daily close < the 21-day MA, even before a target.
 
 ## 7. Regime gate & the off-switch

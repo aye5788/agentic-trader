@@ -21,14 +21,19 @@ account    = "robinhood-agentic" # execution: RH Agentic account ONLY
 max_weight_per_name = 0.10        # IBD "full position" = 10% of the sleeve
 max_total_weight    = 1.0         # fully-invested ceiling (sum of weights)
 min_reward_risk     = 2.0         # require >= 2:1 reward:risk geometry
-max_holdings        = 10          # concentration guard
+max_holdings        = 14          # concentration guard = book_hold(10) + sleeve_hold(4)
 
 # --- Trade management (IBD-SwingTrader-derived), applied per thesis ----------
 [trade_management]
-stop_style   = "volatility_adjusted"  # below recent swing low / ATR mult (NOT flat 2-3%)
-target_tiers = [0.05, 0.10]           # scale-out at ~+5% then ~+10%
-ma_exit_days = 21                     # exit if close < 21-day MA, even pre-target
-no_chase     = true                   # only enter within the thesis entry_zone
+stop_style    = "volatility_adjusted"  # stop = stop_atr_mult * daily-sigma below entry
+stop_atr_mult = 2.5                     # ATR/sigma multiple for the stop distance
+target_r_mults = [2.2, 4.0]             # targets as multiples of risk (R): tier1 >= 2
+                                        #   keeps reward:risk >= 2:1 BY CONSTRUCTION, and
+                                        #   scales both stop & targets to each name's vol
+                                        #   (a fixed +5% target is unreachable at 2:1 for a
+                                        #   5%/day mover — it would reject the whole book).
+ma_exit_days  = 21                      # exit if close < 21-day MA, even pre-target
+no_chase      = true                    # only enter within the thesis entry_zone
 
 # --- The momentum signal (see docs/STRATEGY.md §3 for exact math) ------------
 # Deterministic. Run as CODE, do not eyeball. Same signal on both engines.

@@ -191,7 +191,7 @@ rule becomes a hard field on the thesis record and/or a governance guardrail:
 | ---- | ------- | -------------- |
 | Entry zone | defined buy-price range; never chase above it | `entry_zone`; fast loop only buys if live price in-zone |
 | Stop loss | defined + enforced, **volatility-adjusted** (below recent swing low / ATR mult) — *not* IBD's flat 2–3% (too tight for volatile momentum names) | `stop`; governance auto-exits on breach |
-| Profit targets | tiered (IBD ≈ 5% / 10%); scale out | `targets: [t1, t2]` |
+| Profit targets | tiered at **multiples of risk** (~2.2R / 4R), vol-scaled so reward:risk ≥ 2:1 holds for any name — *not* a fixed 5/10% (unreachable at 2:1 for a high-vol mover) | `targets: [t1, t2]` |
 | Moving-average exit | exit if close < short-term MA (e.g. 21-day), even if stop not hit | daily fast-loop check (Schwab price history) |
 | Position size | ≤ **10% / name** (IBD "full" = 10%; most trades ½–¾) | `target_weight`, capped in guardrails |
 | Reward:risk | ≥ **2:1** = (target−entry)/(entry−stop) | **store validation gate** — reject bad-geometry theses on write |
