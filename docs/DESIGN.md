@@ -397,5 +397,9 @@ on a timer, with nobody watching**. Three things make that work:
       `alert_only` say so. Governed by the kill-switch.
 - [x] **Live on the droplet** — full book placed with real money; deposit sizing
       validated; deterministic fill journaling.
-- [ ] Remaining: nightly *exits-only* loop mode, monitoring dashboard (Cloudflare),
-      alerting on loop failure, fill reconciliation.
+- [x] **Monitoring dashboard** — `dashboard/app.py` (Flask, 127.0.0.1:8787,
+      password-gated fail-closed) live at `dash.ethobs.uk` via a Cloudflare Tunnel
+      (`cloudflared` systemd); `scripts/log_equity.py` records the equity curve.
+      See docs/DEPLOY.md "Dashboard" + "Operations & troubleshooting".
+- [ ] Remaining (optional): nightly *exits-only* loop mode, alerting on loop
+      failure, fill reconciliation, monitor heartbeat, intraday equity marks.

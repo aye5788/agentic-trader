@@ -82,38 +82,82 @@ before this touches money:
    - **Order cap:** rejects any single order >15% of account value.
    - **Whitelist:** only names in `config/universe.csv` + `etf_universe.csv`.
 
-## Dashboard (Cloudflare Tunnel + Access)
+## Dashboard (Cloudflare Tunnel + in-app auth)
 
-A read-only monitor of the live account, served from the droplet and gated to you.
+A read-only monitor of the live account. **Live at `dash.ethobs.uk`.** Served by
+Flask on the droplet (127.0.0.1:8787 only), fronted by a Cloudflare Tunnel, and
+**password-gated by the app itself** (not Cloudflare Access — see the note).
 
 ```bash
-# 1. dashboard service (Flask, binds 127.0.0.1:8787 only — never exposed directly)
+# 1. dashboard service (Flask, binds 127.0.0.1:8787 only)
 .venv/bin/pip install -r requirements.txt          # picks up flask
+# set the password (fail-CLOSED: no DASH_PASS -> app serves 503, never public):
+#   add to .env:   DASH_USER=<you>   DASH_PASS=<strong password>
 cp deploy/agentic-dashboard.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now agentic-dashboard
-curl -s localhost:8787 | head -c 200               # sanity: HTML comes back
+curl -s -o /dev/null -w '%{http_code}\n' 127.0.0.1:8787   # want 401 (gated). NOT localhost — see gotchas.
 
-# 2. Cloudflare Tunnel — hides the droplet IP, free TLS, on your domain
+# 2. Cloudflare Tunnel — hides the droplet IP, free TLS, on the domain
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
   -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
-cloudflared tunnel login                            # browser: pick your domain
+cloudflared tunnel login                            # browser: pick the domain (ethobs.uk)
 cloudflared tunnel create agentic-dash
-cloudflared tunnel route dns agentic-dash dash.YOURDOMAIN.com
-# ~/.cloudflared/config.yml:
+cloudflared tunnel route dns agentic-dash dash.ethobs.uk
+# config /root/.cloudflared/config.yml (service install copies it to /etc/cloudflared/config.yml):
 #   tunnel: <tunnel-id>
 #   credentials-file: /root/.cloudflared/<tunnel-id>.json
 #   ingress:
-#     - hostname: dash.YOURDOMAIN.com
+#     - hostname: dash.ethobs.uk
 #       service: http://127.0.0.1:8787
 #     - service: http_status:404
-cloudflared service install                         # run the tunnel as a service
-
-# 3. Cloudflare Access (Zero Trust dashboard, free) — REQUIRED, it's a money page:
-#    add an Access application for dash.YOURDOMAIN.com, policy = allow your email only.
+cloudflared service install && systemctl enable --now cloudflared
 ```
 
-The equity curve fills in from `scripts/log_equity.py`, which the fast loop runs
-daily — so history accrues one point per trading day from first run.
+**Auth note (why NOT Cloudflare Access):** we tried Cloudflare Access first; it
+would not reliably gate the tunnel hostname (page loaded with no login, even in
+incognito). We switched to **in-app HTTP Basic Auth** (`dashboard/app.py`,
+`DASH_USER`/`DASH_PASS` from `.env`, constant-time, fail-closed). Basic auth runs
+over the tunnel's HTTPS so creds are encrypted. Access can be added later as a
+second layer, but the app-level password is the load-bearing gate — do not remove
+`DASH_PASS` thinking Access covers it.
+
+The equity curve fills from `scripts/log_equity.py`, which `run_fast_loop.sh` runs
+each day — one point per trading day from first run.
+
+## Operations & troubleshooting (for a future debugger)
+
+**Health check — is each piece alive?**
+```bash
+systemctl status agentic-monitor agentic-dashboard cloudflared   # all: active (running)
+crontab -l                                    # 4 jobs: slow (Sun 20:00, M-F 18:00), fast (M-F 10:00), reauth
+timedatectl                                   # MUST be America/New_York or cron fires at wrong times
+cat research_store/monitor/state.json         # {"book_asof": <date>, "fired": {}} = monitor polled OK
+tail logs/slow.log logs/fast.log              # last loop runs
+journalctl -u agentic-monitor -n 50           # monitor: silent unless a stop/target tripped (or market closed)
+```
+
+**Gotchas we actually hit (check these first):**
+- **Timezone:** the box must be `America/New_York`. On UTC, cron's `10:00` fast
+  loop fires 6am ET (pre-market) and RH rejects the fractional orders. Fix:
+  `timedatectl set-timezone America/New_York && systemctl restart cron`.
+- **`curl localhost:8787` returns `000`** — Flask binds IPv4 `127.0.0.1`; `localhost`
+  resolves to IPv6 `::1`. Use `127.0.0.1` explicitly. (The tunnel uses 127.0.0.1, unaffected.)
+- **`git pull` fails on `config/strategy.toml`** — `live_approved=true` is a *local*
+  droplet edit. Reconcile: `git stash && git pull && git stash pop`. (It's the one
+  file the droplet edits locally; a git-ignored override would end this — not yet done.)
+- **Schwab price feed dies weekly** — the 7-day OAuth token. Re-run
+  `scripts/schwab_auth.py` (paste flow). If the slow loop errors on quotes/history, this is why.
+- **RH blocks the 2nd trade** — one-time "investor profile" KYC on the Agentic
+  account; complete it in the RH app. Non-recurring.
+- **No native stop orders** — RH rejects stops on sub-1-share fractional positions
+  (verified against the order API). That's *why* the software monitor exists; don't
+  try to place broker stops.
+- **Terminal paste mangling** — the droplet's paste indents lines / splits long
+  redirects (broke heredocs, printf, and nano YAML). Prefer short single-line
+  commands or type into an editor; fix stray YAML indent with `sed '2,$ s/^  //'`.
+
+**Kill switch:** `touch research_store/HALT` stops the monitor and fast loop
+instantly; `rm` resumes. **Pause new buys:** set `[proof] live_approved=false`.
 
 ## What is NOT yet automated (know before unattended live)
 
