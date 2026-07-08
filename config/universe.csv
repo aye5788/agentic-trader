@@ -1,0 +1,151 @@
+ticker,source,sector,exchange,flag,as_of
+MU,seed,Electronic Technology,NASDAQ,,2026-07-08
+NVDA,seed,Electronic Technology,NASDAQ,,2026-07-08
+SNDK,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+INTC,seed,Electronic Technology,NASDAQ,,2026-07-08
+TSLA,seed,Consumer Durables,NASDAQ,,2026-07-08
+AMD,seed,Electronic Technology,NASDAQ,,2026-07-08
+AAPL,seed,Electronic Technology,NASDAQ,,2026-07-08
+META,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+MSFT,seed,Technology Services,NASDAQ,,2026-07-08
+AMZN,seed,Retail Trade,NASDAQ,,2026-07-08
+AVGO,seed,Electronic Technology,NASDAQ,,2026-07-08
+GOOGL,seed,Technology Services,NASDAQ,,2026-07-08
+MRVL,seed,Electronic Technology,NASDAQ,,2026-07-08
+PLTR,seed,Technology Services,NASDAQ,,2026-07-08
+AMAT,fill_dvol,Producer Manufacturing,NASDAQ,,2026-07-08
+ORCL,seed,Technology Services,NYSE,,2026-07-08
+GOOG,seed,Technology Services,NASDAQ,,2026-07-08
+LRCX,fill_dvol,Producer Manufacturing,NASDAQ,,2026-07-08
+GEV,fill_dvol,Producer Manufacturing,NYSE,,2026-07-08
+WDC,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+KLAC,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+LLY,fill_dvol,Health Technology,NYSE,,2026-07-08
+CAT,fill_dvol,Producer Manufacturing,NYSE,,2026-07-08
+STX,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+NBIS,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+BE,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+QCOM,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+PANW,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+DELL,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+ALAB,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+IBM,fill_dvol,Technology Services,NYSE,,2026-07-08
+APP,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+LITE,fill_dvol,Producer Manufacturing,NASDAQ,,2026-07-08
+V,fill_dvol,Finance,NYSE,,2026-07-08
+NFLX,seed,Technology Services,NASDAQ,,2026-07-08
+GLW,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+UNH,fill_dvol,Health Services,NYSE,,2026-07-08
+NOW,fill_dvol,Technology Services,NYSE,,2026-07-08
+HOOD,seed,Finance,NASDAQ,,2026-07-08
+TXN,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+JNJ,fill_dvol,Health Technology,NYSE,,2026-07-08
+JPM,fill_dvol,Finance,NYSE,,2026-07-08
+WMT,seed,Retail Trade,NASDAQ,,2026-07-08
+CRM,fill_dvol,Technology Services,NYSE,,2026-07-08
+TER,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+RKLB,seed,Electronic Technology,NASDAQ,,2026-07-08
+ABBV,fill_dvol,Health Technology,NYSE,,2026-07-08
+XOM,fill_dvol,Energy Minerals,NYSE,,2026-07-08
+CRWV,seed,Technology Services,NASDAQ,,2026-07-08
+CRDO,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+ADBE,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+BRK.B,fill_dvol,Finance,NYSE,,2026-07-08
+MA,fill_dvol,Finance,NYSE,,2026-07-08
+CSCO,seed,Electronic Technology,NASDAQ,,2026-07-08
+CRWD,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+COST,fill_dvol,Retail Trade,NASDAQ,,2026-07-08
+VRT,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+ADI,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+MSTR,seed,Technology Services,NASDAQ,,2026-07-08
+BAC,seed,Finance,NYSE,,2026-07-08
+COHR,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+CVX,fill_dvol,Energy Minerals,NYSE,,2026-07-08
+IREN,seed,Technology Services,NASDAQ,,2026-07-08
+NET,fill_dvol,Technology Services,NYSE,,2026-07-08
+GE,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+AAL,seed,Transportation,NASDAQ,,2026-07-08
+RIVN,seed,Consumer Durables,NASDAQ,,2026-07-08
+KO,fill_dvol,Consumer Non-Durables,NYSE,,2026-07-08
+ANET,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+VZ,seed,Communications,NYSE,,2026-07-08
+SNOW,fill_dvol,Technology Services,NYSE,,2026-07-08
+GS,fill_dvol,Finance,NYSE,,2026-07-08
+T,seed,Communications,NYSE,,2026-07-08
+SOFI,seed,Finance,NASDAQ,,2026-07-08
+DDOG,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+C,fill_dvol,Finance,NYSE,,2026-07-08
+CVNA,fill_dvol,Retail Trade,NYSE,,2026-07-08
+INTU,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+PEP,fill_dvol,Consumer Non-Durables,NASDAQ,,2026-07-08
+SPGI,fill_dvol,Commercial Services,NYSE,,2026-07-08
+MRK,fill_dvol,Health Technology,NYSE,,2026-07-08
+SMCI,seed,Electronic Technology,NASDAQ,,2026-07-08
+SHOP,fill_dvol,Commercial Services,NASDAQ,,2026-07-08
+GILD,fill_dvol,Health Technology,NASDAQ,,2026-07-08
+HD,fill_dvol,Retail Trade,NYSE,,2026-07-08
+ACN,fill_dvol,Technology Services,NYSE,,2026-07-08
+NXPI,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+PG,fill_dvol,Consumer Non-Durables,NYSE,,2026-07-08
+MS,fill_dvol,Finance,NYSE,,2026-07-08
+UBER,fill_dvol,Transportation,NYSE,,2026-07-08
+NEE,fill_dvol,Utilities,NYSE,,2026-07-08
+NOK,seed,unknown,NYSE,adr,2026-07-08
+LIN,fill_dvol,Process Industries,NASDAQ,,2026-07-08
+MCHP,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+FCX,fill_dvol,Non-Energy Minerals,NYSE,,2026-07-08
+ON,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+ISRG,fill_dvol,Health Technology,NASDAQ,,2026-07-08
+PFE,seed,Health Technology,NYSE,,2026-07-08
+MCD,fill_dvol,Consumer Services,NYSE,,2026-07-08
+SPOT,fill_dvol,Technology Services,NYSE,,2026-07-08
+AXP,fill_dvol,Finance,NYSE,,2026-07-08
+BA,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+HON,fill_dvol,Electronic Technology,NASDAQ,,2026-07-08
+WELL,fill_dvol,Finance,NYSE,,2026-07-08
+ABT,fill_dvol,Health Technology,NYSE,,2026-07-08
+BKNG,fill_dvol,Consumer Services,NASDAQ,,2026-07-08
+D,fill_dvol,Utilities,NYSE,,2026-07-08
+ASTS,fill_dvol,Communications,NASDAQ,,2026-07-08
+DIS,fill_dvol,Consumer Services,NYSE,,2026-07-08
+SCHW,fill_dvol,Finance,NYSE,,2026-07-08
+TMUS,fill_dvol,Communications,NASDAQ,,2026-07-08
+DASH,fill_dvol,Transportation,NASDAQ,,2026-07-08
+FTNT,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+ETN,fill_dvol,Producer Manufacturing,NYSE,,2026-07-08
+RTX,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+WFC,fill_dvol,Finance,NYSE,,2026-07-08
+APH,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+CEG,fill_dvol,Utilities,NASDAQ,,2026-07-08
+WDAY,fill_dvol,Technology Services,NASDAQ,,2026-07-08
+SYK,fill_dvol,Health Technology,NYSE,,2026-07-08
+SHW,fill_dvol,Process Industries,NYSE,,2026-07-08
+RDDT,fill_dvol,Technology Services,NYSE,,2026-07-08
+MNST,fill_dvol,Consumer Non-Durables,NASDAQ,,2026-07-08
+TJX,fill_dvol,Retail Trade,NYSE,,2026-07-08
+F,seed,Consumer Durables,NYSE,,2026-07-08
+COIN,fill_dvol,Finance,NASDAQ,,2026-07-08
+CAH,fill_dvol,Distribution Services,NYSE,,2026-07-08
+CMCSA,seed,Consumer Services,NASDAQ,,2026-07-08
+NKE,seed,Consumer Non-Durables,NYSE,,2026-07-08
+MDT,fill_dvol,Health Technology,NYSE,,2026-07-08
+CIEN,fill_dvol,Electronic Technology,NYSE,,2026-07-08
+PGR,fill_dvol,Finance,NYSE,,2026-07-08
+NU,seed,Finance,NYSE,,2026-07-08
+WULF,seed,Technology Services,NASDAQ,,2026-07-08
+BMNR,seed,Finance,NYSE,spec,2026-07-08
+RGTI,seed,Electronic Technology,NASDAQ,,2026-07-08
+MARA,seed,Technology Services,NASDAQ,,2026-07-08
+CIFR,seed,Technology Services,NASDAQ,,2026-07-08
+CDE,seed,Non-Energy Minerals,NYSE,small,2026-07-08
+HL,seed,Non-Energy Minerals,NYSE,,2026-07-08
+SMR,seed,Producer Manufacturing,NYSE,,2026-07-08
+CAG,seed,Consumer Non-Durables,NYSE,,2026-07-08
+SNAP,seed,Technology Services,NYSE,,2026-07-08
+TE,seed,unknown,NYSE,small,2026-07-08
+ACHR,seed,Electronic Technology,NYSE,,2026-07-08
+KEEL,seed,Technology Services,NASDAQ,spec,2026-07-08
+AUR,seed,Technology Services,NASDAQ,spec,2026-07-08
+SOC,seed,unknown,NYSE,micro,2026-07-08
+HTZ,seed,unknown,NASDAQ,micro,2026-07-08
+SPCX,seed,unknown,NASDAQ,fresh-ipo,2026-07-08

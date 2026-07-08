@@ -38,15 +38,20 @@ confirm_with_surprise_data = true   # entry trigger = Finnhub surprise ROW landi
 require_revision_up         = false # estimate-revision momentum: confirming, not required (v1)
 
 # --- Tradeable universe -----------------------------------------------------
+# MOMENTUM edge: a FIXED, curated single-name universe that the cross-sectional
+# ranker scores nightly (not the old PEAD earnings_dynamic mode). Membership is
+# reconciled human-seed (54 conviction names) + liquidity fill by dollar volume.
+# Full list + provenance: config/universe.csv (as_of 2026-07-08).
 [universe]
-mode                  = "earnings_dynamic"  # nightly: names that just reported, filtered
-min_price             = 5.0
-min_avg_dollar_volume = 20_000_000          # liquidity floor
-# Always-eligible liquid ETFs. ROLE = core exposure / ballast, NOT a PEAD edge:
-# a place to hold broad risk (sized under [risk]) when single-name setups are
-# thin and regime is risk-on. Sector-level earnings-drift use is a v2 idea.
-core_etfs             = ["SPY", "QQQ", "IWM", "DIA"]
-etf_role              = "core_exposure"
+mode      = "fixed_list"
+source    = "config/universe.csv"   # 150 US single names; `flag` col marks
+                                    #   adr/micro/spec/fresh-ipo model-caveats
+size      = 150
+# ETFs: intentionally NOT in the ranked single-name list — a broad ETF almost
+# never out-momentums an individual winner, so it would sit as a dead slot.
+# Their role in a dual-momentum design (defensive off-switch leg? sector-rotation
+# sleeve? core ballast?) is an OPEN decision — see docs/DESIGN.md open items.
+# core_etfs = []   # TBD
 
 # --- Regime floor (mechanical ON switch; agent overlay deferred to v2) -------
 [regime]

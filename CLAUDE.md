@@ -63,9 +63,15 @@ The operationally critical bit:
 src/adapters/schwab/    Schwab Market Data client + research functions
 src/adapters/finnhub/   Finnhub analyst/estimates client + research functions
 config/strategy.toml    CODIFIED STRATEGY — single source of truth: risk gates,
-                        universe, PEAD signal, trade management, regime floor.
+                        universe, signal, trade management, regime floor.
                         Tune the strategy HERE, not in code. `[risk]` = the store's
                         validation mandate. Load via src/strategy.py.
+                        NOTE: edge is migrating PEAD -> momentum; [signal]/[meta]
+                        still PEAD-era pending remaining design axes.
+config/universe.csv     Fixed 150-name momentum universe (human-seed reconciled
+                        with dollar-volume liquidity fill). `flag` col marks
+                        adr/micro/spec/fresh-ipo model-caveats. Referenced by
+                        [universe] in strategy.toml.
 src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
 src/research_store/     Research Store — validated slow→fast handoff (belief +
                         journal). write_product enforces the [risk] mandate.
