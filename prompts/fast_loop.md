@@ -35,6 +35,9 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    sells first, then buys: `review_equity_order` → on a clean review →
    `place_equity_order` (fractional, dollar-notional, side + amount from the
    plan). If a review returns a problem, skip that order and note it.
-8. **Journal.** Append placed fills to the Research Store journal.
+8. **Journal.** Write the placed fills to `research_store/rh/fills.json` (a JSON
+   array of `{symbol, side, amount, order_id, status}`), then run
+   `.venv/bin/python scripts/record_fills.py`. Do NOT hand-edit `journal.jsonl`
+   and do NOT write throwaway helper scripts — use only record_fills.py.
 9. **Report** concisely: account value, orders placed, any blocked/failed, and
    the resulting book. That is your entire output.

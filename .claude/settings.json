@@ -10,6 +10,8 @@
       "Bash(python scripts/fast_loop.py)",
       "Bash(python3 scripts/fast_loop.py)",
       "Bash(.venv/bin/python scripts/fast_loop.py)",
+      "Bash(.venv/bin/python scripts/record_fills.py)",
+      "Bash(python3 scripts/record_fills.py)",
       "Read",
       "Write"
     ]
