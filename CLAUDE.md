@@ -77,6 +77,12 @@ config/etf_universe.csv 18-ETF dual-momentum rotation sleeve (11 SPDR sectors +
                         single-name book; defensive assets rank in-sleeve as the
                         built-in off-switch. Referenced by [etf_sleeve].
 src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
+src/governance.py       Layer-5 guardrails: kill-switch file, drawdown halt,
+                        per-order cap, universe whitelist, live_approved master
+                        switch. The last gate before a live order (fast loop).
+prompts/fast_loop.md    The headless-Claude execution procedure (RH is MCP-only).
+deploy/                 run_slow_loop.sh (Python), run_fast_loop.sh (Claude, with
+                        ANTHROPIC_API_KEY guard), crontab.template. See docs/DEPLOY.md.
 src/momentum.py         THE SIGNAL — single source of truth for the ranking math
                         (docs/STRATEGY.md §3). compute(panel, asof, lookback=252)
                         -> per-ticker R/sigma/trend/score/eligible/rank; select()

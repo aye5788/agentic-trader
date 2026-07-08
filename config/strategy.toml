@@ -91,7 +91,17 @@ trend_ma_days  = 50      # no NEW entries unless index > its 50-day MA
 vix_ceiling    = 28.0    # no NEW entries if VIX above this
 agent_overlay  = false   # v1 = deterministic-only; qualitative veto in v2
 
+# --- Governance guardrails (Layer 5) — the last gate before any live order ---
+# The [risk] mandate validates the research PRODUCT on write; these validate
+# EXECUTION at trade time. Enforced by src/governance.py in the fast loop.
+[governance]
+kill_switch_file = "research_store/HALT"  # if this file exists -> trade NOTHING (touch to stop, rm to resume)
+max_drawdown     = 0.25                    # halt new buys if account down >25% from its tracked peak
+max_order_pct    = 0.15                    # reject any single order > 15% of account value
+require_whitelist = true                   # only ever trade names in config/universe.csv + etf_universe.csv
+
 # --- How much proof before / during live trading ----------------------------
 [proof]
 mode          = "backtest_first"  # validate the signal vs history before the $20
 entry_cadence = "nightly"          # v1: no same-day catalyst reaction
+live_approved  = false             # MASTER SWITCH: fast loop may PLACE orders only when true

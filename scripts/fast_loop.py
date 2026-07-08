@@ -91,7 +91,10 @@ def main() -> None:
         _selftest()
         return
 
-    from research_store import read_current, get_targets      # noqa: E402
+    import strategy as strat                                   # noqa: E402
+    import governance as gov                                    # noqa: E402
+    from research_store import read_current, get_targets        # noqa: E402
+    cfg = strat.load()
     prod = read_current()
     if prod is None:
         sys.exit("no research product — run scripts/slow_loop.py first")
@@ -107,18 +110,41 @@ def main() -> None:
     plan = plan_orders(targets, positions, acct)
     print(f"target book as_of {prod.as_of} | regime {prod.regime['status']} | "
           f"account ${acct:,.2f} | {len(targets)} targets")
+
+    # ---- governance: global halts, then per-order vetting ----
+    halts = gov.preflight(acct, cfg)
+    if halts:
+        print("\n⛔ TRADING HALTED — place NOTHING:")
+        for h in halts:
+            print(f"   - {h}")
+        return
+    approved, blocked = gov.vet_plan(plan, acct, cfg)
+
     if not plan:
         print("\nno orders — portfolio already matches the target book.")
         return
-    print(f"\nORDER PLAN ({len(plan)} orders):")
-    for o in plan:
+    print(f"\nORDER PLAN ({len(approved)} approved, {len(blocked)} blocked):")
+    for o in approved:
         print(f"  {o['side'].upper():4} ${o['amount']:>8.2f} {o['symbol']:6} "
               f"[{o['reason']:16}] cur ${o['current_value']:.2f} -> tgt ${o['target_value']:.2f}")
-    buys = sum(o["amount"] for o in plan if o["side"] == "buy")
-    sells = sum(o["amount"] for o in plan if o["side"] == "sell")
-    print(f"\ntotal: ${sells:.2f} sells, ${buys:.2f} buys | net ${buys-sells:+.2f}")
-    print("\n[plan only] placement is the agent's review_equity_order->place step,\n"
-          "gated by the proof gate (§9): backtested + human-approved before live.")
+    for o in blocked:
+        print(f"  BLOCK     {o['symbol']:6} — {o['blocked']}")
+    buys = sum(o["amount"] for o in approved if o["side"] == "buy")
+    sells = sum(o["amount"] for o in approved if o["side"] == "sell")
+    print(f"\ntotal (approved): ${sells:.2f} sells, ${buys:.2f} buys | net ${buys-sells:+.2f}")
+
+    live = gov.live_approved(cfg)
+    print(f"\nlive_approved = {live} — "
+          + ("agent MAY place the approved orders (review_equity_order->place)."
+             if live else
+             "PLAN ONLY. Set [proof] live_approved=true to authorize placement (proof gate §9)."))
+    # emit machine-readable plan for the agent's placement step
+    out = REPO / "research_store" / "rh" / "order_plan.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"as_of": prod.as_of, "account_value": acct,
+                               "live_approved": live, "approved": approved,
+                               "blocked": blocked}, indent=2))
+    print(f"plan -> {out}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,21 @@
+# agentic-trader — droplet crontab template.  install:  crontab deploy/crontab.template
+# Times are in the droplet's local TZ — set the box to US/Eastern or convert.
+# ⚠️ Do NOT put ANTHROPIC_API_KEY here or anywhere — it forces per-token billing.
+
+CLAUDE_CODE_OAUTH_TOKEN=REPLACE_WITH_TOKEN_FROM_claude_setup-token
+
+# --- SLOW LOOP (pure Python, no Claude) ---
+# Weekly full rebalance: Sunday 20:00 — fetch fresh prices, re-rank, write the book.
+0 20 * * 0   /opt/agentic-trader/deploy/run_slow_loop.sh >> /opt/agentic-trader/logs/slow.log 2>&1
+
+# Nightly risk-exit recompute: Mon–Fri 18:00 (after close).
+0 18 * * 1-5 /opt/agentic-trader/deploy/run_slow_loop.sh >> /opt/agentic-trader/logs/slow.log 2>&1
+
+# --- FAST LOOP (headless Claude, places the approved plan) ---
+# Mon–Fri 10:00 (after the open). No-op unless [proof] live_approved=true.
+0 10 * * 1-5 /opt/agentic-trader/deploy/run_fast_loop.sh >> /opt/agentic-trader/logs/fast.log 2>&1
+
+# --- SCHWAB WEEKLY RE-AUTH REMINDER (manual — token expires every 7 days) ---
+# Schwab's refresh token can't be renewed unattended; you must re-run the paste
+# flow weekly or the price feed dies. This just logs a loud reminder.
+0 9 * * 1    echo "$(date) ACTION NEEDED: run scripts/schwab_auth.py (7-day token)" >> /opt/agentic-trader/logs/reauth.log

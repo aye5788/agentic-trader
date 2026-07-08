@@ -378,5 +378,14 @@ on a timer, with nobody watching**. Three things make that work:
       explicit human approval before any live order.
 - [ ] Wire the RH read (get_equity_positions/get_portfolio → snapshot) + the
       review→place placement step into the deployed agent's fast-loop run
-- [ ] Governance + orchestration (incl. mechanical regime floor)
-- [ ] VPS deployment
+- [x] **Governance guardrails** (`src/governance.py`) — kill-switch file,
+      drawdown halt (peak-tracked), per-order cap, universe whitelist, and the
+      `[proof] live_approved` master switch. Wired into the fast loop; the
+      mechanical regime floor lives in `momentum.regime_on` + the slow loop.
+- [x] **Orchestration + deploy artifacts** — `deploy/` (run_slow_loop.sh,
+      run_fast_loop.sh with the ANTHROPIC_API_KEY footgun guard, crontab.template),
+      `prompts/fast_loop.md` (the headless-Claude execution procedure), and
+      `docs/DEPLOY.md` (the ordered droplet runbook).
+- [ ] VPS deployment — execute DEPLOY.md on the droplet; remaining: nightly
+      exits-only mode, fill reconciliation/alerting, and going live (flip
+      `live_approved` after a supervised dry run).
