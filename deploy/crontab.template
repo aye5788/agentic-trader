@@ -2,7 +2,12 @@
 # Times are in the droplet's local TZ — set the box to US/Eastern or convert.
 # ⚠️ Do NOT put ANTHROPIC_API_KEY here or anywhere — it forces per-token billing.
 
-CLAUDE_CODE_OAUTH_TOKEN=REPLACE_WITH_TOKEN_FROM_claude_setup-token
+# Cron runs with a bare PATH; give it node/npm (claude), python, git, coreutils.
+# `which claude` on the box will confirm the right dir if claude isn't found.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Auth: Claude uses the interactive login stored in /root/.claude.json (from
+# `claude` + `/mcp`). No CLAUDE_CODE_OAUTH_TOKEN needed — do NOT set a bogus one.
+HOME=/root
 
 # --- SLOW LOOP (pure Python, no Claude) ---
 # Weekly full rebalance: Sunday 20:00 — fetch fresh prices, re-rank, write the book.
