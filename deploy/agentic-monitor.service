@@ -1,0 +1,24 @@
+# systemd unit for the intraday exit monitor.
+# install:
+#   cp deploy/agentic-monitor.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now agentic-monitor
+#   journalctl -u agentic-monitor -f      # watch it live
+[Unit]
+Description=agentic-trader intraday stop/take-profit monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/agentic-trader
+# HOME so claude finds /root/.claude.json; PATH so cron-minimal env finds claude/python.
+# NO ANTHROPIC_API_KEY (keeps breach-time claude on the subscription).
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/agentic-trader/deploy/run_monitor.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

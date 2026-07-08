@@ -91,6 +91,21 @@ trend_ma_days  = 50      # no NEW entries unless index > its 50-day MA
 vix_ceiling    = 28.0    # no NEW entries if VIX above this
 agent_overlay  = false   # v1 = deterministic-only; qualitative veto in v2
 
+# --- Intraday exit monitor — the always-on stop-loss / take-profit watcher ----
+# Part 1 (scripts/market_monitor.py) polls Schwab quotes during market hours and
+# fires the executor (prompts/exit.md) on a breach. Enforces the per-name stops
+# the daily loops only STORE. See docs/DESIGN.md → "Intraday exit monitor".
+[monitor]
+poll_secs      = 15       # seconds between quote polls (14 names = 1 Schwab call)
+enable_stops   = true     # sell a full position when price <= its stored stop
+enable_targets = true     # scale out at the take-profit tiers (t1 half, t2 rest)
+                          #   NOTE: take-profits cap momentum winners — set false
+                          #   to "let winners run" and rely on rank rotation instead.
+cooldown_days  = 5        # a stopped-out name is excluded from the book this long
+                          #   (stop vs. momentum-rank rebuy-churn guard)
+alert_only     = false    # true = detect+journal breaches but place NO sells
+                          #   (also forced alert-only whenever live_approved=false)
+
 # --- Governance guardrails (Layer 5) — the last gate before any live order ---
 # The [risk] mandate validates the research PRODUCT on write; these validate
 # EXECUTION at trade time. Enforced by src/governance.py in the fast loop.

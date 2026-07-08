@@ -386,6 +386,16 @@ on a timer, with nobody watching**. Three things make that work:
       run_fast_loop.sh with the ANTHROPIC_API_KEY footgun guard, crontab.template),
       `prompts/fast_loop.md` (the headless-Claude execution procedure), and
       `docs/DEPLOY.md` (the ordered droplet runbook).
-- [ ] VPS deployment — execute DEPLOY.md on the droplet; remaining: nightly
-      exits-only mode, fill reconciliation/alerting, and going live (flip
-      `live_approved` after a supervised dry run).
+- [x] **Intraday exit monitor** (`scripts/market_monitor.py`) — the always-on
+      stop-loss / take-profit watcher the daily loops couldn't be. Polls live
+      Schwab quotes for held names every ~15s during RTH, checks vs. each name's
+      stored stop/targets, and fires the headless executor (`prompts/exit.md`) to
+      market-sell on a breach (fractional sells are allowed; native stops are NOT
+      — RH blocks stops on sub-1-share positions). Stopped-out names get a cooldown
+      the slow loop honors (no rebuy churn). Runs as a systemd service
+      (`deploy/agentic-monitor.service`); alert-only when `live_approved`/
+      `alert_only` say so. Governed by the kill-switch.
+- [x] **Live on the droplet** — full book placed with real money; deposit sizing
+      validated; deterministic fill journaling.
+- [ ] Remaining: nightly *exits-only* loop mode, monitoring dashboard (Cloudflare),
+      alerting on loop failure, fill reconciliation.

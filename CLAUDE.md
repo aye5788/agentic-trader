@@ -80,7 +80,14 @@ src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
 src/governance.py       Layer-5 guardrails: kill-switch file, drawdown halt,
                         per-order cap, universe whitelist, live_approved master
                         switch. The last gate before a live order (fast loop).
+scripts/market_monitor.py Intraday stop/take-profit watcher. Polls Schwab quotes
+                        during RTH vs. each holding's stored stop/targets; fires
+                        prompts/exit.md (market sell) on a breach. Pure-Python
+                        watching, Claude only on an event. Runs as a systemd
+                        service; alert-only unless live_approved. [monitor] config.
 prompts/fast_loop.md    The headless-Claude execution procedure (RH is MCP-only).
+prompts/exit.md         Exit-executor procedure — market-sell the breached
+                        positions the monitor flags, then journal.
 deploy/                 run_slow_loop.sh (Python), run_fast_loop.sh (Claude, with
                         ANTHROPIC_API_KEY guard), crontab.template. See docs/DEPLOY.md.
 src/momentum.py         THE SIGNAL — single source of truth for the ranking math

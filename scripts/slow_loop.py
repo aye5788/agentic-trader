@@ -98,6 +98,18 @@ def main() -> None:
     asof = closes.index[-1]
     spy = closes["SPY"]
 
+    # exclude names the intraday monitor stopped out (cooldown) so we don't rebuy
+    # them the next morning — the stop vs. momentum-rank churn guard.
+    cd_path = REPO / "research_store" / "monitor" / "cooldown.json"
+    if cd_path.exists():
+        import json as _json
+        cd = _json.loads(cd_path.read_text())
+        cooled = {s for s, until in cd.items() if until >= str(asof.date())}
+        if cooled:
+            names = [t for t in names if t not in cooled]
+            etfs = [t for t in etfs if t not in cooled]
+            print(f"cooldown: excluding {sorted(cooled)} until their date")
+
     regime = mom.regime_on(spy, asof, cfg["regime"]["trend_ma_days"])
     book_scored = mom.compute(closes[names], asof)
     etf_scored = mom.compute(closes[etfs], asof)
