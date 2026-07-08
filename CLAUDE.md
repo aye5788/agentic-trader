@@ -77,6 +77,22 @@ config/etf_universe.csv 18-ETF dual-momentum rotation sleeve (11 SPDR sectors +
                         single-name book; defensive assets rank in-sleeve as the
                         built-in off-switch. Referenced by [etf_sleeve].
 src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
+src/momentum.py         THE SIGNAL — single source of truth for the ranking math
+                        (docs/STRATEGY.md §3). compute(panel, asof, lookback=252)
+                        -> per-ticker R/sigma/trend/score/eligible/rank; select()
+                        (banded); regime_on() (SPY>50DMA). Backtest AND live loop
+                        both call this so the numbers never drift. Pure, no I/O.
+scripts/fetch_prices.py Cache ~10y daily closes (names+ETFs+SPY) from Schwab to
+                        research_store/prices/ (git-ignored). Rate-limited 0.6s;
+                        needs pyarrow (CSV fallback if absent).
+scripts/backtest.py     Weekly walk-forward sim of the 70/30 book/sleeve vs SPY.
+                        simulate() = parameterized core returning a metrics dict.
+                        ⚠️ survivorship-biased (today's names over history) = upper
+                        bound; no intra-week stops modeled. Point-in-time rebuild
+                        is the pending fix (see docs/DESIGN.md status).
+scripts/sweep.py        One-knob-at-a-time sensitivity sweep. Verdict: edge robust
+                        (Sharpe 0.97-1.33 across 16 configs). Read the spread, not
+                        the level — every row carries the same survivorship caveat.
 src/research_store/     Research Store — validated slow→fast handoff (belief +
                         journal). write_product enforces the [risk] mandate.
 src/adapters/alpaca/    Alpaca news client + get_news (data-only, no trading)

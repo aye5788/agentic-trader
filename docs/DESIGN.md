@@ -345,7 +345,17 @@ on a timer, with nobody watching**. Three things make that work:
       for the deployed agent in `docs/STRATEGY.md`; params in `config/strategy.toml`
 - [x] **Universe built** — fixed 150 (`config/universe.csv`) + 18-ETF sleeve
       (`config/etf_universe.csv`), 70/30 split
-- [ ] **Backtest the momentum signal** vs history (the proof gate before live) ← next
+- [x] **Backtest the momentum signal** vs history — walk-forward harness built
+      (`src/momentum.py` signal SSOT, `scripts/fetch_prices.py`, `scripts/backtest.py`)
+      and a sensitivity sweep (`scripts/sweep.py`). First pass (2017–2026, 469 wks,
+      70/30): CAGR 34.3% vs SPY 13.1%, Sharpe 1.19 vs 0.78, maxDD −31% ≈ SPY −32%.
+      Sweep verdict: **edge is robust** (Sharpe 0.97–1.33 across 16 configs, all beat
+      SPY). ⚠️ **survivorship-biased upper bound** (today's 150 names run over history)
+      + no intra-week stops modeled — NOT a forecast yet.
+- [ ] **Point-in-time universe rebuild** — kill survivorship bias ← next. Dead-name
+      price history is free/available (Alpaca IEX bars serve delisted tickers, e.g.
+      SIVB/BBBY); the open problem is reconstructing historical liquid-universe
+      membership (which ~150 names were most-traded as-of each date, incl. since-dead).
 - [ ] Macro event calendar (FOMC/CPI dates) — deterministic event-risk feed
 - [ ] Slow loop (research → theses) + fast loop (theses → sized orders)
 - [ ] Governance + orchestration (incl. mechanical regime floor)
