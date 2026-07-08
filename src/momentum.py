@@ -26,15 +26,17 @@ def _asof_slice(panel: pd.DataFrame, asof: pd.Timestamp) -> pd.DataFrame:
     return panel.loc[:asof]
 
 
-def compute(panel: pd.DataFrame, asof: pd.Timestamp) -> pd.DataFrame:
+def compute(panel: pd.DataFrame, asof: pd.Timestamp,
+            lookback: int = LOOKBACK) -> pd.DataFrame:
     """Return a per-ticker DataFrame [R, sigma, ret, trend, score, eligible,
     rank], indexed by ticker, for the given as-of date. Tickers without enough
-    history (need LOOKBACK+1 and TREND_MA closes) are dropped."""
+    history (need lookback+1 and TREND_MA closes) are dropped. `lookback`
+    defaults to the production 252d; the backtest sweep varies it."""
     hist = _asof_slice(panel, asof)
-    if len(hist) < LOOKBACK + 1:
+    if len(hist) < lookback + 1:
         return pd.DataFrame()
 
-    window = hist.iloc[-(LOOKBACK + 1):]          # 253 rows -> 252 returns
+    window = hist.iloc[-(lookback + 1):]          # (lookback+1) rows -> lookback returns
     close_t = window.iloc[-1]
     close_0 = window.iloc[0]
     daily_ret = window.pct_change().iloc[1:]      # 252 daily returns

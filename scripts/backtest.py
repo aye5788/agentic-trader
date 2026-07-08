@@ -59,26 +59,24 @@ def load_panel() -> pd.DataFrame:
     sys.exit("no price cache — run scripts/fetch_prices.py first")
 
 
-def main() -> None:
-    cfg = strat.load()
-    P = cfg["portfolio"]
-    book_w, sleeve_w = P["book_weight"], P["sleeve_weight"]
-    book_hold, book_band, sleeve_hold = P["book_hold"], P["book_band"], P["sleeve_hold"]
+def simulate(panel, names, etfs, spy, *, lookback=mom.LOOKBACK,
+             book_hold=10, book_band=15, sleeve_hold=4,
+             book_w=0.70, sleeve_w=0.30, use_regime=True, use_sleeve=True):
+    """Run one weekly walk-forward pass and return (metrics, res_df).
 
-    panel = load_panel().sort_index()
-    names = [t for t in pd.read_csv(REPO / "config" / "universe.csv")["ticker"] if t in panel]
-    etfs = [t for t in pd.read_csv(REPO / "config" / "etf_universe.csv")["ticker"] if t in panel]
-    spy = panel["SPY"]
-    name_panel, etf_panel = panel[names], panel[etfs]
+    All strategy knobs are parameters so the sweep can vary one at a time.
+    `use_sleeve=False` routes 100% to the single-name book; `use_regime=False`
+    removes the SPY>50DMA entry floor. `metrics` = dict of headline stats."""
+    if not use_sleeve:
+        book_w, sleeve_w = 1.0, 0.0
+    name_panel = panel[names]
+    etf_panel = panel[etfs]
 
     rebals = weekly_rebalance_dates(panel.index)
-    # start once we have enough history for the 252d lookback
-    rebals = [d for d in rebals if len(panel.loc[:d]) >= mom.LOOKBACK + 5]
-    print(f"universe: {len(names)} names + {len(etfs)} ETFs | "
-          f"{len(rebals)} weekly rebalances {rebals[0].date()}..{rebals[-1].date()}")
+    rebals = [d for d in rebals if len(panel.loc[:d]) >= lookback + 5]
 
-    per_slot_book = book_w / book_hold      # fixed slot weight; empty slots = cash
-    per_slot_etf = sleeve_w / sleeve_hold
+    per_slot_book = book_w / book_hold
+    per_slot_etf = (sleeve_w / sleeve_hold) if sleeve_hold else 0.0
 
     held_book, held_etf = set(), set()
     equity = 1.0
@@ -86,21 +84,21 @@ def main() -> None:
     for i in range(len(rebals) - 1):
         t0, t1 = rebals[i], rebals[i + 1]
 
-        # --- select at close of t0 (only data <= t0) ---
-        regime = mom.regime_on(spy, t0, 50)
-        book_scored = mom.compute(name_panel, t0)
-        etf_scored = mom.compute(etf_panel, t0)
-
+        regime = mom.regime_on(spy, t0, 50) if use_regime else True
+        book_scored = mom.compute(name_panel, t0, lookback)
         new_book = mom.select(book_scored, held_book, book_hold, book_band)
         if not regime:
-            # regime OFF: no NEW book entries — keep only still-eligible held names
             new_book = [t for t in new_book if t in held_book]
-        new_etf = mom.select(etf_scored, held_etf, sleeve_hold, sleeve_hold)  # no band on sleeve
+
+        if use_sleeve:
+            etf_scored = mom.compute(etf_panel, t0, lookback)
+            new_etf = mom.select(etf_scored, held_etf, sleeve_hold, sleeve_hold)
+        else:
+            new_etf = []
 
         turnover.append(len(set(new_book) ^ held_book) + len(set(new_etf) ^ held_etf))
         held_book, held_etf = set(new_book), set(new_etf)
 
-        # --- hold t0 -> t1, realize return (equal per-slot, unused slots = cash) ---
         def leg_ret(holds, pnl_panel, per_slot):
             r = 0.0
             for t in holds:
@@ -116,14 +114,37 @@ def main() -> None:
 
     res = pd.DataFrame(curve, columns=["date", "equity", "ret", "n_book", "n_etf", "regime"]
                        ).set_index("date")
-    # benchmark: SPY buy&hold over the same span
+    cagr, vol, sharpe = annualized(res["ret"], 52.0)
+    metrics = {
+        "total": float(res["equity"].iloc[-1] - 1), "cagr": cagr, "vol": vol,
+        "sharpe": sharpe, "maxdd": max_drawdown(res["equity"]),
+        "turnover": float(np.mean(turnover)), "reg_on": float(res["regime"].mean()),
+        "weeks": len(res),
+    }
+    return metrics, res
+
+
+def main() -> None:
+    cfg = strat.load()
+    P = cfg["portfolio"]
+
+    panel = load_panel().sort_index()
+    names = [t for t in pd.read_csv(REPO / "config" / "universe.csv")["ticker"] if t in panel]
+    etfs = [t for t in pd.read_csv(REPO / "config" / "etf_universe.csv")["ticker"] if t in panel]
+    spy = panel["SPY"]
+
+    m, res = simulate(
+        panel, names, etfs, spy,
+        book_hold=P["book_hold"], book_band=P["book_band"], sleeve_hold=P["sleeve_hold"],
+        book_w=P["book_weight"], sleeve_w=P["sleeve_weight"],
+    )
+    print(f"universe: {len(names)} names + {len(etfs)} ETFs | "
+          f"{len(res)} weekly rebalances {res.index[0].date()}..{res.index[-1].date()}")
+
     bench = spy.loc[res.index[0]:res.index[-1]].reindex(res.index).ffill()
     bench_eq = bench / bench.iloc[0]
-
-    ppy = 52.0
-    scagr, svol, ssharpe = annualized(res["ret"], ppy)
-    bench_ret = bench_eq.pct_change().dropna()
-    bcagr, bvol, bsharpe = annualized(bench_ret, ppy)
+    bcagr, bvol, bsharpe = annualized(bench_eq.pct_change().dropna(), 52.0)
+    scagr, svol, ssharpe = m["cagr"], m["vol"], m["sharpe"]
 
     print("\n" + "=" * 60)
     print("DUAL-MOMENTUM BACKTEST  (weekly, 70/30 book/sleeve)")
@@ -136,8 +157,8 @@ def main() -> None:
     print(f"{'volatility':16}{svol:>11.1%}{bvol:>12.1%}")
     print(f"{'Sharpe (rf=0)':16}{ssharpe:>11.2f}{bsharpe:>12.2f}")
     print(f"{'max drawdown':16}{max_drawdown(res['equity']):>11.1%}{max_drawdown(bench_eq):>12.1%}")
-    print(f"{'avg turnover/wk':16}{np.mean(turnover):>11.1f}{'—':>12}")
-    print(f"{'pct weeks reg-on':16}{res['regime'].mean():>11.0%}{'—':>12}")
+    print(f"{'avg turnover/wk':16}{m['turnover']:>11.1f}{'—':>12}")
+    print(f"{'pct weeks reg-on':16}{m['reg_on']:>11.0%}{'—':>12}")
     print("=" * 60)
     print("⚠️ survivorship-biased (today's names, run over history) — upper bound.")
     print("   intra-week stops/MA-exits not modeled (conservative on drawdown).")
