@@ -28,15 +28,18 @@ LAYER 4  EXECUTION       Robinhood MCP: review -> place  (thin, dumb, reliable)
 
 ## Strategy foundation
 
-> ⚠️ **EDGE UNDER REVISION (in progress).** The PEAD (post-earnings drift) edge
-> described below was a first pass; we are moving the edge to **momentum** —
-> specifically the **hybrid "dual momentum"** (cross-sectional ranking + an
-> absolute-trend filter). Horizon stays swing. Design is being worked axis-by-axis
-> (axis 1 = relative-vs-absolute → *hybrid*, decided; axis 2 = lookback, next).
-> The PEAD-specific `config/strategy.toml [signal]` and the earnings-calendar-as-
-> *primary*-signal are correspondingly stale; most infra (Schwab price history =
-> the momentum engine, Research Store, regime gate, config loader) carries over
-> unchanged. This section will be rewritten once the momentum axes are settled.
+> ✅ **EDGE = MOMENTUM (settled).** The edge is **hybrid dual momentum**
+> (cross-sectional rank + absolute-trend filter), long-only, equities-only
+> (options OFF), swing horizon. All design axes are closed: 12-month lookback
+> (12-0, no skip); relative rank = equal-weight rank-average of risk-adjusted
+> return + trend (close/SMA200); absolute gate = 12mo return > 0; hold top-10
+> (banded to 15) + top-4 ETF sleeve; weekly rebalance, nightly risk exits;
+> off-switch = cash; **70/30 book/sleeve** capital split. The operational spec —
+> written for the deployed agent — is [`docs/STRATEGY.md`](STRATEGY.md); params
+> are in `config/strategy.toml`. **The PEAD prose in this section below is
+> superseded** and kept only for design-history context; earnings-calendar use
+> demotes from *primary signal* to *defensive event-awareness*. Infra (Schwab
+> price history, Research Store, regime gate, config loader) carries over intact.
 
 **Horizon: swing (multi-day to a few weeks).** Chosen for structural fit, not
 regulation — our data is EOD-shaped, the slow loop runs nightly, and the edge
@@ -296,17 +299,22 @@ on a timer, with nobody watching**. Three things make that work:
    earnings surprises) + Alpaca free (news). Paid consensus estimates deferred.
 3. ~~**Regime approach**~~ — RESOLVED: mechanical floor (ON, Schwab-computed) +
    agent overlay (OFF-only); **v1 deterministic-only**, agent overlay in v2.
-4. ~~**Single edge vs. blend**~~ — RESOLVED: **PEAD only** for v1 (clean, testable);
-   price-momentum as a co-signal is a later add.
+4. ~~**Single edge vs. blend**~~ — RESOLVED (revised): **hybrid dual momentum**
+   is the edge (relative rank + absolute trend). PEAD was the first pass and was
+   dropped; earnings data demotes to defensive event-awareness. See STRATEGY.md.
 5. ~~**Trust before proof**~~ — RESOLVED: **backtest-first** (validate drift vs.
    Schwab history before the $20; seeds outcome-tracking).
 6. **Verify depth** — single-pass research vs. full bull/bear/judge adversarial
    layer. *(still open)*
 7. ~~**Same-day catalyst entries**~~ — RESOLVED: **nightly-only for v1** (drift
    persists for weeks; same-day reaction is a later add).
-8. ~~**Universe**~~ — RESOLVED: **earnings-driven dynamic screen** (fresh reporters,
-   liquidity + quality filtered) **+ a handful of liquid ETFs** as *core exposure /
-   ballast* (not a PEAD edge). Codified in `config/strategy.toml`.
+8. ~~**Universe**~~ — RESOLVED (revised for momentum): **fixed 150 single names**
+   (`config/universe.csv`, human-seed reconciled with dollar-volume fill) **+ an
+   18-ETF dual-momentum sleeve** (`config/etf_universe.csv`), run as two parallel
+   engines at a **70/30** split. Replaces the PEAD earnings-dynamic screen.
+9. ~~**ETF role**~~ — RESOLVED: not ballast — a **parallel dual-momentum rotation
+   sleeve** (11 SPDR sectors + broad + intl + defensive); defensive assets rank
+   in-sleeve as the built-in off-switch destination.
 
 > **Strategy is codified** in [`config/strategy.toml`](../config/strategy.toml) —
 > the single source of truth for risk gates, universe, PEAD signal thresholds,
@@ -333,6 +341,11 @@ on a timer, with nobody watching**. Three things make that work:
       risk gates + universe + signal + regime; wired into the store; verified live
 - [x] Build FRED macro adapter (`src/adapters/fred/`) — VIX / 10y-2y curve / HY
       spread, retry + cache-last-good; verified live
+- [x] **Momentum strategy designed + put to paper** — all axes closed; written
+      for the deployed agent in `docs/STRATEGY.md`; params in `config/strategy.toml`
+- [x] **Universe built** — fixed 150 (`config/universe.csv`) + 18-ETF sleeve
+      (`config/etf_universe.csv`), 70/30 split
+- [ ] **Backtest the momentum signal** vs history (the proof gate before live) ← next
 - [ ] Macro event calendar (FOMC/CPI dates) — deterministic event-risk feed
 - [ ] Slow loop (research → theses) + fast loop (theses → sized orders)
 - [ ] Governance + orchestration (incl. mechanical regime floor)

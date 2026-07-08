@@ -86,6 +86,10 @@ src/event_calendar/     Earnings/event calendar compiler (timing + risk spine).
                         (Named `event_calendar`, NOT `calendar` — avoids shadowing
                         the Python stdlib module, which breaks imports.)
 scripts/                One-off + weekly auth and API-scope probe scripts
+docs/STRATEGY.md        THE TRADING STRATEGY, written for the deployed agent —
+                        dual momentum: exact signal math, portfolio rules, the
+                        fast-loop execution procedure, guardrails, proof gate.
+                        Read this before trading. (edge = momentum, options OFF)
 docs/DESIGN.md          Full architecture (6 layers, two-clock model, scope tables)
 docs/architecture.*     The architecture diagram (svg + excalidraw source)
 .env / .env.example     Credentials (git-ignored) / template

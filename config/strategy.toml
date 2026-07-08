@@ -8,11 +8,12 @@
 # ============================================================================
 
 [meta]
-name       = "pead-swing-v1"
+name       = "dual-momentum-v1"
 horizon    = "swing"              # multi-day to a few weeks
-edge       = "pead"              # post-earnings-announcement drift (single edge, v1)
-instrument = "equities"          # options deferred (theta fights the hold)
+edge       = "momentum"           # hybrid dual momentum (relative rank + absolute trend)
+instrument = "equities"          # equities ONLY — options are OFF (no options risk)
 account    = "robinhood-agentic" # execution: RH Agentic account ONLY
+# Full prose spec written for the deployed agent: docs/STRATEGY.md
 
 # --- Risk gates: enforced by the Research Store on every write_product() -----
 # (These ARE research_store.validate.DEFAULT_MANDATE, externalized.)
@@ -29,13 +30,25 @@ target_tiers = [0.05, 0.10]           # scale-out at ~+5% then ~+10%
 ma_exit_days = 21                     # exit if close < 21-day MA, even pre-target
 no_chase     = true                   # only enter within the thesis entry_zone
 
-# --- The PEAD signal --------------------------------------------------------
+# --- The momentum signal (see docs/STRATEGY.md §3 for exact math) ------------
+# Deterministic. Run as CODE, do not eyeball. Same signal on both engines.
 [signal]
-min_surprise_pct           = 3.0    # only names that beat/missed by >= this %
-drift_window_days          = 30     # expected hold horizon for the drift
-confirm_with_surprise_data = true   # entry trigger = Finnhub surprise ROW landing,
-                                    # not merely the calendar date passing
-require_revision_up         = false # estimate-revision momentum: confirming, not required (v1)
+lookback_days     = 252     # 12-month formation window
+skip_recent_days  = 0       # 12-0: INCLUDE the most recent month (no skip)
+trend_ma_days     = 200     # trend view = close / SMA(200) - 1
+# Relative rank = equal-weight rank-average of [ risk-adjusted return (R/sigma),
+#   trend (close/SMA200 - 1) ]. NO tunable weights — do not add any.
+rank_method       = "rank_average"
+absolute_gate     = "return_positive"   # eligible only if 12mo total return > 0
+
+# --- Portfolio construction (see docs/STRATEGY.md §4) -----------------------
+[portfolio]
+book_weight   = 0.70    # single-name book share of capital
+sleeve_weight = 0.30    # ETF sleeve share of capital
+book_hold     = 10      # names held in the book
+book_band     = 15      # banded exit: keep a held name until it drops below rank 15
+sleeve_hold   = 4       # ETFs held in the sleeve
+rebalance     = "weekly"  # full re-rank + rotate weekly; risk exits run nightly
 
 # --- Tradeable universe -----------------------------------------------------
 # MOMENTUM edge: a FIXED, curated single-name universe that the cross-sectional
