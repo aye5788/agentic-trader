@@ -368,6 +368,15 @@ on a timer, with nobody watching**. Three things make that work:
       absolute gate + trend filter before delisting). Caveats: 5yr window (Alpaca
       free floor), noisy IEX-slice volume for ranking, no intra-week stops modeled.
 - [ ] Macro event calendar (FOMC/CPI dates) — deterministic event-risk feed
-- [ ] Slow loop (research → theses) + fast loop (theses → sized orders)
+- [x] **Slow loop** (`scripts/slow_loop.py`) — deterministic: momentum signal →
+      top-10 book + top-4 sleeve → IBD geometry (vol-scaled, R:R≥2) → validated
+      write to the Research Store. Writes a full 14-name book, verified round-trip.
+- [x] **Fast loop** (`scripts/fast_loop.py`) — deterministic diff (targets vs.
+      holdings → dollar-notional buy/sell plan, tested); enforces the one-Agentic-
+      account guardrail. Verified live read-only against RH ($20 cash → 14-order
+      $20 plan). **Placement (review→place) held at the proof gate** — needs
+      explicit human approval before any live order.
+- [ ] Wire the RH read (get_equity_positions/get_portfolio → snapshot) + the
+      review→place placement step into the deployed agent's fast-loop run
 - [ ] Governance + orchestration (incl. mechanical regime floor)
 - [ ] VPS deployment

@@ -105,6 +105,15 @@ scripts/backtest_pit.py SURVIVORSHIP-CORRECTED backtest: ranks top-150 by traili
                         (2021-2026). This is the number to trust, not backtest.py's
                         biased 34%. held-into-death=0 (risk framework works).
 config/pit_pool.csv     816-name survivorship-free pool (ticker, source, in_sp500_ever).
+scripts/slow_loop.py    SLOW LOOP (deterministic brain, no LLM, no trading): momentum
+                        signal → top-10 book + top-4 sleeve → IBD trade geometry
+                        (vol-scaled targets, R:R≥2) → write validated book to the
+                        Research Store. Regime-off/nothing-eligible → cash is valid.
+scripts/fast_loop.py    FAST LOOP diff core: stored targets vs. RH holdings →
+                        dollar-notional buy/sell plan. Enforces the one-Agentic-
+                        account guardrail. NEVER places — placement is the agent's
+                        review_equity_order→place_equity_order MCP step, gated by
+                        the proof gate. --selftest covers the diff logic.
 src/research_store/     Research Store — validated slow→fast handoff (belief +
                         journal). write_product enforces the [risk] mandate.
 src/adapters/alpaca/    Alpaca news client + get_news (data-only, no trading)
