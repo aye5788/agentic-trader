@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO / "src"))
 from research_store import store  # noqa: E402
 
 FILLS = REPO / "research_store" / "rh" / "fills.json"
+REENTRY_DECISIONS = REPO / "research_store" / "rh" / "reentry_decisions.json"
 
 
 def main() -> None:
@@ -36,8 +37,19 @@ def main() -> None:
         "n": len(fills),
         "fills": fills,
     }
+    # post-take-profit re-entry judgments, if the agent made any this run
+    # (prompts/fast_loop.md step 7b) — journaled alongside the fills, then
+    # consumed so a later run can't re-journal stale decisions
+    if REENTRY_DECISIONS.exists():
+        try:
+            entry["reentry_decisions"] = json.loads(REENTRY_DECISIONS.read_text())
+            REENTRY_DECISIONS.unlink()
+        except Exception as e:
+            print(f"reentry_decisions.json unreadable ({e}) — journaling fills without it")
     store.append_journal(entry)
-    print(f"journaled {len(fills)} fills -> {store.JOURNAL}")
+    print(f"journaled {len(fills)} fills"
+          + (f" + {len(entry.get('reentry_decisions', []))} re-entry decisions" if entry.get("reentry_decisions") else "")
+          + f" -> {store.JOURNAL}")
 
 
 if __name__ == "__main__":

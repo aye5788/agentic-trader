@@ -17,8 +17,10 @@ around it rather than guessing. You are the narrator, not the calculator.
    Fields: issue_number, issue_date, account {value, cash, cash_pct},
    week_pnl (NULL in early issues — see below), unrealized_pnl_on_cost,
    regime, book[] (rank order; sleeve=true = ETF sleeve), fills_this_week,
-   exit_signals_this_week, notes (halts/blocks worth narrating), cooldown,
-   next_rebalance, kill_switch.
+   exit_signals_this_week, reentry_decisions_this_week (post-take-profit
+   judgment calls — full/half/skip with reasons; when present, narrate them
+   in the letter: these are the week's actual PM decisions), notes
+   (halts/blocks worth narrating), cooldown, next_rebalance, kill_switch.
 
 2. **Copy the template** `newsletter/template.html` and replace every
    `{{TOKEN}}`:

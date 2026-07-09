@@ -39,6 +39,26 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    sells first, then buys: `review_equity_order` → on a clean review →
    `place_equity_order` (fractional, dollar-notional, side + amount from the
    plan). If a review returns a problem, skip that order and note it.
+7b. **Re-entry judgment** (each order in `review` — names whose take-profit
+   just fired; the mechanical plan wants them rebought, and YOUR only power is
+   to veto or downsize — never exceed the order's amount):
+   - `get_equity_quotes` for the symbol. HARD RULE first, no discretion: if
+     the live price < the order's `reentry.knife_floor` (if `price_checked`
+     was null, the floor still applies — compare yourself) → SKIP. That is
+     the falling-knife guard, it is code not judgment.
+   - Otherwise judge from evidence: the name's rank/score in
+     `research_store/current.json`; live price vs `reentry.exit_price`
+     (holding above or reclaiming the exit = trend intact; fading below =
+     distribution); earnings imminent (`get_earnings_calendar`); anything
+     clearly adverse in the picture. Then choose ONE:
+       a. **full** — place the order as planned (trend strongly intact)
+       b. **half** — place half the amount (constructive but extended)
+       c. **skip** — place nothing; it re-reviews tomorrow until the flag
+          expires. When uncertain, skip — cash is a position.
+   - Record EVERY decision (skips included) in
+     `research_store/rh/reentry_decisions.json`, a JSON array of
+     `{"symbol","decision":"full|half|skip","current_price","exit_price",
+     "reason":"<25 words max>"}` — record_fills.py journals it in step 9.
 8. **Reconcile.** If you placed ANY order: re-fetch `get_equity_positions` and
    `get_portfolio`, and rewrite `research_store/rh/positions.json` (same schema
    as step 4, fresh `ts`) so the store reflects post-trade reality — the

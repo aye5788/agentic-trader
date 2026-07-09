@@ -95,12 +95,13 @@ def main() -> None:
     # --- this week's journal events ---
     events = [e for e in _jsonl(RS / "journal.jsonl") if (e.get("ts") or "9999") >= since
               or e.get("as_of", "") >= since[:10]]
-    fills, exits, notes = [], [], []
+    fills, exits, notes, reentries = [], [], [], []
     for e in events:
         if e.get("event") == "execution":
             for f in e.get("fills", e.get("placed", [])):
                 fills.append({k: f.get(k) for k in
                               ("symbol", "side", "amount", "status", "avg_price") if k in f})
+            reentries.extend(e.get("reentry_decisions", []))
             if e.get("halt_reason"):
                 notes.append(e["halt_reason"])
         elif e.get("event") == "exit_signal":
@@ -123,6 +124,7 @@ def main() -> None:
         "book": book,
         "fills_this_week": fills,
         "exit_signals_this_week": exits,
+        "reentry_decisions_this_week": reentries,
         "notes": notes,
         "cooldown": list(_read_json(RS / "monitor" / "cooldown.json", {})),
         "next_rebalance": (today + timedelta(days=days_ahead)).isoformat(),

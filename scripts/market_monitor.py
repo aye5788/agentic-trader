@@ -44,6 +44,7 @@ MON = REPO / "research_store" / "monitor"
 STATE = MON / "state.json"
 QUOTES = MON / "quotes.json"
 COOLDOWN = MON / "cooldown.json"
+REENTRY = MON / "reentry_review.json"
 EXIT_REQ = MON / "exit_request.json"
 EXIT_RES = MON / "exit_result.json"
 ET = ZoneInfo("America/New_York")
@@ -102,6 +103,16 @@ def add_cooldown(symbol: str, days: int):
     until = (_now_et() + timedelta(days=days)).date().isoformat()
     cd[symbol] = until
     _save(COOLDOWN, cd)
+
+
+def add_reentry_review(symbol: str, tier: str, exit_price: float, days: int):
+    """A take-profit fired and sold — flag the name so the fast loop routes its
+    otherwise-automatic rebuy through the agent's re-entry judgment ([reentry])."""
+    rv = _load(REENTRY, {})
+    rv[symbol] = {"tier": tier, "exit_price": exit_price,
+                  "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                  "expires": (_now_et() + timedelta(days=days)).date().isoformat()}
+    _save(REENTRY, rv)
 
 
 def run_executor() -> dict:
@@ -197,11 +208,15 @@ def check_once(cfg, client) -> int:
 
     # mark fired + cooldown the stops we acted on
     fired_key = {"stop": "stop", "target1": "t1", "target2": "t2"}
+    reentry = cfg.get("reentry", {})
     for t in triggers:
         if t["symbol"] in sold:
             st["fired"].setdefault(t["symbol"], []).append(fired_key[t["reason"]])
             if t["reason"] == "stop" and armed:
                 add_cooldown(t["symbol"], m.get("cooldown_days", 5))
+            elif t["reason"].startswith("target") and armed and reentry.get("enabled"):
+                add_reentry_review(t["symbol"], t["reason"], t["price"],
+                                   int(reentry.get("review_days", 5)))
     _save(STATE, st)
     return len(triggers)
 

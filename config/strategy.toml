@@ -106,6 +106,19 @@ cooldown_days  = 5        # a stopped-out name is excluded from the book this lo
 alert_only     = false    # true = detect+journal breaches but place NO sells
                           #   (also forced alert-only whenever live_approved=false)
 
+# --- Post-take-profit re-entry review (the agent overlay's one live surface) --
+# Without this, a target hit is blindly rebought next morning (fixed slot
+# weights + no cooldown). With it, the rebuy goes to JUDGMENT: the fast-loop
+# agent may re-enter full, re-enter half, or skip — veto/downsize ONLY, never
+# more than the mechanical plan wanted (docs/DESIGN.md: agent overlay = OFF
+# switch). One rule stays pure code: the knife guard below.
+[reentry]
+enabled         = true    # false = revert to blind mechanical rebuy
+knife_guard_pct = 0.04    # HARD block, no discretion: no rebuy if price fell
+                          #   more than this below the take-profit exit fill
+review_days     = 5       # judgment window; after this the name rebuys normally
+allow_half      = true    # the downsize option in the agent's menu
+
 # --- Governance guardrails (Layer 5) — the last gate before any live order ---
 # The [risk] mandate validates the research PRODUCT on write; these validate
 # EXECUTION at trade time. Enforced by src/governance.py in the fast loop.
