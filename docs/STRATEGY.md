@@ -102,8 +102,12 @@ excluded from the held set (it can still be computed, but never held).
   gate: **hold nothing. Standing aside is a valid, intended state.** There is no
   hedge and no inverse ETF — cash is the position. (In the sleeve, the defensive
   ETFs may still rank in; that is allowed and is the same idea.)
-- Agent qualitative overlay is **v2** and OFF-only when it exists (it may veto or
-  downsize, never green-light). For now the gate is deterministic.
+- Agent qualitative overlay is OFF-only (it may veto or downsize, never
+  green-light). Its first live surface exists since 2026-07-09: **post-take-profit
+  re-entry** — a target-hit name's otherwise-automatic rebuy goes to the fast-loop
+  agent's judgment (full / half / skip), beneath a deterministic 4% knife-guard no
+  judgment can override (`[reentry]` config, prompts/fast_loop.md step 7b).
+  The regime gate itself remains fully deterministic.
 
 ## 8. Execution — the fast-loop procedure
 

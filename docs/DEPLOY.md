@@ -129,7 +129,7 @@ each day — one point per trading day from first run.
 **Health check — is each piece alive?**
 ```bash
 systemctl status agentic-monitor agentic-dashboard cloudflared   # all: active (running)
-crontab -l                                    # 4 jobs: slow (Sun 20:00, M-F 18:00), fast (M-F 10:00), reauth
+crontab -l                                    # 5 jobs: slow (Sun 20:00, M-F 18:00), fast (M-F 10:00), letter (Sun 21:00), reauth (Mon 9:00)
 timedatectl                                   # MUST be America/New_York or cron fires at wrong times
 cat research_store/monitor/state.json         # {"book_asof": <date>, "fired": {}} = monitor polled OK
 tail logs/slow.log logs/fast.log              # last loop runs
@@ -160,12 +160,19 @@ journalctl -u agentic-monitor -n 50           # monitor: silent unless a stop/ta
   commands or type into an editor; fix stray YAML indent with `sed '2,$ s/^  //'`.
 
 **Kill switch:** `touch research_store/HALT` stops the monitor and fast loop
-instantly; `rm` resumes. **Pause new buys:** set `[proof] live_approved=false`.
+instantly; `rm` resumes. **Pause new buys:** set `live_approved=false` in
+`config/strategy.local.toml` (or delete that file to fully disarm).
 
 ## What is NOT yet automated (know before unattended live)
 
-- **Nightly *exits-only* mode** — the slow loop currently re-ranks fully each run
-  (fine weekly; the nightly stop/MA-exit-only pass is not yet a separate mode).
-- **Fill reconciliation / P&L journaling** beyond the basic order log.
-- **Alerting** — cron logs to files; no push/email on failure yet.
-- **Schwab weekly re-auth** — inherently manual (see Phase 3).
+- **Nightly *exits-only* mode** — the slow loop still re-ranks fully each run,
+  but since 2026-07-09 the banded holds engage (held names kept until below
+  rank `book_band`), so nightly runs no longer churn on small rank slips.
+- **Schwab weekly re-auth** — inherently manual (see Phase 3). Monday's cron
+  now pushes the reminder to the phone (ntfy) as well as the log.
+
+Done since this list was written (2026-07-09): fill reconciliation + realized
+P&L journaling (fast_loop/exit prompts reconcile positions and snapshot
+`get_realized_pnl` after sells); failure alerting (deploy/alert.sh ERR-traps
+every cron wrapper to ntfy; the monitor pushes stop/target triggers, execution
+results, and re-entry judgments to the same topic).

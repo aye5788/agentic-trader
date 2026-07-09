@@ -86,17 +86,33 @@ scripts/market_monitor.py Intraday stop/take-profit watcher. Polls Schwab quotes
                         watching, Claude only on an event. Runs as a systemd
                         service; alert-only unless live_approved. [monitor] config.
 prompts/fast_loop.md    The headless-Claude execution procedure (RH is MCP-only).
+                        Includes step 7b: post-take-profit re-entry judgment
+                        (full/half/skip — veto/downsize ONLY; [reentry] config,
+                        hard 4% knife-guard lives in fast_loop.py, not judgment).
 prompts/exit.md         Exit-executor procedure — market-sell the breached
-                        positions the monitor flags, then journal.
+                        positions the monitor flags, journal, reconcile the
+                        snapshot + realized-P&L after selling.
+src/marks.py            Position valuation — the ONE place snapshot positions
+                        become dollars (qty × freshest mark: monitor quote >
+                        snapshot last > cost). Dashboard, log_equity, and the
+                        fast-loop diff all read through it. Snapshot schema
+                        documented here.
 dashboard/app.py        Flask monitor (127.0.0.1:8787), renders live from the
                         Research Store; password-gated (DASH_USER/DASH_PASS in
                         .env, fail-closed). Live at dash.ethobs.uk via cloudflared
                         tunnel. dashboard/dashboard.html = the page template.
-scripts/log_equity.py   Appends a daily equity point (from the RH snapshot) to
+scripts/log_equity.py   Appends a daily equity point (marked via src/marks.py) to
                         research_store/history/equity.jsonl — the dashboard curve.
                         Run by run_fast_loop.sh each day.
+prompts/newsletter.md   Weekly investor letter ("The Claude Ledger") — headless
+                        Claude narrates ONLY from letter_facts.py's facts.json
+                        (never computes numbers), fills newsletter/template.html,
+                        Sundays 21:00. scripts/send_newsletter.py delivers via
+                        Resend HTTPS API (DO blocks ALL outbound SMTP ports).
 deploy/                 run_slow_loop.sh (Python), run_fast_loop.sh (Claude, with
-                        ANTHROPIC_API_KEY guard), crontab.template. See docs/DEPLOY.md.
+                        ANTHROPIC_API_KEY guard), run_newsletter.sh,
+                        crontab.template, alert.sh (ERR-trap → ntfy phone push on
+                        any cron failure), reauth_reminder.sh. See docs/DEPLOY.md.
 src/momentum.py         THE SIGNAL — single source of truth for the ranking math
                         (docs/STRATEGY.md §3). compute(panel, asof, lookback=252)
                         -> per-ticker R/sigma/trend/score/eligible/rank; select()
