@@ -118,7 +118,10 @@ def add_reentry_review(symbol: str, tier: str, exit_price: float, days: int):
 def run_executor() -> dict:
     """Fire the headless exit executor and return its result file ([] on failure)."""
     try:
-        subprocess.run(["claude", "-p", (REPO / "prompts" / "exit.md").read_text()],
+        # model pinned (see run_fast_loop.sh) — the exit path must never break
+        # because a default model was retired
+        subprocess.run(["claude", "-p", "--model", "claude-opus-4-8",
+                        (REPO / "prompts" / "exit.md").read_text()],
                        cwd=str(REPO), timeout=180, check=False)
     except Exception as e:                            # never let execution crash the monitor
         print(f"  executor error: {e}")

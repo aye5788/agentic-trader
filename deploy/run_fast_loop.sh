@@ -17,6 +17,8 @@ fi
 # headless; we don't require the token so an existing login is fine.
 
 mkdir -p logs
-claude -p "$(cat prompts/fast_loop.md)"
+# Model pinned explicitly: don't ride the box default — if the default model is
+# ever retired/renamed, cron must keep trading on a known-available model.
+claude -p --model claude-opus-4-8 "$(cat prompts/fast_loop.md)"
 # record a daily equity point for the dashboard (best-effort; never fail the run)
 .venv/bin/python scripts/log_equity.py || true

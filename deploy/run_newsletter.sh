@@ -15,7 +15,8 @@ fi
 mkdir -p logs
 # 1. numbers (pure Python — the letter may not invent figures)
 .venv/bin/python scripts/letter_facts.py
-# 2. narrative (headless Claude fills newsletter/template.html)
-claude -p "$(cat prompts/newsletter.md)"
+# 2. narrative (headless Claude fills newsletter/template.html; model pinned —
+#    see run_fast_loop.sh)
+claude -p --model claude-opus-4-8 "$(cat prompts/newsletter.md)"
 # 3. delivery (no-op with a notice until NEWSLETTER_* creds exist in .env)
 .venv/bin/python scripts/send_newsletter.py || true
