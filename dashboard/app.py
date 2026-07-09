@@ -15,6 +15,7 @@ from flask import Flask, Response, request
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
+import marks                                          # noqa: E402
 import strategy as strat                              # noqa: E402
 from research_store import read_current               # noqa: E402
 from research_store.validate import reward_risk       # noqa: E402
@@ -69,21 +70,25 @@ def _tail_jsonl(path, n):
 def build_data() -> dict:
     cfg = strat.load()
     prod = read_current()
-    snap = _read_json(RS / "rh" / "positions.json", {})
-    positions = snap.get("positions", {})
-    acct_value = float(snap.get("account_value", 0) or 0)
-    invested = sum(float(v) for v in positions.values())
+    valued = marks.load() or {"positions": {}, "invested": 0.0, "cash": 0.0,
+                              "account_value": 0.0, "marked_at": None}
+    positions = valued["positions"]
+    acct_value = valued["account_value"]
+    invested = valued["invested"]
 
     holdings = []
     if prod:
         for t in sorted(prod.theses, key=lambda x: x.rank):
             if t.target_weight <= 0:
                 continue
-            mv = float(positions.get(t.symbol, 0) or 0)
+            p = positions.get(t.symbol) or {}
+            mv = p.get("value", 0.0)
             rr = reward_risk(t)
             holdings.append({
                 "ticker": t.symbol, "type": "etf" if t.rank >= 100 else "stock",
                 "weight": round(t.target_weight, 4), "value": round(mv, 2),
+                "qty": p.get("qty"), "avg_cost": p.get("avg_cost"),
+                "last": p.get("mark"), "pnl": p.get("pnl"),
                 "entry": round(sum(t.entry_zone) / 2, 2) if t.entry_zone else None,
                 "stop": t.stop, "targets": t.targets or [],
                 "rr": round(rr, 2) if rr else None,
@@ -94,16 +99,16 @@ def build_data() -> dict:
     equity = _tail_jsonl(RS / "history" / "equity.jsonl", 400)
     gov_state = _read_json(RS / "governance" / "state.json", {})
     peak = float(gov_state.get("peak_value", acct_value) or acct_value)
-    dd = 0.0 if peak <= 0 else (acct_value / peak - 1.0)
+    dd = 0.0 if peak <= 0 else min(0.0, acct_value / peak - 1.0)
     cooldown = _read_json(RS / "monitor" / "cooldown.json", {})
     mstate = _read_json(RS / "monitor" / "state.json", {})
 
     g = cfg["governance"]
     regime = (prod.regime if prod and prod.regime else {"status": "unknown"})
     return {
-        "account": {"nickname": snap.get("nickname", "Agentic"), "masked": "••••4924",
+        "account": {"nickname": "Agentic", "masked": "••••4924",
                     "value": round(acct_value, 2), "invested": round(invested, 2),
-                    "cash": round(acct_value - invested, 2)},
+                    "cash": valued["cash"], "marked_at": valued["marked_at"]},
         "asof": prod.as_of if prod else None,
         "regime": regime,
         "flags": {"live_approved": bool(cfg.get("proof", {}).get("live_approved")),

@@ -3,6 +3,9 @@
 secrets/
 *.db
 
+# runtime logs — cron/service output, box-local
+/logs/
+
 # runtime state DATA dir — regenerated on the box each run.
 # Anchored to repo root so it does NOT also swallow the src/research_store/
 # CODE package (same name, different thing — the package MUST be committed).

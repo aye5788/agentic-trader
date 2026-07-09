@@ -34,6 +34,7 @@ from adapters.schwab import research             # noqa: E402
 
 MON = REPO / "research_store" / "monitor"
 STATE = MON / "state.json"
+QUOTES = MON / "quotes.json"
 COOLDOWN = MON / "cooldown.json"
 EXIT_REQ = MON / "exit_request.json"
 EXIT_RES = MON / "exit_result.json"
@@ -112,9 +113,16 @@ def check_once(cfg, client) -> int:
         print(f"  quote error (will retry next tick): {e}")
         return 0
 
+    # persist the marks we just paid for — the dashboard + equity logger value
+    # positions from this file (via src/marks.py) instead of stale snapshots
+    prices = {sym: px for sym in held
+              if (px := _last_price(quotes.get(sym))) is not None}
+    _save(QUOTES, {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                   "prices": prices})
+
     triggers = []
     for sym, th in held.items():
-        px = _last_price(quotes.get(sym))
+        px = prices.get(sym)
         if px is None:
             continue
         fired = set(st["fired"].get(sym, []))

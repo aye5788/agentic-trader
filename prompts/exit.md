@@ -30,5 +30,15 @@ PROCEDURE — follow exactly:
    the trigger fired — omit failures so they retry).
 6. Also write those same fills to `research_store/rh/fills.json` and run
    `.venv/bin/python scripts/record_fills.py` to journal them.
-7. Report one concise line per exit: symbol, reason, amount sold, order id (or why
+7. **Reconcile.** If you sold anything: re-fetch `get_equity_positions` and
+   `get_portfolio`, and rewrite `research_store/rh/positions.json` — shares and
+   cost, NOT dollar values:
+   ```
+   {"account_number":"<num>","account_value":<get_portfolio.total_value>,
+    "cash":<get_portfolio.cash>,"as_of":"<YYYY-MM-DD>","ts":"<now, ISO-8601 UTC>",
+    "positions":{"SYM":{"qty":<quantity>,"avg_cost":<average_buy_price>},...}}
+   ```
+   The dashboard and equity log read this file; a stale snapshot after an exit
+   shows positions that no longer exist.
+8. Report one concise line per exit: symbol, reason, amount sold, order id (or why
    skipped). That is your entire output.

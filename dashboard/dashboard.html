@@ -53,7 +53,7 @@
   .grid{display:grid;grid-template-columns:1.72fr 1fr;gap:20px;align-items:start}
   @media (max-width:880px){.grid{grid-template-columns:1fr}}
   .tablewrap{overflow-x:auto}
-  table{width:100%;border-collapse:collapse;font-size:13px;min-width:560px}
+  table{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
   thead th{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;padding:10px 12px;border-bottom:1px solid var(--border)}
   thead th:first-child,tbody td:first-child{text-align:left}
   tbody td{padding:10px 12px;text-align:right;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
@@ -117,7 +117,7 @@
       <div class="hd"><h2>Holdings</h2><span class="meta" id="holdMeta"></span></div>
       <div class="tablewrap">
         <table><thead><tr>
-          <th>Ticker</th><th>Wt</th><th>Value</th><th>Entry</th><th>Stop</th><th>R:R</th><th>Momentum</th><th>Type</th>
+          <th>Ticker</th><th>Wt</th><th>Value</th><th>P&amp;L</th><th>Entry</th><th>Stop</th><th>R:R</th><th>Momentum</th><th>Type</th>
         </tr></thead><tbody id="rows"></tbody></table>
       </div>
     </main>
@@ -164,15 +164,17 @@ pills.push(DATA.flags.kill_switch
   ?`<span class="pill off"><span class="dot"></span>KILL-SWITCH ON</span>`
   :`<span class="pill"><span class="dot"></span>KILL-SWITCH CLEAR</span>`);
 document.getElementById("statusPills").innerHTML=pills.join("")+
-  `<div class="asof mono">as of ${DATA.asof||"—"} · refreshed ${(DATA.generated||"").replace('T',' ').replace('+00:00','')} UTC</div>`;
+  `<div class="asof mono">book ${DATA.asof||"—"} · marks ${(DATA.account.marked_at||"—").replace('T',' ').replace('+00:00','')} · refreshed ${(DATA.generated||"").replace('T',' ').replace('+00:00','')} UTC</div>`;
 
 // holdings
 const rows=document.getElementById("rows");
 (DATA.holdings||[]).forEach(h=>{
   const tr=el("tr");
+  const pnl=h.pnl==null?"—":`<span style="color:var(--${h.pnl>=0?'pos':'neg'})">${h.pnl>=0?'+':''}${(h.pnl*100).toFixed(1)}%</span>`;
   tr.innerHTML=`<td><span class="tkr">${h.ticker}</span></td>
     <td class="mono">${fmt(h.weight*100)}%</td>
     <td class="mono">$${fmt(h.value)}</td>
+    <td class="mono">${pnl}</td>
     <td class="mono">${fmt(h.entry)}</td>
     <td class="mono">${fmt(h.stop)}</td>
     <td class="rr">${h.rr!=null?fmt(h.rr):"—"}</td>

@@ -8,8 +8,10 @@ deterministic and lives here so it's testable and identical every run.
 Procedure the agent runs:
   1. get_accounts        -> the ONE account with agentic_allowed=true ("Agentic").
                             Zero or >1 match -> ABORT, trade nothing.
-  2. get_equity_positions-> actual holdings; get_portfolio -> account value.
-     Write both to research_store/rh/positions.json (the snapshot this reads).
+  2. get_equity_positions-> actual holdings (qty + avg cost); get_portfolio ->
+     account value + cash; get_equity_quotes -> last prices. Write the snapshot
+     research_store/rh/positions.json (schema in src/marks.py — this reads it
+     through marks.load(), qty × freshest mark).
   3. plan_orders(...)    -> fractional dollar-notional buy/sell list.
   4. review_equity_order -> (human approval) -> place_equity_order, per order.
      Equities only, options OFF. Never touch any non-Agentic account.
@@ -84,7 +86,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--snapshot", default=str(SNAPSHOT),
-                    help="RH positions snapshot json {account_value, positions:{sym:mktval}}")
+                    help="RH positions snapshot json (schema: src/marks.py)")
     args = ap.parse_args()
 
     if args.selftest:
@@ -100,12 +102,13 @@ def main() -> None:
         sys.exit("no research product — run scripts/slow_loop.py first")
     targets = get_targets()
 
-    snap = Path(args.snapshot)
-    if not snap.exists():
-        sys.exit(f"no RH snapshot at {snap}\n  (the agent writes it from get_equity_positions "
-                 f"+ get_portfolio before running the fast loop)")
-    data = json.loads(snap.read_text())
-    positions, acct = data.get("positions", {}), float(data["account_value"])
+    import marks                                                 # noqa: E402
+    valued = marks.load(Path(args.snapshot))
+    if valued is None:
+        sys.exit(f"no RH snapshot at {args.snapshot}\n  (the agent writes it from "
+                 f"get_equity_positions + get_portfolio before running the fast loop)")
+    positions = {s: p["value"] for s, p in valued["positions"].items()}
+    acct = valued["account_value"]
 
     plan = plan_orders(targets, positions, acct)
     print(f"target book as_of {prod.as_of} | regime {prod.regime['status']} | "
