@@ -122,6 +122,9 @@
       </div>
     </main>
     <aside>
+      <section class="card"><div class="hd"><h2>Last run — plan vs. actual</h2><span class="meta" id="planMeta"></span></div>
+        <div class="rows" id="planRows"></div>
+      </section>
       <section class="card"><div class="hd"><h2>Guardrails</h2><span class="meta">Layer 5</span></div>
         <div class="meter"><div class="lab"><span>Drawdown from peak</span><b id="ddLab"></b></div><div class="gauge"><i id="ddBar"></i></div></div>
         <div class="rows" id="guardRows"></div>
@@ -185,6 +188,31 @@ const rows=document.getElementById("rows");
 });
 document.getElementById("holdMeta").textContent=`${(DATA.holdings||[]).length} names · ${DATA.holdings&&DATA.holdings.some(h=>h.state==='held')?'live':'target'}`;
 
+// plan vs. actual
+const plan=DATA.plan,ex=DATA.last_execution;
+const planRows=document.getElementById("planRows"),planMeta=document.getElementById("planMeta");
+function prow(k,v,color){return `<div class="row"><span class="k">${k}</span><span class="v"${color?` style="color:var(--${color})"`:''}>${v}</span></div>`;}
+if(!plan){planRows.innerHTML=`<div class="empty">No order plan yet.</div>`;}
+else{
+  planMeta.textContent="planned "+((plan.generated||"").replace("T"," ").replace("+00:00","")||plan.as_of||"");
+  let h="";
+  if(plan.halted.length)h+=prow("⛔ HALTED",plan.halted.join(" · "),"neg");
+  if(!plan.approved.length&&!plan.review.length&&!plan.blocked.length)
+    h+=prow("Plan","no orders — book matches targets","pos");
+  plan.approved.forEach(o=>h+=prow(`${o.side.toUpperCase()} ${o.symbol}`,`$${fmt(o.amount)} · ${o.reason}`));
+  plan.review.forEach(o=>h+=prow(`⚖ REVIEW ${o.symbol}`,`$${fmt(o.amount)} · hit ${o.tier||"target"} · knife floor ${fmt(o.floor)}`,"warn"));
+  plan.blocked.forEach(o=>h+=prow(`✕ BLOCKED ${o.symbol}`,(o.why||"").slice(0,60),"neg"));
+  if(ex){
+    const ts=(ex.ts||"").replace("T"," ").slice(0,16);
+    h+=prow("— executed —",ts||"");
+    (ex.fills||[]).forEach(f=>h+=prow(`✓ ${(f.side||"").toUpperCase()} ${f.symbol}`,
+      `$${fmt(f.amount)}${f.avg_price?` @ ${fmt(f.avg_price)}`:""}${f.status?` · ${f.status}`:""}`,"pos"));
+    (ex.reentry_decisions||[]).forEach(d=>h+=prow(`⚖ ${d.symbol}: ${d.decision}`,(d.reason||"").slice(0,60),"warn"));
+    if(ex.halt)h+=prow("halt",(ex.halt||"").slice(0,80),"neg");
+  }
+  planRows.innerHTML=h;
+}
+
 // guardrails
 const g=DATA.guardrails||{};const dd=(g.drawdown||0)*100,lim=(g.dd_limit||.25)*100;
 document.getElementById("ddLab").textContent=`${dd.toFixed(1)}% / ${lim.toFixed(0)}%`;
@@ -194,7 +222,8 @@ document.getElementById("guardRows").innerHTML=
   `<div class="row"><span class="k">Max order size</span><span class="v">$${fmt(g.max_order)} · ${Math.round((g.max_order_pct||0)*100)}%</span></div>
    <div class="row"><span class="k">Live trading</span><span class="v" style="color:var(--${DATA.flags.live_approved?'pos':'warn'})">${DATA.flags.live_approved?'ARMED':'PAUSED'}</span></div>
    <div class="row"><span class="k">Kill-switch</span><span class="v">${DATA.flags.kill_switch?'ENGAGED':'clear'}</span></div>
-   <div class="row"><span class="k">Cooldown (stopped-out)</span><span class="v">${(g.cooldown&&g.cooldown.length)?g.cooldown.join(', '):'none'}</span></div>`;
+   <div class="row"><span class="k">Cooldown (stopped-out)</span><span class="v">${(g.cooldown&&g.cooldown.length)?g.cooldown.join(', '):'none'}</span></div>
+   <div class="row"><span class="k">Realized P&amp;L (30d)</span><span class="v">${DATA.realized?`<span style="color:var(--${(DATA.realized.total||0)>=0?'pos':'neg'})">$${fmt(DATA.realized.total)}</span> · ${DATA.realized.days?DATA.realized.days.reduce((a,x)=>a+(x.trades||0),0):0} closes`:'— (no exits yet)'}</span></div>`;
 
 // regime
 const r=DATA.regime||{};
@@ -210,12 +239,21 @@ const acts=DATA.activity||[];
 if(!acts.length){feed.innerHTML=`<div class="empty">No journal events yet.</div>`;}
 acts.forEach(a=>{
   let cls="info",ic="•",t=a.event||"event",d="";
-  if(a.event==="execution"){cls="ok";ic="✓";t=`Filled — ${a.n||(a.fills||[]).length} order(s)`;
-    d=(a.fills||[]).map(f=>`${(f.side||'').toUpperCase()} ${f.symbol} $${f.amount||f.quantity_or_amount||''}`).join(" · ");}
-  else if(a.event==="exit_signal"){cls="warn";ic="⚠";const tr=(a.triggers||[])[0]||{};
-    t=`${(tr.reason||'exit').toUpperCase()} signal — ${(a.triggers||[]).map(x=>x.symbol).join(', ')}`;
-    d=`${a.armed?'executed':'alert-only'} @ ${tr.price||''}`;}
-  else if(a.event==="product"||a.event==="write"){cls="info";ic="✎";t="Book written";d=`regime ${(a.regime&&a.regime.status)||''}`;}
+  if(a.event==="execution"){cls="ok";ic="✓";
+    const fl=a.fills||a.placed||[];
+    t=`Filled — ${a.n||fl.length} order(s)`;
+    d=fl.map(f=>`${(f.side||'').toUpperCase()} ${f.symbol} $${f.amount||f.quantity_or_amount||''}`
+      +(f.avg_price?` @ ${Number(f.avg_price).toFixed(2)}`:'')).join(" · ");
+    if((a.reentry_decisions||[]).length)
+      d+=(d?" · ":"")+a.reentry_decisions.map(r=>`⚖ ${r.symbol}:${r.decision}`).join(" ");
+    if(a.halt_reason){cls="warn";ic="⚠";d+=(d?" — ":"")+a.halt_reason.slice(0,90);}}
+  else if(a.event==="exit_signal"){cls="warn";ic="⚠";
+    t=`${((a.triggers||[])[0]||{}).reason ? (a.triggers||[]).map(x=>x.reason.toUpperCase()+" "+x.symbol).join(", ") : 'exit signal'}`;
+    d=(a.triggers||[]).map(x=>`${x.symbol} @ ${x.price} (level ${x.level}, sell ${Math.round((x.fraction||1)*100)}%)`).join(" · ")
+      +` — ${a.armed?'executed':'alert-only'}`;}
+  else if(a.event==="product"||a.event==="write"){cls="info";ic="✎";t="Book written";
+    d=`${a.theses||''} theses · regime ${(a.regime&&a.regime.status)||a.regime||''}`
+      +((a.regime&&a.regime.vix)?` · vix ${a.regime.vix.split(' ')[0]}`:'');}
   else if(a.event==="outcome"){cls="info";ic="◷";t=`Outcome — ${a.symbol||''}`;}
   const ts=(a.ts||"").replace('T',' ').slice(5,16);
   feed.appendChild(el("div","ev "+cls,`<div class="ic">${ic}</div><div class="bd"><div class="t">${t}</div><div class="d">${d}</div></div><div class="ts">${ts}</div>`));

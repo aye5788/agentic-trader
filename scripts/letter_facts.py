@@ -125,6 +125,7 @@ def main() -> None:
         "fills_this_week": fills,
         "exit_signals_this_week": exits,
         "reentry_decisions_this_week": reentries,
+        "realized": _read_json(RS / "rh" / "realized.json", None),
         "notes": notes,
         "cooldown": list(_read_json(RS / "monitor" / "cooldown.json", {})),
         "next_rebalance": (today + timedelta(days=days_ahead)).isoformat(),

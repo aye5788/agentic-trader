@@ -96,6 +96,11 @@ def build_data() -> dict:
                 "thesis": t.thesis,
             })
 
+    # plan vs. actual: the last computed order plan + the last execution event
+    plan = _read_json(RS / "rh" / "order_plan.json", {})
+    recent = _tail_jsonl(RS / "journal.jsonl", 60)
+    last_exec = next((e for e in reversed(recent) if e.get("event") == "execution"), None)
+
     equity = _tail_jsonl(RS / "history" / "equity.jsonl", 400)
     gov_state = _read_json(RS / "governance" / "state.json", {})
     peak = float(gov_state.get("peak_value", acct_value) or acct_value)
@@ -115,12 +120,32 @@ def build_data() -> dict:
                   "kill_switch": (RS / "HALT").exists(),
                   "monitor_book": mstate.get("book_asof")},
         "holdings": holdings,
+        "plan": {
+            "generated": plan.get("generated"), "as_of": plan.get("as_of"),
+            "live_approved": plan.get("live_approved"),
+            "halted": plan.get("halted") or [],
+            "approved": [{k: o.get(k) for k in ("symbol", "side", "amount", "reason")}
+                         for o in plan.get("approved", [])],
+            "review": [{"symbol": o.get("symbol"), "amount": o.get("amount"),
+                        "tier": (o.get("reentry") or {}).get("tier"),
+                        "floor": (o.get("reentry") or {}).get("knife_floor")}
+                       for o in plan.get("review", [])],
+            "blocked": [{"symbol": o.get("symbol"), "why": o.get("blocked")}
+                        for o in plan.get("blocked", [])],
+        } if plan else None,
+        "last_execution": {
+            "ts": last_exec.get("ts") or last_exec.get("as_of"),
+            "fills": last_exec.get("fills", last_exec.get("placed", [])),
+            "reentry_decisions": last_exec.get("reentry_decisions", []),
+            "halt": last_exec.get("halt_reason"),
+        } if last_exec else None,
         "equity": [{"date": e.get("date"), "value": e.get("value")} for e in equity],
         "guardrails": {"drawdown": round(dd, 4), "dd_limit": g["max_drawdown"],
                        "max_order_pct": g["max_order_pct"],
                        "max_order": round(g["max_order_pct"] * acct_value, 2),
                        "cooldown": list(cooldown.keys())},
-        "activity": _tail_jsonl(RS / "journal.jsonl", 14)[::-1],
+        "realized": _read_json(RS / "rh" / "realized.json", None),
+        "activity": recent[-14:][::-1],
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 

@@ -64,7 +64,13 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    as step 4, fresh `ts`) so the store reflects post-trade reality — the
    dashboard and equity log read this file. Check each placed order's state
    with `get_equity_orders(order_id=...)` to get its fill (`state`,
-   `average_price`).
+   `average_price`). If any SELL filled, also refresh the realized-P&L
+   snapshot: `get_realized_pnl(account, span="month", asset_classes=["equity"])`
+   → write `research_store/rh/realized.json` as
+   `{"ts":"<now iso>","window":"month","total":<total_returns as number>,
+   "total_rate":<total_rate_of_return as number>,
+   "days":[{"date":"<bucket start_time YYYY-MM-DD>","gain":<realized_gain>,
+   "trades":<number_of_trades>} for buckets with number_of_trades > 0]}`.
 9. **Journal.** Write the placed fills to `research_store/rh/fills.json` (a JSON
    array of `{symbol, side, amount, order_id, status, avg_price}` — status and
    avg_price from step 8's order check), then run

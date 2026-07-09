@@ -40,5 +40,12 @@ PROCEDURE — follow exactly:
    ```
    The dashboard and equity log read this file; a stale snapshot after an exit
    shows positions that no longer exist.
+   Also refresh the realized-P&L snapshot — a sell just realized a result:
+   `get_realized_pnl(account, span="month", asset_classes=["equity"])` → write
+   `research_store/rh/realized.json` as
+   `{"ts":"<now iso>","window":"month","total":<total_returns as number>,
+   "total_rate":<total_rate_of_return as number>,
+   "days":[{"date":"<bucket start_time YYYY-MM-DD>","gain":<realized_gain>,
+   "trades":<number_of_trades>} for buckets with number_of_trades > 0]}`.
 8. Report one concise line per exit: symbol, reason, amount sold, order id (or why
    skipped). That is your entire output.

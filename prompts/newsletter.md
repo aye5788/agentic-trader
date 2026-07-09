@@ -19,8 +19,11 @@ around it rather than guessing. You are the narrator, not the calculator.
    regime, book[] (rank order; sleeve=true = ETF sleeve), fills_this_week,
    exit_signals_this_week, reentry_decisions_this_week (post-take-profit
    judgment calls — full/half/skip with reasons; when present, narrate them
-   in the letter: these are the week's actual PM decisions), notes
-   (halts/blocks worth narrating), cooldown, next_rebalance, kill_switch.
+   in the letter: these are the week's actual PM decisions), realized
+   (BANKED P&L from closed positions — {total, total_rate, days}; null until
+   the first exit. Distinguish realized from paper gains when narrating:
+   "banked" vs "on paper"), notes (halts/blocks worth narrating), cooldown,
+   next_rebalance, kill_switch.
 
 2. **Copy the template** `newsletter/template.html` and replace every
    `{{TOKEN}}`:
