@@ -43,7 +43,10 @@ def _send_resend(api_key, sender, to, subject, html) -> None:
         data=json.dumps({"from": sender, "to": [to],
                          "subject": subject, "html": html}).encode(),
         headers={"Authorization": f"Bearer {api_key}",
-                 "Content-Type": "application/json"})
+                 "Content-Type": "application/json",
+                 # Cloudflare fronts api.resend.com and 403s (code 1010) the
+                 # default Python-urllib user agent — identify ourselves
+                 "User-Agent": "agentic-trader-newsletter/1.0"})
     with urllib.request.urlopen(req, timeout=30) as r:
         r.read()
 
