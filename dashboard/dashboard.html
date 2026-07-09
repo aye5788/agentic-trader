@@ -53,7 +53,7 @@
   .grid{display:grid;grid-template-columns:1.72fr 1fr;gap:20px;align-items:start}
   @media (max-width:880px){.grid{grid-template-columns:1fr}}
   .tablewrap{overflow-x:auto}
-  table{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
+  table{width:100%;border-collapse:collapse;font-size:13px;min-width:720px}
   thead th{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);font-weight:600;text-align:right;padding:10px 12px;border-bottom:1px solid var(--border)}
   thead th:first-child,tbody td:first-child{text-align:left}
   tbody td{padding:10px 12px;text-align:right;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}
@@ -117,7 +117,7 @@
       <div class="hd"><h2>Holdings</h2><span class="meta" id="holdMeta"></span></div>
       <div class="tablewrap">
         <table><thead><tr>
-          <th>Ticker</th><th>Wt</th><th>Value</th><th>P&amp;L</th><th>Entry</th><th>Stop</th><th>R:R</th><th>Momentum</th><th>Type</th>
+          <th>Ticker</th><th>Wt</th><th>Value</th><th>P&amp;L</th><th>Entry</th><th>Stop</th><th>Targets</th><th>R:R</th><th>Momentum</th><th>Type</th>
         </tr></thead><tbody id="rows"></tbody></table>
       </div>
     </main>
@@ -177,6 +177,7 @@ const rows=document.getElementById("rows");
     <td class="mono">${pnl}</td>
     <td class="mono">${fmt(h.entry)}</td>
     <td class="mono">${fmt(h.stop)}</td>
+    <td class="mono">${(h.targets&&h.targets.length)?h.targets.map(t=>fmt(t)).join(" / "):"—"}</td>
     <td class="rr">${h.rr!=null?fmt(h.rr):"—"}</td>
     <td><div class="mo"><div class="bar"><i style="width:${Math.round((h.score||0)*100)}%"></i></div><span>${h.score!=null?Number(h.score).toFixed(2):"—"}</span></div></td>
     <td><span class="tag ${h.type==='etf'?'etf':''}">${(h.type||'stock').toUpperCase()}</span></td>`;
@@ -200,6 +201,7 @@ const r=DATA.regime||{};
 document.getElementById("regimeRows").innerHTML=
   `<div class="row"><span class="k">Status</span><span class="v" style="color:var(--${reg==='on'?'pos':'neg'})">${reg.toUpperCase()}</span></div>
    <div class="row"><span class="k">Floor</span><span class="v">${r.floor||'SPY>50DMA'}</span></div>
+   <div class="row"><span class="k">VIX ceiling</span><span class="v">${r.vix||'—'}</span></div>
    <div class="row"><span class="k">Notes</span><span class="v" style="color:var(--faint);font-weight:400">${r.notes||''}</span></div>`;
 
 // activity feed

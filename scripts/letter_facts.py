@@ -85,8 +85,10 @@ def main() -> None:
             p = valued["positions"].get(t.symbol) or {}
             book.append({"symbol": t.symbol, "rank": t.rank,
                          "sleeve": t.rank >= 100, "thesis": t.thesis,
-                         "weight": round(t.target_weight, 4), "stop": t.stop,
-                         "targets": t.targets or [], "score": t.signals.get("score"),
+                         "weight": round(t.target_weight, 4),
+                         "stop": round(t.stop, 2) if t.stop else None,
+                         "targets": [round(x, 2) for x in (t.targets or [])],
+                         "score": t.signals.get("score"),
                          "value": p.get("value"), "pnl": p.get("pnl"),
                          "review_by": t.review_by})
 

@@ -4,7 +4,9 @@ This is the deterministic brain (docs/STRATEGY.md, "run as code, do not eyeball"
 It does NOT trade. It produces the research product the fast loop later executes.
 
   1. Load recent closes for the 150 names + 18 ETFs + SPY.
-  2. Regime floor: SPY (proxy $SPX) > 50DMA.  [VIX<=28 gate: TODO, needs VIX feed]
+  2. Regime floor: SPY (proxy $SPX) > 50DMA  AND  VIX <= [regime].vix_ceiling
+     (VIX from a live Schwab $VIX quote, FRED VIXCLS prior close as fallback;
+     both unavailable -> gate skipped FAIL-OPEN, the trend floor still rules).
   3. Rank both engines with the momentum signal (src/momentum.py).
   4. Select the book (top-10, banded) + sleeve (top-4).
   5. Attach IBD trade geometry per name (entry_zone, vol-adjusted stop, +5/+10%
@@ -32,6 +34,31 @@ from research_store.models import Thesis, ResearchProduct      # noqa: E402
 from research_store.validate import reward_risk                # noqa: E402
 
 PANEL = REPO / "research_store" / "prices" / "closes.parquet"
+
+
+def fetch_vix() -> tuple[float | None, str]:
+    """Current VIX level for the regime ceiling: live Schwab '$VIX' quote first,
+    FRED VIXCLS (prior close) as fallback. Returns (None, reason) when both
+    fail — the caller treats that FAIL-OPEN (VIX gate skipped, trend floor
+    still gates) because a data outage should not push the book to cash."""
+    try:
+        from adapters.schwab import research
+        blk = research.get_quotes(["$VIX"]).get("$VIX", {})
+        q = blk.get("quote", blk) or {}
+        px = q.get("lastPrice") or q.get("closePrice")
+        if px and float(px) > 0:
+            return float(px), "Schwab $VIX live"
+    except Exception as e:
+        print(f"  VIX via Schwab failed ({type(e).__name__}) — trying FRED")
+    try:
+        from adapters.fred import indicators
+        v = indicators.get_vix()
+        if v and v.get("value") is not None:
+            stale = " stale" if v.get("stale") else ""
+            return float(v["value"]), f"FRED VIXCLS {v.get('date', '')}{stale}"
+    except Exception as e:
+        print(f"  VIX via FRED failed ({type(e).__name__})")
+    return None, "unavailable (Schwab+FRED) — gate skipped fail-open"
 
 
 def geometry(price: float, sigma: float, stop_mult: float, r_mults: list[float]) -> dict:
@@ -110,7 +137,11 @@ def main() -> None:
             etfs = [t for t in etfs if t not in cooled]
             print(f"cooldown: excluding {sorted(cooled)} until their date")
 
-    regime = mom.regime_on(spy, asof, cfg["regime"]["trend_ma_days"])
+    trend = mom.regime_on(spy, asof, cfg["regime"]["trend_ma_days"])
+    vix, vix_src = fetch_vix()
+    ceiling = float(cfg["regime"]["vix_ceiling"])
+    vix_ok = vix is None or vix <= ceiling          # None = data outage -> fail-open
+    regime = trend and vix_ok
     book_scored = mom.compute(closes[names], asof)
     etf_scored = mom.compute(closes[etfs], asof)
 
@@ -128,12 +159,16 @@ def main() -> None:
     product = ResearchProduct(
         as_of=str(asof.date()), theses=theses,
         regime={"status": "on" if regime else "off",
-                "floor": f"SPY>{cfg['regime']['trend_ma_days']}DMA={regime}",
-                "notes": "VIX ceiling not yet wired"},
+                "floor": f"SPY>{cfg['regime']['trend_ma_days']}DMA={trend}",
+                "vix": (f"{vix:.1f}{'<=' if vix_ok else '>'}{ceiling:g}"
+                        f"{'' if vix_ok else ' CEILING BREACHED'} ({vix_src})"
+                        if vix is not None else f"n/a — {vix_src}"),
+                "notes": ""},
         notes=f"slow_loop dual-momentum book as of {asof.date()}")
 
     # ---- report ----
-    print(f"as_of {asof.date()} | regime {'ON' if regime else 'OFF (cash)'} | "
+    print(f"as_of {asof.date()} | regime {'ON' if regime else 'OFF (cash)'} "
+          f"(trend={trend}, vix={f'{vix:.1f}' if vix is not None else 'n/a'}/{ceiling:g}) | "
           f"book {len(book_held)}/{P['book_hold']} held, sleeve {len(etf_held)}/{P['sleeve_hold']} held")
     print(f"\n{'BOOK (top-10, R:R>=2 gated)':40}{'weight':>8}{'entry':>9}{'stop':>9}{'R:R':>6}")
     for t in book_held:

@@ -207,9 +207,11 @@ down/sideways tape**, so new entries are gated on market regime. The design is
 
 - **Mechanical floor = the ON switch (backtestable, non-negotiable).** No new
   entries unless the broad market passes a mechanical trend test (SPX/QQQ > 50-day
-  MA, optionally a VIX ceiling). Computed from **Schwab** — the load-bearing gate
-  has **no FRED dependency**. Pure code, provable against history, immune to
-  narrative.
+  MA) **and** VIX ≤ `[regime].vix_ceiling` (wired 2026-07-09: live Schwab `$VIX`
+  quote, FRED VIXCLS fallback; both down → gate skipped fail-open so a data
+  outage can't force cash). Computed from **Schwab** — the load-bearing trend
+  gate has **no FRED dependency**. Pure code, provable against history, immune
+  to narrative.
 - **Agent overlay = the OFF switch only (judgment; veto / downsize).** A tiny
   nightly read may *veto or downsize* on context the numbers can't see ("CPI
   tomorrow → stand down"; "macro-driven tape, stock-specific edge suppressed"). It
