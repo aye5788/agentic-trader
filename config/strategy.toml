@@ -119,5 +119,6 @@ require_whitelist = true                   # only ever trade names in config/uni
 [proof]
 mode          = "backtest_first"  # validate the signal vs history before the $20
 entry_cadence = "nightly"          # v1: no same-day catalyst reaction
-live_approved  = true             # MASTER SWITCH: fast loop may PLACE orders only when true.
-                                  # Committed as-armed (2026-07-09): repo mirrors the droplet.
+live_approved  = false            # MASTER SWITCH: fast loop may PLACE orders only when true.
+                                  # Ships SAFE. Arm a box via git-ignored
+                                  # config/strategy.local.toml:  [proof] live_approved = true

@@ -142,11 +142,12 @@ journalctl -u agentic-monitor -n 50           # monitor: silent unless a stop/ta
   `timedatectl set-timezone America/New_York && systemctl restart cron`.
 - **`curl localhost:8787` returns `000`** — Flask binds IPv4 `127.0.0.1`; `localhost`
   resolves to IPv6 `::1`. Use `127.0.0.1` explicitly. (The tunnel uses 127.0.0.1, unaffected.)
-- **`config/strategy.toml` is committed AS-ARMED** (`live_approved=true`, since
-  2026-07-09) — policy is that the repo mirrors the droplet exactly, so the master
-  switch travels with it. ⚠️ A fresh clone is therefore live-ready the moment
-  credentials + an RH login exist; flip `live_approved=false` first when setting
-  up any second box.
+- **The live switch is box-local, not in git.** The committed
+  `config/strategy.toml` ships SAFE (`live_approved=false`); a fresh clone can
+  never trade. The droplet is armed by the git-ignored
+  `config/strategy.local.toml` (`[proof] live_approved = true`), which
+  `src/strategy.py` deep-merges over the base. Pause new buys: edit the local
+  file, or delete it to fully disarm. `git pull` never conflicts on this.
 - **Schwab price feed dies weekly** — the 7-day OAuth token. Re-run
   `scripts/schwab_auth.py` (paste flow). If the slow loop errors on quotes/history, this is why.
 - **RH blocks the 2nd trade** — one-time "investor profile" KYC on the Agentic

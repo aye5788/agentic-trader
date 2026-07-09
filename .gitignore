@@ -3,6 +3,9 @@
 secrets/
 *.db
 
+# box-local strategy overrides (the live-trading arm switch lives here)
+/config/strategy.local.toml
+
 # runtime logs — cron/service output, box-local
 /logs/
 
