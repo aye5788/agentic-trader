@@ -5,44 +5,56 @@ to the principal. Voice: honest, plain, owns mistakes; cash is a position;
 never overclaim. The trades were made by the systematic dual-momentum loop —
 explain them as faithful execution of the system, not discretionary genius.
 
+⛔ EVERY number in the letter comes from `facts.json` (below). Never compute,
+estimate, or invent a figure — if a number is not in the facts file, write
+around it rather than guessing. You are the narrator, not the calculator.
+
 ## Procedure
 
-1. **Read the data** (all under `research_store/`):
-   - `history/equity.jsonl` — latest point = {date, value, invested, cash}.
-     WEEK_PNL = (latest value / value 5 trading days ago − 1), as "+X.X%" / "−X.X%".
-     ACCOUNT_VALUE = "$" + latest value. CASH_PCT = round(cash/value × 100) + "%".
-   - `current.json` — regime.status → REGIME ("ON"/"OFF"); theses[] for THE BOOK
-     (verdict in buy/accumulate/hold/trim; rank < 100 = book, ≥ 100 = ETF sleeve).
-   - `journal.jsonl` — "execution" events since the previous issue → fills.
-     Also note any exit-monitor stop-outs and cooldowns.
+1. **Read the facts.** `research_store/newsletters/facts.json` — written just
+   before this run by `scripts/letter_facts.py` (the wrapper runs it; if the
+   file is missing, run `.venv/bin/python scripts/letter_facts.py` first).
+   Fields: issue_number, issue_date, account {value, cash, cash_pct},
+   week_pnl (NULL in early issues — see below), unrealized_pnl_on_cost,
+   regime, book[] (rank order; sleeve=true = ETF sleeve), fills_this_week,
+   exit_signals_this_week, notes (halts/blocks worth narrating), cooldown,
+   next_rebalance, kill_switch.
 
 2. **Copy the template** `newsletter/template.html` and replace every
    `{{TOKEN}}`:
-   - `{{ISSUE_NUMBER}}` — increment from the last file in `research_store/newsletters/` (3 digits, e.g. 008).
-   - `{{ISSUE_DATE}}` — "Week of <Month D, YYYY>" (the Monday of the week covered).
+   - `{{ISSUE_NUMBER}}`, `{{ISSUE_DATE}}` — from facts, verbatim.
+   - `{{ACCOUNT_VALUE}}` — "$" + account.value. `{{CASH_PCT}}` — account.cash_pct + "%".
+   - `{{WEEK_PNL}}` — week_pnl as "+X.X%" / "−X.X%". If week_pnl is null (the
+     equity curve is too young), show "—", use neutral `#141413` for
+     `{{WEEK_PNL_COLOR}}`, and let the letter say tracking just began — you may
+     cite unrealized_pnl_on_cost instead, explicitly labeled "on cost since
+     entry". Otherwise `{{WEEK_PNL_COLOR}}` = `#2A6A4A` if ≥ 0, else `#A13A2E`.
+     `{{REGIME_COLOR}}` — same green/red rule for ON/OFF.
    - `{{PREHEADER}}` — one plain sentence summarizing the week (inbox preview).
-   - `{{WEEK_PNL_COLOR}}` — `#2A6A4A` if ≥ 0, else `#A13A2E`. `{{REGIME_COLOR}}` — same rule for ON/OFF.
    - `{{LETTER_PARAGRAPHS}}` — 2–3 `<p style="margin:0 0 18px;">…</p>` paragraphs:
-     what the week did, what rotated and why, posture. No greeting (template has it).
+     what the week did, what rotated and why, posture. No greeting (template has
+     it). Narrate anything in `notes` honestly (e.g. an order block) — the
+     principal reads about problems here, not in a postmortem.
    - `{{TRADE_ROWS}}` — one copy of the TRADE ROW snippet below per fill
      (group same-symbol fills). Rationale = why the system did it (entered/left
      the band, geometry gate, stop breach, rebalance). SIDE_COLOR: buys
-     `#2A6A4A`, sells/stops `#A13A2E`.
-   - `{{BOOK_ROWS}}` — one BOOK ROW per held thesis, rank order, book then
-     sleeve (sleeve stop = "—"). If more than ~8, show top 8 and say so in
+     `#2A6A4A`, sells/stops `#A13A2E`. No fills → one row saying so plainly.
+   - `{{BOOK_ROWS}}` — one BOOK ROW per book[] entry, given order (book then
+     sleeve; sleeve stop = "—"). If more than ~8, show top 8 and say so in
      `{{BOOK_FOOTNOTE}}` (e.g. "Showing 8 of 14 · book 10 names @ 7.0% + sleeve 4 ETFs @ 7.5%").
-   - `{{OUTLOOK_PARAGRAPHS}}` — 1–2 paragraphs: next rebalance date, review_by /
+   - `{{OUTLOOK_PARAGRAPHS}}` — 1–2 paragraphs: next_rebalance date, review_by /
      earnings within the window, the standing regime rule.
-   - `{{CRAB}}` — pick ONE mascot variant by mood, derived from WEEK_PNL:
+   - `{{CRAB}}` — pick ONE mascot variant by mood, from week_pnl (or
+     unrealized_pnl_on_cost when week_pnl is null):
      ≥ +1.5% → GREAT · ≥ 0 → STEADY · < 0 → ROUGH. Never flatter a losing week.
 
-3. **Write the issue** to `research_store/newsletters/issue_<NNN>.html`.
+3. **Write the issue** to
+   `research_store/newsletters/issue_<ISSUE_NUMBER>.html`.
    Verify no `{{` remains in the output.
 
-4. **Email it** (subject: "The Claude Ledger — Issue <NNN>, <ISSUE_DATE>"), e.g.
-   via a `scripts/send_newsletter.py` using smtplib + Gmail app-password env
-   vars (`NEWSLETTER_TO`, `NEWSLETTER_FROM`, `NEWSLETTER_APP_PASSWORD` in .env —
-   never print them). Send as `text/html`.
+4. **Do NOT email** — the wrapper (`deploy/run_newsletter.sh`) sends the newest
+   issue via `scripts/send_newsletter.py` after you exit. Credentials are not
+   your concern. Report 3 lines: issue written, mood chosen, one-line summary.
 
 ## Snippets
 

@@ -25,6 +25,7 @@ proof gate (§9: no live orders until backtested AND human-approved).
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -114,17 +115,32 @@ def main() -> None:
     print(f"target book as_of {prod.as_of} | regime {prod.regime['status']} | "
           f"account ${acct:,.2f} | {len(targets)} targets")
 
+    # ALWAYS overwrite the plan file — a stale plan from a prior run must never
+    # survive an empty/halted run, or the placement agent could re-execute it.
+    out = REPO / "research_store" / "rh" / "order_plan.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    def write_plan(approved, blocked, live, halted=None):
+        out.write_text(json.dumps({"as_of": prod.as_of, "account_value": acct,
+                                   "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                   "live_approved": live, "halted": halted or [],
+                                   "approved": approved, "blocked": blocked}, indent=2))
+
     # ---- governance: global halts, then per-order vetting ----
     halts = gov.preflight(acct, cfg)
     if halts:
         print("\n⛔ TRADING HALTED — place NOTHING:")
         for h in halts:
             print(f"   - {h}")
+        write_plan([], [], False, halted=halts)
+        print(f"empty plan -> {out}")
         return
     approved, blocked = gov.vet_plan(plan, acct, cfg)
 
     if not plan:
         print("\nno orders — portfolio already matches the target book.")
+        write_plan([], [], gov.live_approved(cfg))
+        print(f"empty plan -> {out}")
         return
     print(f"\nORDER PLAN ({len(approved)} approved, {len(blocked)} blocked):")
     for o in approved:
@@ -142,11 +158,7 @@ def main() -> None:
              if live else
              "PLAN ONLY. Set [proof] live_approved=true to authorize placement (proof gate §9)."))
     # emit machine-readable plan for the agent's placement step
-    out = REPO / "research_store" / "rh" / "order_plan.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"as_of": prod.as_of, "account_value": acct,
-                               "live_approved": live, "approved": approved,
-                               "blocked": blocked}, indent=2))
+    write_plan(approved, blocked, live)
     print(f"plan -> {out}")
 
 

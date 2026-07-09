@@ -20,6 +20,12 @@ HOME=/root
 # Mon–Fri 10:00 (after the open). No-op unless [proof] live_approved=true.
 0 10 * * 1-5 /opt/agentic-trader/deploy/run_fast_loop.sh >> /opt/agentic-trader/logs/fast.log 2>&1
 
+# --- WEEKLY INVESTOR LETTER (headless Claude narrative, then email) ---
+# Sunday 21:00, after the slow loop writes the new book — the letter wraps the
+# week and previews Monday's rotation. Emails only once NEWSLETTER_* creds
+# exist in .env; until then it just writes research_store/newsletters/.
+0 21 * * 0   /opt/agentic-trader/deploy/run_newsletter.sh >> /opt/agentic-trader/logs/newsletter.log 2>&1
+
 # --- SCHWAB WEEKLY RE-AUTH REMINDER (manual — token expires every 7 days) ---
 # Schwab's refresh token can't be renewed unattended; you must re-run the paste
 # flow weekly or the price feed dies. This just logs a loud reminder.
