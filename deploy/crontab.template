@@ -28,5 +28,5 @@ HOME=/root
 
 # --- SCHWAB WEEKLY RE-AUTH REMINDER (manual — token expires every 7 days) ---
 # Schwab's refresh token can't be renewed unattended; you must re-run the paste
-# flow weekly or the price feed dies. This just logs a loud reminder.
-0 9 * * 1    echo "$(date) ACTION NEEDED: run scripts/schwab_auth.py (7-day token)" >> /opt/agentic-trader/logs/reauth.log
+# flow weekly or the price feed dies. Logs + pushes to the phone (ntfy).
+0 9 * * 1    /opt/agentic-trader/deploy/reauth_reminder.sh

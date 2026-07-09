@@ -3,6 +3,7 @@
 # target book to the Research Store. Safe to run unattended.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source deploy/alert.sh "slow loop" "logs/slow.log"   # phone alert if this run dies
 mkdir -p logs
 PY=.venv/bin/python
 [ -x "$PY" ] || PY=python3

@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 import momentum as mom          # noqa: E402
 import strategy as strat        # noqa: E402
-from research_store import write_product                       # noqa: E402
+from research_store import read_current, write_product         # noqa: E402
 from research_store.models import Thesis, ResearchProduct      # noqa: E402
 from research_store.validate import reward_risk                # noqa: E402
 
@@ -145,8 +145,18 @@ def main() -> None:
     book_scored = mom.compute(closes[names], asof)
     etf_scored = mom.compute(closes[etfs], asof)
 
-    book_sel = mom.select(book_scored, set(), P["book_hold"], P["book_band"])
-    etf_sel = mom.select(etf_scored, set(), P["sleeve_hold"], P["sleeve_hold"])
+    # Banded holds need to know what the book ALREADY owns: a held name is kept
+    # until it falls below rank book_band, so nightly re-ranks don't churn a
+    # name that slips from 9th to 11th. (Passing set() here made every run a
+    # fresh top-N pick — the band never engaged; fixed 2026-07-09.)
+    prev = read_current()
+    held_book = {t.symbol for t in prev.theses
+                 if t.target_weight > 0 and t.rank < 100} if prev else set()
+    held_etf = {t.symbol for t in prev.theses
+                if t.target_weight > 0 and t.rank >= 100} if prev else set()
+
+    book_sel = mom.select(book_scored, held_book, P["book_hold"], P["book_band"])
+    etf_sel = mom.select(etf_scored, held_etf, P["sleeve_hold"], P["sleeve_hold"])
     if not regime:
         book_sel = []   # regime-off: no new single-name entries (first run = none held)
 

@@ -3,6 +3,7 @@
 # live account state, and places the APPROVED plan (only if live_approved=true).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source deploy/alert.sh "fast loop" "logs/fast.log"   # phone alert if this run dies
 
 # Footgun guard (docs/DESIGN.md): a stray ANTHROPIC_API_KEY silently switches
 # billing from the subscription to per-token. Refuse to run if it's set.

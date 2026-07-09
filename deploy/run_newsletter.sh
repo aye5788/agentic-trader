@@ -3,6 +3,7 @@
 # Claude narrative, deterministic email. Sundays after the slow loop.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source deploy/alert.sh "weekly letter" "logs/newsletter.log"   # phone alert if this run dies
 
 # Footgun guard (docs/DESIGN.md): a stray ANTHROPIC_API_KEY silently switches
 # billing from the subscription to per-token. Refuse to run if it's set.
