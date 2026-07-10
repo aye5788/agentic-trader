@@ -18,11 +18,9 @@ morning (stop-vs-momentum churn guard).
 """
 import argparse
 import json
-import os
 import subprocess
 import sys
 import time
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -39,6 +37,7 @@ import strategy as strat            # noqa: E402
 import governance as gov            # noqa: E402
 from research_store import read_current, store   # noqa: E402
 from adapters.schwab import research             # noqa: E402
+from notify import push as notify               # noqa: E402  shared ntfy helper
 
 MON = REPO / "research_store" / "monitor"
 STATE = MON / "state.json"
@@ -78,24 +77,6 @@ def _load(path, default):
 def _save(path, obj):
     MON.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2))
-
-
-def notify(title: str, message: str, tags: str = "rotating_light"):
-    """Phone push via ntfy (https://ntfy.sh/<NTFY_TOPIC>) — plain HTTPS, so it
-    works despite DO's SMTP block. No NTFY_TOPIC in .env -> silently off.
-    Never raises: an alert failure must not break the monitor."""
-    topic = os.environ.get("NTFY_TOPIC")
-    if not topic:
-        return
-    try:
-        server = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
-        req = urllib.request.Request(
-            f"{server}/{topic}", data=message.encode(),
-            headers={"Title": title, "Priority": "high", "Tags": tags,
-                     "User-Agent": "agentic-trader-monitor/1.0"})
-        urllib.request.urlopen(req, timeout=10).read()
-    except Exception as e:
-        print(f"  ntfy alert failed ({type(e).__name__}): {e}")
 
 
 def add_cooldown(symbol: str, days: int):

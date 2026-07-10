@@ -92,6 +92,10 @@ prompts/fast_loop.md    The headless-Claude execution procedure (RH is MCP-only)
 prompts/exit.md         Exit-executor procedure — market-sell the breached
                         positions the monitor flags, journal, reconcile the
                         snapshot + realized-P&L after selling.
+src/notify.py           THE ntfy phone-push helper (push(); never raises; no
+                        NTFY_TOPIC in .env -> no-op). Used by market_monitor
+                        (stop/target alerts) and record_fills (trade placed/
+                        skipped summaries). deploy/alert.sh mirrors it in shell.
 src/marks.py            Position valuation — the ONE place snapshot positions
                         become dollars (qty × freshest mark: monitor quote >
                         snapshot last > cost). Dashboard, log_equity, and the

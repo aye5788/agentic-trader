@@ -38,7 +38,11 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
 7. **Place** (only if `live_approved` is true): for each order in `approved`,
    sells first, then buys: `review_equity_order` → on a clean review →
    `place_equity_order` (fractional, dollar-notional, side + amount from the
-   plan). If a review returns a problem, skip that order and note it.
+   plan). If a review returns a problem, skip that order — and record the skip
+   in `fills.json` (step 9) with `"status":"skipped"` and a short `"reason"`
+   (e.g. `"pending_settlement"` for an unsettled-cash rejection in this cash
+   account — expected after any sell; the buy re-plans next run once cash
+   settles).
 7b. **Re-entry judgment** (each order in `review` — names whose take-profit
    just fired; the mechanical plan wants them rebought, and YOUR only power is
    to veto or downsize — never exceed the order's amount):
@@ -71,10 +75,14 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    "total_rate":<total_rate_of_return as number>,
    "days":[{"date":"<bucket start_time YYYY-MM-DD>","gain":<realized_gain>,
    "trades":<number_of_trades>} for buckets with number_of_trades > 0]}`.
-9. **Journal.** Write the placed fills to `research_store/rh/fills.json` (a JSON
-   array of `{symbol, side, amount, order_id, status, avg_price}` — status and
-   avg_price from step 8's order check), then run
-   `.venv/bin/python scripts/record_fills.py`. Do NOT hand-edit `journal.jsonl`
-   and do NOT write throwaway helper scripts — use only record_fills.py.
+9. **Journal.** Write the placed fills AND any skipped orders to
+   `research_store/rh/fills.json` (a JSON array of
+   `{symbol, side, amount, order_id, status, avg_price}` — status and avg_price
+   from step 8's order check; skips instead carry `"status":"skipped"` and
+   `"reason"`, no order_id), then run `.venv/bin/python scripts/record_fills.py`.
+   Run it whenever ANYTHING was placed or skipped — it journals the event and
+   pushes the phone notification (the human's only alert besides Robinhood's
+   own). Do NOT hand-edit `journal.jsonl` and do NOT write throwaway helper
+   scripts — use only record_fills.py.
 10. **Report** concisely: account value, orders placed, any blocked/failed, and
     the resulting book. That is your entire output.

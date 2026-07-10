@@ -176,3 +176,14 @@ P&L journaling (fast_loop/exit prompts reconcile positions and snapshot
 `get_realized_pnl` after sells); failure alerting (deploy/alert.sh ERR-traps
 every cron wrapper to ntfy; the monitor pushes stop/target triggers, execution
 results, and re-entry judgments to the same topic).
+
+Added 2026-07-10 — **trade notifications**: `scripts/record_fills.py` now pushes
+a phone summary (ntfy) of every journaled execution — placed fills AND skipped
+orders — so rebalance trades are no longer silent (before this, only cron
+failures and monitor stop/target breaches pushed; a routine fast-loop rotation
+produced no alert at all). Skips are journaled first-class: the fast loop
+records review-rejected orders in `fills.json` with `status:"skipped"` +
+`reason` — notably `pending_settlement`, the expected one-day deferral when a
+buy follows a sell in this cash account (T+1; the leg re-plans next run). The
+ntfy sender itself was deduplicated into `src/notify.py`, shared by the monitor
+and record_fills (deploy/alert.sh keeps its own shell copy of the contract).
