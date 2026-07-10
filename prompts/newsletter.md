@@ -38,8 +38,13 @@ around it rather than guessing. You are the narrator, not the calculator.
    - `{{PREHEADER}}` — one plain sentence summarizing the week (inbox preview).
    - `{{LETTER_PARAGRAPHS}}` — 2–3 `<p style="margin:0 0 18px;">…</p>` paragraphs:
      what the week did, what rotated and why, posture. No greeting (template has
-     it). Narrate anything in `notes` honestly (e.g. an order block) — the
-     principal reads about problems here, not in a postmortem.
+     it). ⛔ NO plumbing in the letter: broker blocks, API/auth issues,
+     settlement mechanics, code flags — the principal explicitly does not want
+     technical material eating letter space. Those go in the OPSLOG (step 3b).
+     If an item in `notes` materially affected the portfolio, state the IMPACT
+     in one plain sentence max (e.g. "13 orders were delayed a day by a broker
+     check; all filled by Tuesday — details in the ops log") and move on.
+     Never hide a problem — relocate its diagnosis, not its existence.
    - `{{TRADE_ROWS}}` — one copy of the TRADE ROW snippet below per fill
      (group same-symbol fills). Rationale = why the system did it (entered/left
      the band, geometry gate, stop breach, rebalance). SIDE_COLOR: buys
@@ -58,6 +63,14 @@ around it rather than guessing. You are the narrator, not the calculator.
 3. **Write the issue** to
    `research_store/newsletters/issue_<ISSUE_NUMBER>.html`.
    Verify no `{{` remains in the output.
+
+3b. **Ops log.** If the week had ANY operational/technical material (anything
+   in `notes`, skipped/deferred orders in `fills_this_week`, halts, re-auth
+   trouble, or a code flag worth recording), prepend a dated `## YYYY-MM-DD —
+   <title>` entry to `docs/OPSLOG.md` (newest first, below the header block;
+   match the existing entries' style). Full technical detail belongs there —
+   that is where the principal reads it. Nothing to record → skip this step.
+   Do not git-commit; the repo syncs on the next maintainer session.
 
 4. **Do NOT email** — the wrapper (`deploy/run_newsletter.sh`) sends the newest
    issue via `scripts/send_newsletter.py` after you exit. Credentials are not

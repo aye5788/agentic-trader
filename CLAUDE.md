@@ -163,6 +163,11 @@ src/event_calendar/     Earnings/event calendar compiler (timing + risk spine).
                         (Named `event_calendar`, NOT `calendar` — avoids shadowing
                         the Python stdlib module, which breaks imports.)
 scripts/                One-off + weekly auth and API-scope probe scripts
+docs/OPSLOG.md          Dated ops & maintainer log (newest first). Technical/
+                        plumbing material goes HERE, never in the investor
+                        letter (principal's standing instruction, 2026-07-10) —
+                        the letter states portfolio impact in ≤1 sentence and
+                        points here. Newsletter run appends entries (step 3b).
 docs/STRATEGY.md        THE TRADING STRATEGY, written for the deployed agent —
                         dual momentum: exact signal math, portfolio rules, the
                         fast-loop execution procedure, guardrails, proof gate.
