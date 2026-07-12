@@ -41,6 +41,19 @@ def _jsonl(path):
     return out
 
 
+def _flows_since(start_date, end_date):
+    """Confirmed external cash flows in (start_date, end_date] — deposits count
+    positive, withdrawals negative. Reads research_store/flows.jsonl. Returns
+    (net_amount, entries). Used to strip contributions out of week P&L so a
+    deposit is never narrated as performance."""
+    entries = [f for f in _jsonl(RS / "flows.jsonl")
+               if f.get("status") == "confirmed"
+               and start_date < f.get("date", "") <= end_date]
+    net = sum((-1.0 if f.get("direction") == "withdrawal" else 1.0)
+              * float(f.get("amount") or 0) for f in entries)
+    return round(net, 2), entries
+
+
 def main() -> None:
     LETTERS.mkdir(parents=True, exist_ok=True)
     today = date.today()
@@ -60,15 +73,24 @@ def main() -> None:
         sys.exit("no RH snapshot — cannot write a letter without account state")
 
     # --- week P&L from the equity curve (needs >= 2 points; else null) ---
+    # week_pnl is NET OF external cash flows: a deposit/withdrawal changes
+    # account value but is not performance, so it is stripped out here. The
+    # raw (flow-inclusive) ratio is kept as week_pnl_gross for transparency.
     points = _jsonl(RS / "history" / "equity.jsonl")
     week_pnl = None
+    week_pnl_gross = None
     baseline = None
+    net_flows = 0.0
+    flows_week = []
     if len(points) >= 2:
         cutoff = (today - timedelta(days=7)).isoformat()
         prior = [p for p in points[:-1] if p.get("date", "") >= cutoff] or points[:-1]
         baseline = prior[0]
+        net_flows, flows_week = _flows_since(baseline.get("date", ""), today.isoformat())
         if baseline.get("value"):
-            week_pnl = round(valued["account_value"] / float(baseline["value"]) - 1.0, 4)
+            bv = float(baseline["value"])
+            week_pnl_gross = round(valued["account_value"] / bv - 1.0, 4)
+            week_pnl = round((valued["account_value"] - net_flows) / bv - 1.0, 4)
 
     # --- unrealized P&L on cost (always available; the honest fallback) ---
     cost = sum(p["qty"] * p["avg_cost"] for p in valued["positions"].values()
@@ -117,8 +139,13 @@ def main() -> None:
                     "cash_pct": round(100 * valued["cash"] / valued["account_value"])
                     if valued["account_value"] else None,
                     "marked_at": valued["marked_at"]},
-        "week_pnl": week_pnl,
+        "week_pnl": week_pnl,                              # NET of deposits/withdrawals
+        "week_pnl_gross": week_pnl_gross,                  # raw value ratio (flow-inclusive)
         "week_pnl_baseline": baseline,                     # null on early issues
+        "net_deposits_this_week": net_flows,               # + = money added, - = withdrawn
+        "flows_this_week": [{k: f.get(k) for k in
+                             ("date", "amount", "direction", "status", "note")}
+                            for f in flows_week],
         "unrealized_pnl_on_cost": unrealized,
         "regime": (prod.regime if prod and prod.regime else {"status": "unknown"}),
         "book": book,
@@ -133,9 +160,11 @@ def main() -> None:
     }
     out = LETTERS / "facts.json"
     out.write_text(json.dumps(facts, indent=2) + "\n")
+    flow_note = f", net_flows={net_flows:+.2f}" if net_flows else ""
     print(f"facts -> {out}  (issue {facts['issue_number']}, "
           f"{len(fills)} fills, {len(book)} positions, "
-          f"week_pnl={'n/a' if week_pnl is None else f'{week_pnl:+.2%}'})")
+          f"week_pnl={'n/a' if week_pnl is None else f'{week_pnl:+.2%}'}"
+          f"{flow_note})")
 
 
 if __name__ == "__main__":

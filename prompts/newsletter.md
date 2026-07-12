@@ -15,7 +15,10 @@ around it rather than guessing. You are the narrator, not the calculator.
    before this run by `scripts/letter_facts.py` (the wrapper runs it; if the
    file is missing, run `.venv/bin/python scripts/letter_facts.py` first).
    Fields: issue_number, issue_date, account {value, cash, cash_pct},
-   week_pnl (NULL in early issues — see below), unrealized_pnl_on_cost,
+   week_pnl (NULL in early issues — see below; already NET of deposits/
+   withdrawals), net_deposits_this_week (+ = you added cash, − = withdrew;
+   account.value INCLUDES it but week_pnl does NOT — see below),
+   flows_this_week (the individual confirmed flows), unrealized_pnl_on_cost,
    regime, book[] (rank order; sleeve=true = ETF sleeve), fills_this_week,
    exit_signals_this_week, reentry_decisions_this_week (post-take-profit
    judgment calls — full/half/skip with reasons; when present, narrate them
@@ -29,12 +32,20 @@ around it rather than guessing. You are the narrator, not the calculator.
    `{{TOKEN}}`:
    - `{{ISSUE_NUMBER}}`, `{{ISSUE_DATE}}` — from facts, verbatim.
    - `{{ACCOUNT_VALUE}}` — "$" + account.value. `{{CASH_PCT}}` — account.cash_pct + "%".
-   - `{{WEEK_PNL}}` — week_pnl as "+X.X%" / "−X.X%". If week_pnl is null (the
-     equity curve is too young), show "—", use neutral `#141413` for
-     `{{WEEK_PNL_COLOR}}`, and let the letter say tracking just began — you may
-     cite unrealized_pnl_on_cost instead, explicitly labeled "on cost since
+   - `{{WEEK_PNL}}` — week_pnl as "+X.X%" / "−X.X%". This is PERFORMANCE only —
+     it is already net of any deposit/withdrawal, so never describe it as the
+     account "growing" when the growth was actually a contribution. If week_pnl
+     is null (the equity curve is too young), show "—", use neutral `#141413`
+     for `{{WEEK_PNL_COLOR}}`, and let the letter say tracking just began — you
+     may cite unrealized_pnl_on_cost instead, explicitly labeled "on cost since
      entry". Otherwise `{{WEEK_PNL_COLOR}}` = `#2A6A4A` if ≥ 0, else `#A13A2E`.
      `{{REGIME_COLOR}}` — same green/red rule for ON/OFF.
+   - **Deposits/withdrawals:** if `net_deposits_this_week` is non-zero, state it
+     plainly in ONE sentence in the letter body and keep it separate from
+     performance — e.g. "You added $20 this week, so the account stands at
+     $X; performance net of that contribution was {{WEEK_PNL}}." A contribution
+     is not a gain and must never be narrated (or coloured) as one. This is a
+     capital fact, not plumbing — it belongs in the letter, not the OPSLOG.
    - `{{PREHEADER}}` — one plain sentence summarizing the week (inbox preview).
    - `{{LETTER_PARAGRAPHS}}` — 2–3 `<p style="margin:0 0 18px;">…</p>` paragraphs:
      what the week did, what rotated and why, posture. No greeting (template has
