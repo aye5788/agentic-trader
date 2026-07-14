@@ -166,7 +166,13 @@ def apply_decisions(decisions, current_geom, *, armed,
                     overrides_path=OVERRIDES, intents_path=INTENTS):
     """Validate each agent decision (one-way invariant) and, only when armed,
     persist geometry overrides / watch-notes. Returns (applied, orders, rejected):
-      - applied = geometry tightenings + watch-notes THIS FUNCTION persisted;
+      - applied = the validated de-risk geometry/watch actions this pass DECIDED
+                  on. These are persisted to overrides_path/intents_path only when
+                  armed; on an unarmed (alert-only) pass, applied is populated the
+                  same way but nothing is written to disk. Consumers that need to
+                  know whether an action actually took effect must check the
+                  journal event's `armed` flag, not just the presence of entries
+                  in `applied`;
       - orders  = trim/exit the prompt must still PLACE via the RH MCP — recorded
                   here as INTENTS only, never as confirmed fills (record_fills.py
                   logs the actual fill; the letter narrates from that, not from here);

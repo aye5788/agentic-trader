@@ -137,12 +137,16 @@ def main() -> None:
         elif e.get("event") == "exit_signal":
             exits.extend(e.get("triggers", []))
         elif e.get("event") == "risk_review":
-            # Only geometry tightenings that were actually persisted. trim/exit are
-            # NOT taken from here — they are intents; their CONFIRMED fills arrive as
-            # `execution` events (handled above), tagged reason="risk_review".
-            for a in e.get("applied", []):
-                if a.get("kind") in ("tighten_stop", "lower_tp"):
-                    risk_actions.append({"symbol": a.get("symbol"), "kind": a.get("kind")})
+            # Only geometry tightenings that were actually persisted. An unarmed
+            # (alert-only) pass decides on the same actions but never writes them
+            # to overrides.json — narrating those would claim a de-risk that never
+            # took effect. trim/exit are NOT taken from here — they are intents;
+            # their CONFIRMED fills arrive as `execution` events (handled above),
+            # tagged reason="risk_review".
+            if e.get("armed"):
+                for a in e.get("applied", []):
+                    if a.get("kind") in ("tighten_stop", "lower_tp"):
+                        risk_actions.append({"symbol": a.get("symbol"), "kind": a.get("kind")})
 
     days_ahead = (6 - today.weekday()) % 7 or 7           # next Sunday
     facts = {
