@@ -30,14 +30,24 @@ PROCEDURE — follow exactly:
    - trim: add "fraction" in (0,1). exit: no extra fields.
    - watch: add "note" and "expires".
 5. Apply non-order changes: run `.venv/bin/python scripts/risk_review.py --apply`.
-   It validates the one-way invariant, writes stricter-only overrides (the monitor
-   enforces them live), records watch-notes, journals, and pushes your phone. If a
-   decision is rejected there, it was not risk-reducing — do not fight it.
+   It ALWAYS validates the one-way invariant, journals, and pushes your phone if
+   anything acted. It writes stricter-only overrides and records watch-notes ONLY
+   if it ran ARMED (live_approved AND not alert_only — the same gate step 6
+   checks). In alert-only mode (the default) NOTHING is written: no override, no
+   watch-note — the original (wider) stop remains what the monitor enforces live,
+   and any watch-note you wrote is NOT persisted for next pass. Do not report a
+   geometry change as live unless the apply step ran armed (check its printed
+   `armed=` flag). If a decision is rejected there, it was not risk-reducing — do
+   not fight it.
 6. Place trim/exit ORDERS (only if the apply step ran armed — i.e. live_approved
-   AND not alert_only): for each trim/exit, get_equity_positions to size it, then
-   review_equity_order → place_equity_order (a SELL: full quantity for exit, or
-   fraction × quantity for trim) in account 948184924. Then journal the fills with
-   scripts/record_fills.py (status/side/amount/reason="risk_review") exactly as the
-   fast loop does. If alert-only, place NOTHING — the apply step already pushed the
-   would-be actions to the phone.
+   AND not alert_only): `get_accounts` → select the single account with
+   `agentic_allowed=true` (documented expectation: 948184924 — but this runtime
+   check governs, never the hardcoded number). If zero or more than one match →
+   ABORT, place nothing, report the ambiguity. Otherwise, for each trim/exit,
+   get_equity_positions on that account to size it, then review_equity_order →
+   place_equity_order (a SELL: full quantity for exit, or fraction × quantity for
+   trim). Then journal the fills with scripts/record_fills.py
+   (status/side/amount/reason="risk_review") exactly as the fast loop does. If
+   alert-only, place NOTHING — the apply step already pushed the would-be actions
+   to the phone.
 7. Report concisely: per-name verdict, what you changed, what you placed.
