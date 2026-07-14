@@ -27,10 +27,12 @@
 - **Create `deploy/run_risk_review.sh`** — cron wrapper (KEY guard, model pin).
 - **Modify `config/strategy.toml`** — add the `[risk_review]` table.
 - **Modify `scripts/market_monitor.py`** — overlay stricter-only overrides onto held levels.
+- **Modify `scripts/slow_loop.py`** — clear the week's overrides/intents on the weekly rebuild (spec §7).
+- **Modify `scripts/letter_facts.py`** — surface confirmed de-risk actions in the weekly letter facts.
 - **Modify `deploy/crontab.template`** — two entries (12:00, 15:45 ET).
 - **New runtime artifacts (created at runtime, git-ignored under `research_store/`):** `research_store/monitor/overrides.json`, `research_store/monitor/deferred_intents.json`, `research_store/rh/risk_review_facts.json`, `research_store/rh/risk_review_decisions.json`.
 
-Reviewer note: Tasks 1–6 are pure Python with `--selftest` coverage and can be reviewed/rejected independently. Task 7 (prompt) depends on the file contract from Task 6. Tasks 8–9 are deployment.
+Reviewer note: Tasks 1–6 are pure Python with `--selftest` coverage and can be reviewed/rejected independently. Task 7 (prompt) depends on the file contract from Task 6. Tasks 8–9 are deployment; Task 10 (weekly override clear) is an independent one-liner in `slow_loop.py`.
 
 ---
 
@@ -108,6 +110,7 @@ docs/superpowers/specs/2026-07-14-intraday-risk-management-design.md.
 """
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -139,6 +142,12 @@ def _selftest() -> None:
     acc, rej = validate_geometry({"stop": 100.0, "targets": [120.0, 140.0]},
                                  {"stop": 100.0})    # equal stop = no-op, allowed but harmless
     assert acc.get("stop") == 100.0
+
+    # a stop may rise but must stay STRICTLY BELOW entry (the [risk] mandate's
+    # stop-below-entry rule — see Self-Review; folded in here, not deferred)
+    acc, rej = validate_geometry({"stop": 100.0, "targets": [120.0]},
+                                 {"stop": 118.0}, entry_low=115.0)
+    assert "stop" not in acc and len(rej) == 1, (acc, rej)
 
     # --- actions: only the de-risk kinds; never an entry; trim fraction sane ---
     assert validate_action({"symbol": "X", "kind": "exit"}) == (True, None)
@@ -173,17 +182,22 @@ Expected: FAIL — `NameError: name 'validate_geometry' is not defined`.
 Insert these two functions above `_selftest()`:
 
 ```python
-def validate_geometry(current: dict, proposed: dict) -> tuple[dict, list[str]]:
-    """Keep only strictly risk-reducing edits. Stop may move UP (>=), targets may
-    only move IN (each <= the same-index current target). Anything else is dropped
-    with a reason. Missing fields in `proposed` are simply not changed."""
+def validate_geometry(current: dict, proposed: dict, *, entry_low=None) -> tuple[dict, list[str]]:
+    """Keep only strictly risk-reducing edits. Stop may move UP (>=) but must stay
+    STRICTLY BELOW entry (the [risk] mandate's stop-below-entry rule — passing
+    entry_low re-guards it without a full re-validate). Targets may only move IN
+    (each <= the same-index current target). Anything else is dropped with a
+    reason. Missing fields in `proposed` are simply not changed."""
     accepted, rejections = {}, []
     cur_stop = current.get("stop")
     if "stop" in proposed and proposed["stop"] is not None:
-        if cur_stop is None or proposed["stop"] >= cur_stop:
-            accepted["stop"] = float(proposed["stop"])
+        ps = float(proposed["stop"])
+        if cur_stop is not None and ps < cur_stop:
+            rejections.append(f"stop {ps} < current {cur_stop} — loosening rejected")
+        elif entry_low is not None and ps >= entry_low:
+            rejections.append(f"stop {ps} >= entry_low {entry_low} — must stay below entry")
         else:
-            rejections.append(f"stop {proposed['stop']} < current {cur_stop} — loosening rejected")
+            accepted["stop"] = ps
     cur_t = current.get("targets") or []
     if "targets" in proposed and proposed["targets"] is not None:
         pt = proposed["targets"]
@@ -269,14 +283,24 @@ def _read_json(path: Path, default):
         return default
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via temp-file + os.replace so the always-on 15s monitor never reads a
+    half-written overrides.json. A torn read would make the monitor drop ALL
+    overrides for that tick (not just the one being written) — exactly the wrong
+    moment during a fast breakdown. os.replace is atomic on POSIX."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
 def read_overrides(path: Path = OVERRIDES) -> dict:
     """Active geometry overrides, pruning any past their `expires` date."""
     ov = _read_json(path, {})
     today = date.today().isoformat()
     live = {s: o for s, o in ov.items() if str(o.get("expires", "9999")) >= today}
     if live != ov:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(live, indent=2))
+        _atomic_write(path, json.dumps(live, indent=2))
     return live
 
 
@@ -285,11 +309,9 @@ def write_override(sym: str, accepted: dict, reason: str, expires: str,
     """Merge one name's ALREADY-VALIDATED geometry (from validate_geometry) into
     the overrides file. Caller must pass only accepted (stricter) fields."""
     ov = _read_json(path, {})
-    entry = {**accepted, "reason": reason, "expires": expires,
-             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    ov[sym] = entry
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(ov, indent=2))
+    ov[sym] = {**accepted, "reason": reason, "expires": expires,
+               "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    _atomic_write(path, json.dumps(ov, indent=2))
 
 
 def read_intents(path: Path = INTENTS) -> list:
@@ -300,10 +322,8 @@ def read_intents(path: Path = INTENTS) -> list:
 
 def append_intent(intent: dict, *, path: Path = INTENTS) -> None:
     ints = _read_json(path, [])
-    intent = {**intent, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    ints.append(intent)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(ints, indent=2))
+    ints.append({**intent, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    _atomic_write(path, json.dumps(ints, indent=2))
 ```
 
 - [ ] **Step 4: Run to verify it passes**
@@ -395,17 +415,16 @@ def apply_overrides(held: dict, overrides: dict) -> dict:
 Then in `check_once`, immediately after the line `held = {t.symbol: t for t in prod.theses if t.target_weight > 0 and t.stop}`, insert:
 
 ```python
-    from research_store import store as _store  # already imported at module top; reuse
     try:
-        import json as _json
-        _ov = _json.loads((MON / "overrides.json").read_text())
+        _ov = json.loads((MON / "overrides.json").read_text())   # json already imported at module top
     except Exception:
-        _ov = {}
+        _ov = {}   # absent OR a torn read → ignore ALL overrides this tick (self-heals next tick;
+                   # risk_review.py writes atomically via os.replace, so torn reads are rare)
     if _ov:
         held = apply_overrides(held, _ov)
 ```
 
-(Prefer importing `read_overrides` from `risk_review` if convenient; the inline read above avoids a scripts-to-scripts import and the pruning is handled by the writer. Keep whichever the reviewer finds cleaner — both honor stricter-only via `apply_overrides`.)
+(This inline read avoids a scripts-to-scripts import; expiry pruning is handled by `risk_review.py`'s writer. `apply_overrides` enforces stricter-only regardless, so a stale-but-well-formed override can still only tighten.)
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -451,12 +470,15 @@ Append to `_selftest()` before the final print:
     cfg = {"ma_break_days": 21, "giveback_flag_pct": 0.10,
            "vol_expansion_mult": 1.75, "earnings_window_days": 5}
     facts = build_facts(valued, theses, cfg, highs={"BE": 250.0},
-                        spy_ret={}, entry_sigma={"BE": 0.03}, vix=22.0,
+                        spy_ret={"BE": -0.04}, cur_sigma={"BE": 0.06},
+                        entry_sigma={"BE": 0.03}, vix=22.0,
                         regime_on=True, now_iso="2026-07-14T16:00:00+00:00")
     pos = facts["positions"][0]
     assert pos["symbol"] == "BE"
     assert round(pos["giveback_from_high_pct"], 2) == 0.16     # (250-210)/250
     assert "giveback" in pos["flags"]                          # 0.16 > 0.10
+    assert "vol_expansion" in pos["flags"]                     # 0.06 > 1.75*0.03
+    assert pos["rel_return_vs_spy"] == -0.04                   # lagging SPY
     assert facts["backdrop"]["vix"] == 22.0
 ```
 
@@ -470,10 +492,12 @@ Expected: FAIL — `NameError: name 'build_facts' is not defined`.
 Insert above `_selftest()`:
 
 ```python
-def build_facts(valued, theses, cfg, *, highs, spy_ret, entry_sigma,
+def build_facts(valued, theses, cfg, *, highs, spy_ret, cur_sigma, entry_sigma,
                 vix, regime_on, now_iso) -> dict:
     """Per-name risk readout. Flags are attention hints for the agent, not
-    triggers — the agent judges every held name each pass."""
+    triggers — the agent judges every held name each pass. `spy_ret` = recent
+    return minus SPY's (spec §5 #1); `cur_sigma` = current trailing daily sigma
+    (spec §5 #5), compared against `entry_sigma` for vol expansion."""
     by_sym = {t.symbol: t for t in theses}
     out = []
     for sym, p in (valued.get("positions") or {}).items():
@@ -490,8 +514,8 @@ def build_facts(valued, theses, cfg, *, highs, spy_ret, entry_sigma,
         if giveback is not None and giveback >= cfg["giveback_flag_pct"]:
             flags.append("giveback")
         es = entry_sigma.get(sym)
-        cur_sig = (spy_ret.get(f"{sym}__sigma"))   # optional; caller may omit
-        if es and cur_sig and cur_sig > cfg["vol_expansion_mult"] * es:
+        cs = cur_sigma.get(sym)
+        if es and cs and cs > cfg["vol_expansion_mult"] * es:
             flags.append("vol_expansion")
         rb = (th.review_by or "")[:10]
         if rb and rb <= _days_ahead_iso(now_iso, cfg["earnings_window_days"]):
@@ -552,13 +576,19 @@ Append to `_selftest()` before the final print:
              "stop": 108.0, "expires": "2026-07-18"},
             {"symbol": "AMD", "kind": "buy", "reason": "sneaky entry"},   # must be rejected
         ]))
-        applied, rejected = apply_decisions(
+        applied, orders, rejected = apply_decisions(
             json.loads(dp.read_text()),
-            current_geom={"NVDA": {"stop": 100.0, "targets": [120.0]}},
+            current_geom={"NVDA": {"stop": 100.0, "targets": [120.0], "entry_low": 130.0}},
             armed=True, overrides_path=ovp, intents_path=Path(d) / "i.json")
         assert "NVDA" in [a["symbol"] for a in applied], applied
-        assert any(r["symbol"] == "AMD" for r in rejected), rejected
+        assert any(r["symbol"] == "AMD" for r in rejected), rejected      # buy rejected
         assert read_overrides(path=ovp)["NVDA"]["stop"] == 108.0
+        # a trim/exit is an INTENT (orders), never counted as an applied change
+        applied2, orders2, _ = apply_decisions(
+            [{"symbol": "TSLA", "kind": "exit", "reason": "thesis broke"}],
+            current_geom={}, armed=True,
+            overrides_path=Path(d) / "o2.json", intents_path=Path(d) / "i2.json")
+        assert orders2 and orders2[0]["symbol"] == "TSLA" and not applied2, (orders2, applied2)
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -574,9 +604,15 @@ Insert `apply_decisions` above `_selftest()`:
 def apply_decisions(decisions, current_geom, *, armed,
                     overrides_path=OVERRIDES, intents_path=INTENTS):
     """Validate each agent decision (one-way invariant) and, only when armed,
-    persist geometry overrides / watch-notes. Returns (applied, rejected).
-    Placement of trim/exit ORDERS is the prompt's MCP job, not this function's."""
-    applied, rejected = [], []
+    persist geometry overrides / watch-notes. Returns (applied, orders, rejected):
+      - applied = geometry tightenings + watch-notes THIS FUNCTION persisted;
+      - orders  = trim/exit the prompt must still PLACE via the RH MCP — recorded
+                  here as INTENTS only, never as confirmed fills (record_fills.py
+                  logs the actual fill; the letter narrates from that, not from here);
+      - rejected = decisions that failed the one-way / action-kind guard.
+    Keeping orders separate stops the journal (and the weekly letter) from ever
+    claiming a sale that has not actually filled."""
+    applied, orders, rejected = [], [], []
     for dcn in decisions:
         sym = dcn.get("symbol")
         ok, why = validate_action(dcn)
@@ -585,8 +621,9 @@ def apply_decisions(decisions, current_geom, *, armed,
             continue
         kind = dcn["kind"]
         if kind in ("tighten_stop", "lower_tp"):
-            acc, rej = validate_geometry(current_geom.get(sym, {}),
-                                         {k: dcn.get(k) for k in ("stop", "targets")})
+            cg = current_geom.get(sym, {})
+            acc, rej = validate_geometry(cg, {k: dcn.get(k) for k in ("stop", "targets")},
+                                         entry_low=cg.get("entry_low"))
             if not acc:
                 rejected.append({"symbol": sym, "reason": "; ".join(rej) or "no stricter change"})
                 continue
@@ -601,9 +638,11 @@ def apply_decisions(decisions, current_geom, *, armed,
                                "expires": dcn.get("expires", date.today().isoformat())},
                               path=intents_path)
             applied.append({"symbol": sym, "kind": "watch"})
-        else:  # trim / exit / hold — recorded; orders placed by the prompt via MCP
-            applied.append({"symbol": sym, "kind": kind, "fraction": dcn.get("fraction")})
-    return applied, rejected
+        elif kind in ("trim", "exit"):  # an ORDER — the prompt places it via MCP
+            orders.append({"symbol": sym, "kind": kind, "fraction": dcn.get("fraction"),
+                           "reason": dcn.get("reason", "")})
+        # kind == "hold" is a no-op: nothing to persist, nothing to place.
+    return applied, orders, rejected
 ```
 
 Extend `main()` (add args, keep `--selftest`):
@@ -628,7 +667,8 @@ Extend `main()` (add args, keep `--selftest`):
         # NOTE: highs/spy_ret/entry_sigma/vix are filled from adapters here;
         # each is best-effort — a failed fetch leaves its flag off (see build_facts).
         facts = build_facts(valued, prod.theses, rc, highs=_gather_highs(prod),
-                            spy_ret=_gather_rel_strength(prod), entry_sigma=_gather_entry_sigma(prod),
+                            spy_ret=_gather_rel_strength(prod), cur_sigma=_gather_cur_sigma(prod),
+                            entry_sigma=_gather_entry_sigma(prod),
                             vix=_gather_vix(), regime_on=(prod.regime.get("status") == "on"),
                             now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"))
         FACTS.parent.mkdir(parents=True, exist_ok=True)
@@ -639,41 +679,106 @@ Extend `main()` (add args, keep `--selftest`):
     if args.apply:
         decisions = _read_json(DECISIONS, [])
         prod = read_current()
-        current_geom = {t.symbol: {"stop": t.stop, "targets": t.targets}
+        current_geom = {t.symbol: {"stop": t.stop, "targets": t.targets,
+                                   "entry_low": (t.entry_zone or [None])[0]}
                         for t in (prod.theses if prod else [])}
-        applied, rejected = apply_decisions(decisions, current_geom, armed=armed)
+        applied, orders, rejected = apply_decisions(decisions, current_geom, armed=armed)
         store.append_journal({"event": "risk_review",
                               "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                              "armed": armed, "applied": applied, "rejected": rejected})
-        from notify import push
-        push(f"Risk review: {len(applied)} actions" + ("" if armed else " (alert-only)"),
-             "\n".join(f"{a['symbol']} {a['kind']}" for a in applied) or "no de-risk actions",
-             tags="shield")
-        print(f"applied {len(applied)}, rejected {len(rejected)} (armed={armed})")
+                              "armed": armed, "applied": applied,
+                              "orders_intended": orders, "rejected": rejected})
+        # Phone push ONLY when something de-risking actually happened — a routine
+        # "0 actions" twice a day is exactly the as-designed noise Aaron doesn't
+        # want (see docs/OPSLOG.md / the no-skip-noise rule).
+        acted = applied + orders
+        if acted:
+            from notify import push
+            push(f"Risk review: {len(acted)} de-risk action(s)" + ("" if armed else " (alert-only)"),
+                 "\n".join(f"{a['symbol']} {a['kind']}" for a in acted),
+                 tags="shield")
+        print(f"applied {len(applied)}, orders {len(orders)}, rejected {len(rejected)} (armed={armed})")
         return
 ```
 
 Add best-effort gather stubs (kept small; each returns `{}`/`None` on any failure so facts degrade gracefully):
 
 ```python
+def _held(prod):
+    """The held names the review tends (weighted, with a stop)."""
+    return [t for t in prod.theses if t.target_weight > 0 and t.stop]
+
+
 def _gather_highs(prod) -> dict:
-    """Highest close since entry per held name, from Schwab price history."""
+    """Highest intraday HIGH since ENTRY per held name, from Schwab price history.
+    NOTE: get_price_history returns a LIST of candle dicts (NOT {"candles":[...]}),
+    each {open,high,low,close,volume,datetime(epoch ms)}. Bounding to bars at/after
+    the thesis entry (`as_of`) keeps give-back honest — a pre-entry spike we never
+    held through must not count as our high-water mark."""
     try:
         from adapters.schwab import research
         out = {}
-        for t in prod.theses:
-            if t.target_weight > 0 and t.stop:
-                hist = research.get_price_history(t.symbol, period_type="month", period=3)
-                closes = [c.get("close") for c in hist.get("candles", []) if c.get("close")]
-                if closes:
-                    out[t.symbol] = max(closes)
+        for t in _held(prod):
+            candles = research.get_price_history(t.symbol, period_type="year", period=1)
+            entry_ms = None
+            if t.as_of:
+                try:
+                    entry_ms = datetime.fromisoformat(t.as_of[:10]).replace(
+                        tzinfo=timezone.utc).timestamp() * 1000
+                except Exception:
+                    entry_ms = None
+            highs = [c["high"] for c in candles if c.get("high")
+                     and (entry_ms is None or (c.get("datetime") or 0) >= entry_ms)]
+            if highs:
+                out[t.symbol] = max(highs)
         return out
     except Exception:
         return {}
 
 
 def _gather_rel_strength(prod) -> dict:
-    return {}   # v1: rank/score already travels in the product; extend later
+    """Recent (~1mo) return MINUS SPY's, per held name, from cached closes
+    (research_store/prices/closes.parquet). Spec §5 #1 — the most on-strategy
+    signal; positive = still leading the market. Best-effort: any failure omits
+    the value and the agent simply sees no RS number for that name."""
+    try:
+        import pandas as pd
+        closes = pd.read_parquet(REPO / "research_store" / "prices" / "closes.parquet")
+        WIN = 21  # ~1 trading month
+        if "SPY" not in closes.columns:
+            return {}
+        spy = closes["SPY"].dropna()
+        if len(spy) <= WIN:
+            return {}
+        spy_ret = float(spy.iloc[-1] / spy.iloc[-1 - WIN] - 1.0)
+        out = {}
+        for t in _held(prod):
+            if t.symbol not in closes.columns:
+                continue
+            s = closes[t.symbol].dropna()
+            if len(s) > WIN:
+                out[t.symbol] = round(float(s.iloc[-1] / s.iloc[-1 - WIN] - 1.0) - spy_ret, 4)
+        return out
+    except Exception:
+        return {}
+
+
+def _gather_cur_sigma(prod) -> dict:
+    """Current trailing daily sigma (~3mo) per held name from cached closes —
+    compared in build_facts against the entry sigma to flag vol expansion
+    (spec §5 #5). Best-effort."""
+    try:
+        import pandas as pd
+        closes = pd.read_parquet(REPO / "research_store" / "prices" / "closes.parquet")
+        out = {}
+        for t in _held(prod):
+            if t.symbol not in closes.columns:
+                continue
+            s = closes[t.symbol].dropna()
+            if len(s) > 64:
+                out[t.symbol] = round(float(s.pct_change().iloc[-64:].std()), 5)
+        return out
+    except Exception:
+        return {}
 
 
 def _gather_entry_sigma(prod) -> dict:
@@ -698,7 +803,7 @@ def _q_last(q: dict):
     return None
 ```
 
-> Reviewer note: `get_price_history`'s exact kwargs must match `src/adapters/schwab/research.py:48`. Open that signature and adjust `period_type`/`period` names before running live; the `--selftest` path does not call these gatherers.
+> Reviewer note (verified 2026-07-14): `get_price_history(symbol, *, period_type, period, ...)` at `src/adapters/schwab/research.py:48` returns a **LIST of candle dicts**, not `{"candles":[...]}` — the gatherers above are written against that. The rel-strength / cur-sigma gatherers read `research_store/prices/closes.parquet` (needs pandas + the weekly `fetch_prices.py` cache present); if it is stale/absent they degrade to empty, dropping only those flags. The `--selftest` path does not call any gatherer.
 
 - [ ] **Step 4: Run to verify the selftest passes**
 
@@ -863,16 +968,36 @@ Keep de-risk *actions* narratable (they are real PM decisions) while keeping rou
 
 - [ ] **Step 1: Add the collector**
 
-In `scripts/letter_facts.py`, where the loop handles event types (near `if e.get("event") == "execution":`), add a branch and a list init `risk_actions = []`:
+In `scripts/letter_facts.py`, initialise `risk_actions = []` alongside the existing
+`fills, exits, notes, reentries = [], [], [], []` line. Then narrate only things
+that TRULY happened, keeping the recorded-vs-placed distinction from Task 6:
+
+1. Geometry tightenings — real PM decisions, not trades — come from the
+   `risk_review` journal's `applied` list. Add a branch:
 
 ```python
         elif e.get("event") == "risk_review":
+            # Only geometry tightenings that were actually persisted. trim/exit are
+            # NOT taken from here — they are intents; their CONFIRMED fills arrive as
+            # `execution` events (handled above), tagged reason="risk_review".
             for a in e.get("applied", []):
-                if a.get("kind") not in (None, "hold", "watch", "healthy"):
-                    risk_actions.append({k: a.get(k) for k in ("symbol", "kind") if k in a})
+                if a.get("kind") in ("tighten_stop", "lower_tp"):
+                    risk_actions.append({"symbol": a.get("symbol"), "kind": a.get("kind")})
 ```
 
-And add `"risk_actions_this_week": risk_actions,` to the `facts` dict.
+2. Confirmed risk-driven sells come from the `execution` fills the prompt places
+   with `reason="risk_review"`. Inside the existing execution branch, right after
+   the non-skipped `fills.append({...})` line, add:
+
+```python
+            if f.get("reason") == "risk_review":
+                risk_actions.append({"symbol": f.get("symbol"), "kind": f.get("side")})
+```
+
+Finally add `"risk_actions_this_week": risk_actions,` to the `facts` dict.
+
+> This closes Fix 5: the letter can only ever report a trim/exit that actually
+> filled (from `record_fills.py`), never one that was merely decided.
 
 - [ ] **Step 2: Verify facts still build**
 
@@ -888,17 +1013,71 @@ git commit -m "feat(risk-review): surface de-risk actions in weekly letter facts
 
 ---
 
+### Task 10: Weekly rebuild clears the week's overrides (spec §7 reconciliation)
+
+Spec §7 promises "the weekly `slow_loop.py` rebuild … clears that week's
+overrides" so an intra-week tightening never stacks on top of Monday's freshly
+rebuilt geometry. That was described but not built (overrides would only ever
+lapse via their `expires` date). Build the promised clear.
+
+**Files:**
+- Modify: `scripts/slow_loop.py` (right after the `write_product(...)` call at ~line 202)
+
+**Interfaces:**
+- Consumes: nothing new. After a successful product write, deletes
+  `research_store/monitor/overrides.json` and `deferred_intents.json`.
+
+- [ ] **Step 1: Add the clear after `write_product`**
+
+Immediately after the `write_product(product, mandate=strat.risk_mandate(cfg))`
+line in `main()`, append:
+
+```python
+    # Intraday risk-review overrides/intents are strictly INTRA-WEEK overlays: the
+    # fresh weekly geometry supersedes them. Clear them so a Tuesday-tightened stop
+    # is never re-applied on top of next week's rebuilt levels. (spec §7)
+    for _f in ("overrides.json", "deferred_intents.json"):
+        try:
+            (REPO / "research_store" / "monitor" / _f).unlink()
+        except FileNotFoundError:
+            pass
+```
+
+(`REPO` is already defined in `slow_loop.py` — it is used for the cooldown path
+at ~line 130.)
+
+- [ ] **Step 2: Verify it still parses**
+
+Run: `.venv/bin/python -c "import ast; ast.parse(open('scripts/slow_loop.py').read()); print('OK')"`
+Expected: `OK`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add scripts/slow_loop.py
+git commit -m "feat(risk-review): weekly rebuild clears intra-week overrides (spec §7)"
+```
+
+---
+
 ## Self-Review
 
 **Spec coverage:**
 - §4 Layer 1 monitor overlay → Task 4. §4 Layer 2 two passes → Tasks 7–8. §4 Layer 3 core/prompt split → Tasks 2–7.
-- §5 checklist → Task 5 (`build_facts`) + Task 6 gatherers + Task 7 (news via MCP, RS/rank from product).
+- §5 checklist → Task 5 (`build_facts`) + Task 6 gatherers (RS-vs-SPY + cur-sigma now computed from cached closes, not stubbed) + Task 7 (news via MCP, rank from product).
 - §6 verdict + de-risk menu + default-hold → Task 7 prompt; action validity → Task 2.
-- §7 actuation map: overrides → Tasks 3/4/6; immediate orders → Task 7; deferred intents/watch-notes → Tasks 3/6/7; verdict journal → Task 6.
-- §8 guardrails: one-way invariant → Task 2; `[risk]` round-trip → (see gap note); live_approved/alert_only → Task 6; governance reuse → Task 6/7.
+- §7 actuation map: overrides → Tasks 3/4/6; immediate orders → Task 7; deferred intents/watch-notes → Tasks 3/6/7; verdict journal → Task 6; **weekly reconciliation clear → Task 10**.
+- §8 guardrails: one-way invariant + stop-below-entry → Task 2; live_approved/alert_only → Task 6; governance reuse → Task 6/7.
 - §9 components → all created. §10 data sources → Task 6 gatherers. §11 rollout alert-only → Task 1 default + Task 6 `armed`. §12 open items → left unbuilt intentionally.
 
-**Gap found & closed inline:** spec §8 requires adjusted geometry to "round-trip the `[risk]` mandate." Tasks above enforce the one-way invariant but do not re-run `research_store.validate`. Because overrides may only ever *tighten* a stop or *lower* a target, they cannot violate the mandate's structural checks that already held at entry (stop-below-entry stays true when the stop rises but stays below entry; R:R only improves as the stop tightens) — EXCEPT that a tightened stop could in principle rise above `entry_low`, which the mandate forbids. **Add to Task 2's `validate_geometry`:** the reviewer implementing Task 2 must also pass the thesis `entry_zone` low and reject a stop `>= entry_low` (keep the stop strictly below entry). Concretely, extend the signature to `validate_geometry(current, proposed, *, entry_low=None)` and, in the stop branch, additionally require `entry_low is None or proposed["stop"] < entry_low` before accepting. Add a selftest asserting a stop raised above `entry_low` is rejected. (This keeps the mandate invariant without a full re-validate.)
+**Gaps found & closed (this revision, 2026-07-14):**
+- **§8 `[risk]` round-trip / stop-below-entry** — `validate_geometry` now takes `entry_low` and rejects a stop `>= entry_low`; the check and its selftest are folded directly into Task 2 (no longer a deferred reviewer instruction). `apply_decisions` / `main --apply` thread `entry_low` from each thesis's `entry_zone`. Because overrides may only tighten a stop / lower a target, no full `validate_product` re-run is needed.
+- **§7 weekly reconciliation** — was described but unbuilt; now Task 10 clears `overrides.json` + `deferred_intents.json` on the weekly `slow_loop.py` rebuild.
+- **Give-back signal (Fix 1)** — `_gather_highs` corrected: `get_price_history` returns a **list** of candles (verified), uses candle `high` bounded to bars at/after entry.
+- **RS-vs-SPY (§5 #1) & vol-expansion (§5 #5) (Fix 2)** — no longer inert stubs; both are computed from `research_store/prices/closes.parquet`. `build_facts` takes an explicit `cur_sigma` input (the prior `__sigma`-key hack is gone).
+- **Atomic overrides file (Fix 4)** — writes go through `_atomic_write` (temp + `os.replace`) so the 15s monitor can never read a torn file and blank all overrides.
+- **Recorded-vs-placed (Fix 5)** — `apply_decisions` returns `(applied, orders, rejected)`; trim/exit are `orders` (intents), never `applied`. The journal records `orders_intended`; the weekly letter (Task 9) narrates trim/exit only from confirmed `execution` fills tagged `reason="risk_review"`, plus geometry tightenings — never an unfilled intent.
+- **Noise (minor)** — the `--apply` phone push fires only when ≥1 de-risk action actually happened (no twice-daily "0 actions" text).
 
 **Placeholder scan:** no TBD/TODO; every code step shows complete code. Two explicit "reviewer note" callouts (Schwab `get_price_history` kwargs; crontab TZ) are verification instructions, not placeholders — the code runs as written for `--selftest`; only the live adapter kwargs need confirming against the real signature.
 
@@ -908,4 +1087,9 @@ git commit -m "feat(risk-review): surface de-risk actions in weekly letter facts
 
 ## Execution Handoff
 
-Note the one self-review action folded into Task 2 (the `entry_low` stop check) before implementing it.
+All self-review actions are now folded directly into the task bodies (the
+`entry_low` stop check lives in Task 2's code + selftest; §7 reconciliation is
+Task 10). Implement top-to-bottom; each task's `--selftest` is the gate before its
+commit. The two remaining live-only confirmations are labelled "reviewer note" in
+Tasks 6 and 8 (cached-closes/parquet presence for the gatherers; crontab TZ) —
+both degrade safely and do not block `--selftest`.
