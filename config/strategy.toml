@@ -135,3 +135,20 @@ entry_cadence = "nightly"          # v1: no same-day catalyst reaction
 live_approved  = false            # MASTER SWITCH: fast loop may PLACE orders only when true.
                                   # Ships SAFE. Arm a box via git-ignored
                                   # config/strategy.local.toml:  [proof] live_approved = true
+
+# --- Intraday risk-management overlay (docs/superpowers/specs/2026-07-14-*) ---
+# Two scheduled agentic reviews tend held positions between weekly rebuilds.
+# DE-RISK ONLY: may tighten stops, lower take-profits, trim, or exit — never
+# loosen a stop, extend a target, or open an entry (enforced in risk_review.py).
+[risk_review]
+enabled              = true
+alert_only           = true    # ships SAFE: journal + push, place/override NOTHING
+                               #   (also forced alert-only whenever live_approved=false)
+midday_et            = "12:00" # intraday check (may act now)
+close_et             = "15:45" # pre-close tend (before 16:00 so orders place in RTH)
+# Attention thresholds — starting points that surface a name for closer LLM look;
+# they are NOT hard triggers (the agent judges every held name each pass).
+ma_break_days        = 21      # revives the specced-but-dead ma_exit line
+giveback_flag_pct    = 0.10    # flag when a name gives back >10% from its high since entry
+vol_expansion_mult   = 1.75    # flag when daily sigma now > 1.75x the sigma at entry
+earnings_window_days = 5       # flag earnings within this many days (overnight-gap risk)
