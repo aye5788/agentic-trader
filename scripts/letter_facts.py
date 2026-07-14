@@ -121,6 +121,11 @@ def main() -> None:
     for e in events:
         if e.get("event") == "execution":
             for f in e.get("fills", e.get("placed", [])):
+                if f.get("status") == "skipped":
+                    continue    # deferred/rejected legs (settlement lag, re-plans
+                                # next run) are plumbing — journaled, never narrated;
+                                # they must not eat letter space. Meaningful PM
+                                # judgment comes through reentry_decisions instead.
                 fills.append({k: f.get(k) for k in
                               ("symbol", "side", "amount", "status", "avg_price") if k in f})
             reentries.extend(e.get("reentry_decisions", []))

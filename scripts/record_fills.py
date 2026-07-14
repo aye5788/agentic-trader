@@ -59,10 +59,24 @@ def main() -> None:
     _push_summary(fills, entry.get("reentry_decisions"))
 
 
+# Skip reasons the system handles by itself and re-plans next run — settlement
+# lag in this cash account and its buying-power symptom. These are working-as-
+# intended deferrals, not incidents: keep them journaled, but off the phone.
+_EXPECTED_SKIP = ("settle", "buying_power", "insufficient", "pending")
+
+
+def _expected_skip(reason) -> bool:
+    r = (reason or "").lower()
+    return any(k in r for k in _EXPECTED_SKIP)
+
+
 def _push_summary(fills: list, reentry: list | None) -> None:
-    """Phone push: one line per order. push() never raises, so neither do we."""
+    """Phone push: one line per order. push() never raises, so neither do we.
+    Routine settlement/buying-power deferrals are suppressed (see _EXPECTED_SKIP)
+    — a run whose only activity is one of those sends no text at all."""
     placed = [f for f in fills if f.get("status") != "skipped"]
-    skipped = [f for f in fills if f.get("status") == "skipped"]
+    skipped = [f for f in fills if f.get("status") == "skipped"
+               and not _expected_skip(f.get("reason"))]
     lines = [f"{f.get('side', '?').upper()} {f.get('symbol', '?')} ${f.get('amount', '?')}"
              + (f" @ ${f['avg_price']}" if f.get("avg_price") else f" ({f.get('status', '?')})")
              for f in placed]
