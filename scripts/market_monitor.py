@@ -71,6 +71,12 @@ def _selftest() -> None:
     # looser override is IGNORED (stop can't move down, target can't move up)
     out = apply_overrides(held, {"NVDA": {"stop": 90.0, "targets": [130.0, 150.0]}})
     assert out["NVDA"].stop == 100.0 and out["NVDA"].targets == [120.0, 140.0], out["NVDA"]
+    # malformed per-symbol override (not a dict) is IGNORED, not raised
+    out = apply_overrides(held, {"NVDA": "garbage"})
+    assert out["NVDA"].stop == 100.0 and out["NVDA"].targets == [120.0, 140.0], out["NVDA"]
+    # malformed whole-overrides object (not a dict) is IGNORED, not raised
+    out = apply_overrides(held, ["nope"])
+    assert out["NVDA"].stop == 100.0 and out["NVDA"].targets == [120.0, 140.0], out["NVDA"]
     print("monitor selftest OK: stricter-only override overlay")
 
 
@@ -89,20 +95,28 @@ import copy
 def apply_overrides(held: dict, overrides: dict) -> dict:
     """Overlay stricter-only risk-review geometry onto held theses (copies).
     Stop may only be raised; each target may only be lowered. Looser or malformed
-    overrides are ignored — a bad file can never loosen a live stop."""
+    overrides are ignored — a bad file can never loosen a live stop, and can never
+    abort the whole tick (a malformed entry degrades to "no override" for that
+    symbol, or for the whole book if `overrides` itself isn't a dict)."""
+    if not isinstance(overrides, dict):
+        return dict(held)
     out = {}
     for sym, th in held.items():
         ov = overrides.get(sym)
-        if not ov:
+        if not ov or not isinstance(ov, dict):
             out[sym] = th
             continue
-        t = copy.copy(th)
-        if isinstance(ov.get("stop"), (int, float)) and t.stop is not None and ov["stop"] > t.stop:
-            t.stop = float(ov["stop"])
-        ot = ov.get("targets")
-        if isinstance(ot, list) and t.targets and len(ot) == len(t.targets):
-            t.targets = [min(cur, float(o)) for cur, o in zip(t.targets, ot)]
-        out[sym] = t
+        try:
+            t = copy.copy(th)
+            if isinstance(ov.get("stop"), (int, float)) and t.stop is not None and ov["stop"] > t.stop:
+                t.stop = float(ov["stop"])
+            ot = ov.get("targets")
+            if (isinstance(ot, list) and t.targets and len(ot) == len(t.targets)
+                    and all(isinstance(o, (int, float)) for o in ot)):
+                t.targets = [min(cur, float(o)) for cur, o in zip(t.targets, ot)]
+            out[sym] = t
+        except Exception:
+            out[sym] = th
     return out
 
 
