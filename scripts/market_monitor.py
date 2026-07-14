@@ -61,6 +61,19 @@ def market_open(now=None) -> bool:
     return 9 * 60 + 30 <= mins < 16 * 60          # 09:30–16:00 ET
 
 
+def _selftest() -> None:
+    from research_store.models import Thesis
+    held = {"NVDA": Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
+                           targets=[120.0, 140.0], target_weight=0.07)}
+    # stricter override: stop up, first target pulled in
+    out = apply_overrides(held, {"NVDA": {"stop": 108.0, "targets": [118.0, 140.0]}})
+    assert out["NVDA"].stop == 108.0 and out["NVDA"].targets[0] == 118.0, out["NVDA"]
+    # looser override is IGNORED (stop can't move down, target can't move up)
+    out = apply_overrides(held, {"NVDA": {"stop": 90.0, "targets": [130.0, 150.0]}})
+    assert out["NVDA"].stop == 100.0 and out["NVDA"].targets == [120.0, 140.0], out["NVDA"]
+    print("monitor selftest OK: stricter-only override overlay")
+
+
 def _last_price(block: dict):
     q = (block or {}).get("quote", {}) or block or {}
     for k in ("lastPrice", "mark", "closePrice", "bidPrice"):
@@ -68,6 +81,29 @@ def _last_price(block: dict):
         if isinstance(v, (int, float)) and v > 0:
             return float(v)
     return None
+
+
+import copy
+
+
+def apply_overrides(held: dict, overrides: dict) -> dict:
+    """Overlay stricter-only risk-review geometry onto held theses (copies).
+    Stop may only be raised; each target may only be lowered. Looser or malformed
+    overrides are ignored — a bad file can never loosen a live stop."""
+    out = {}
+    for sym, th in held.items():
+        ov = overrides.get(sym)
+        if not ov:
+            out[sym] = th
+            continue
+        t = copy.copy(th)
+        if isinstance(ov.get("stop"), (int, float)) and t.stop is not None and ov["stop"] > t.stop:
+            t.stop = float(ov["stop"])
+        ot = ov.get("targets")
+        if isinstance(ot, list) and t.targets and len(ot) == len(t.targets):
+            t.targets = [min(cur, float(o)) for cur, o in zip(t.targets, ot)]
+        out[sym] = t
+    return out
 
 
 def _load(path, default):
@@ -121,6 +157,13 @@ def check_once(cfg, client) -> int:
         return 0
 
     held = {t.symbol: t for t in prod.theses if t.target_weight > 0 and t.stop}
+    try:
+        _ov = json.loads((MON / "overrides.json").read_text())   # json already imported at module top
+    except Exception:
+        _ov = {}   # absent OR a torn read → ignore ALL overrides this tick (self-heals next tick;
+                   # risk_review.py writes atomically via os.replace, so torn reads are rare)
+    if _ov:
+        held = apply_overrides(held, _ov)
     if not held:
         return 0
 
@@ -209,7 +252,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true", help="single pass then exit")
     ap.add_argument("--force", action="store_true", help="ignore the market-hours gate")
+    ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
+    if args.selftest:
+        _selftest()
+        return
     cfg = strat.load()
     poll = cfg["monitor"]["poll_secs"]
     client = research.build_client(interactive_auth=False)
