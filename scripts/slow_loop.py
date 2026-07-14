@@ -202,6 +202,15 @@ def main() -> None:
     write_product(product, mandate=strat.risk_mandate(cfg))
     print("\nwritten to Research Store (current.json + journal)")
 
+    # Intraday risk-review overrides/intents are strictly INTRA-WEEK overlays: the
+    # fresh weekly geometry supersedes them. Clear them so a Tuesday-tightened stop
+    # is never re-applied on top of next week's rebuilt levels. (spec §7)
+    for _f in ("overrides.json", "deferred_intents.json"):
+        try:
+            (REPO / "research_store" / "monitor" / _f).unlink()
+        except FileNotFoundError:
+            pass
+
 
 if __name__ == "__main__":
     main()
