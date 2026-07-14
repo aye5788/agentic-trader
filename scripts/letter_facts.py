@@ -118,6 +118,7 @@ def main() -> None:
     events = [e for e in _jsonl(RS / "journal.jsonl") if (e.get("ts") or "9999") >= since
               or e.get("as_of", "") >= since[:10]]
     fills, exits, notes, reentries = [], [], [], []
+    risk_actions = []
     for e in events:
         if e.get("event") == "execution":
             for f in e.get("fills", e.get("placed", [])):
@@ -128,11 +129,20 @@ def main() -> None:
                                 # judgment comes through reentry_decisions instead.
                 fills.append({k: f.get(k) for k in
                               ("symbol", "side", "amount", "status", "avg_price") if k in f})
+                if f.get("reason") == "risk_review":
+                    risk_actions.append({"symbol": f.get("symbol"), "kind": f.get("side")})
             reentries.extend(e.get("reentry_decisions", []))
             if e.get("halt_reason"):
                 notes.append(e["halt_reason"])
         elif e.get("event") == "exit_signal":
             exits.extend(e.get("triggers", []))
+        elif e.get("event") == "risk_review":
+            # Only geometry tightenings that were actually persisted. trim/exit are
+            # NOT taken from here — they are intents; their CONFIRMED fills arrive as
+            # `execution` events (handled above), tagged reason="risk_review".
+            for a in e.get("applied", []):
+                if a.get("kind") in ("tighten_stop", "lower_tp"):
+                    risk_actions.append({"symbol": a.get("symbol"), "kind": a.get("kind")})
 
     days_ahead = (6 - today.weekday()) % 7 or 7           # next Sunday
     facts = {
@@ -157,6 +167,7 @@ def main() -> None:
         "fills_this_week": fills,
         "exit_signals_this_week": exits,
         "reentry_decisions_this_week": reentries,
+        "risk_actions_this_week": risk_actions,
         "realized": _read_json(RS / "rh" / "realized.json", None),
         "notes": notes,
         "cooldown": list(_read_json(RS / "monitor" / "cooldown.json", {})),
