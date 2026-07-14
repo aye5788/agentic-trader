@@ -162,6 +162,150 @@ def _days_ahead_iso(now_iso: str, days: int) -> str:
     return (base + timedelta(days=days)).isoformat()
 
 
+def apply_decisions(decisions, current_geom, *, armed,
+                    overrides_path=OVERRIDES, intents_path=INTENTS):
+    """Validate each agent decision (one-way invariant) and, only when armed,
+    persist geometry overrides / watch-notes. Returns (applied, orders, rejected):
+      - applied = geometry tightenings + watch-notes THIS FUNCTION persisted;
+      - orders  = trim/exit the prompt must still PLACE via the RH MCP — recorded
+                  here as INTENTS only, never as confirmed fills (record_fills.py
+                  logs the actual fill; the letter narrates from that, not from here);
+      - rejected = decisions that failed the one-way / action-kind guard.
+    Keeping orders separate stops the journal (and the weekly letter) from ever
+    claiming a sale that has not actually filled."""
+    applied, orders, rejected = [], [], []
+    for dcn in decisions:
+        sym = dcn.get("symbol")
+        ok, why = validate_action(dcn)
+        if not ok:
+            rejected.append({"symbol": sym, "reason": why})
+            continue
+        kind = dcn["kind"]
+        if kind in ("tighten_stop", "lower_tp"):
+            cg = current_geom.get(sym, {})
+            acc, rej = validate_geometry(cg, {k: dcn.get(k) for k in ("stop", "targets")},
+                                         entry_low=cg.get("entry_low"))
+            if not acc:
+                rejected.append({"symbol": sym, "reason": "; ".join(rej) or "no stricter change"})
+                continue
+            if armed:
+                write_override(sym, acc, dcn.get("reason", ""),
+                               dcn.get("expires", date.today().isoformat()),
+                               path=overrides_path)
+            applied.append({"symbol": sym, "kind": kind, "geometry": acc})
+        elif kind == "watch":
+            if armed:
+                append_intent({"symbol": sym, "note": dcn.get("note", dcn.get("reason", "")),
+                               "expires": dcn.get("expires", date.today().isoformat())},
+                              path=intents_path)
+            applied.append({"symbol": sym, "kind": "watch"})
+        elif kind in ("trim", "exit"):  # an ORDER — the prompt places it via MCP
+            orders.append({"symbol": sym, "kind": kind, "fraction": dcn.get("fraction"),
+                           "reason": dcn.get("reason", "")})
+        # kind == "hold" is a no-op: nothing to persist, nothing to place.
+    return applied, orders, rejected
+
+
+def _held(prod):
+    """The held names the review tends (weighted, with a stop)."""
+    return [t for t in prod.theses if t.target_weight > 0 and t.stop]
+
+
+def _gather_highs(prod) -> dict:
+    """Highest intraday HIGH since ENTRY per held name, from Schwab price history.
+    NOTE: get_price_history returns a LIST of candle dicts (NOT {"candles":[...]}),
+    each {open,high,low,close,volume,datetime(epoch ms)}. Bounding to bars at/after
+    the thesis entry (`as_of`) keeps give-back honest — a pre-entry spike we never
+    held through must not count as our high-water mark."""
+    try:
+        from adapters.schwab import research
+        out = {}
+        for t in _held(prod):
+            candles = research.get_price_history(t.symbol, period_type="year", period=1)
+            entry_ms = None
+            if t.as_of:
+                try:
+                    entry_ms = datetime.fromisoformat(t.as_of[:10]).replace(
+                        tzinfo=timezone.utc).timestamp() * 1000
+                except Exception:
+                    entry_ms = None
+            highs = [c["high"] for c in candles if c.get("high")
+                     and (entry_ms is None or (c.get("datetime") or 0) >= entry_ms)]
+            if highs:
+                out[t.symbol] = max(highs)
+        return out
+    except Exception:
+        return {}
+
+
+def _gather_rel_strength(prod) -> dict:
+    """Recent (~1mo) return MINUS SPY's, per held name, from cached closes
+    (research_store/prices/closes.parquet). Spec §5 #1 — the most on-strategy
+    signal; positive = still leading the market. Best-effort: any failure omits
+    the value and the agent simply sees no RS number for that name."""
+    try:
+        import pandas as pd
+        closes = pd.read_parquet(REPO / "research_store" / "prices" / "closes.parquet")
+        WIN = 21  # ~1 trading month
+        if "SPY" not in closes.columns:
+            return {}
+        spy = closes["SPY"].dropna()
+        if len(spy) <= WIN:
+            return {}
+        spy_ret = float(spy.iloc[-1] / spy.iloc[-1 - WIN] - 1.0)
+        out = {}
+        for t in _held(prod):
+            if t.symbol not in closes.columns:
+                continue
+            s = closes[t.symbol].dropna()
+            if len(s) > WIN:
+                out[t.symbol] = round(float(s.iloc[-1] / s.iloc[-1 - WIN] - 1.0) - spy_ret, 4)
+        return out
+    except Exception:
+        return {}
+
+
+def _gather_cur_sigma(prod) -> dict:
+    """Current trailing daily sigma (~3mo) per held name from cached closes —
+    compared in build_facts against the entry sigma to flag vol expansion
+    (spec §5 #5). Best-effort."""
+    try:
+        import pandas as pd
+        closes = pd.read_parquet(REPO / "research_store" / "prices" / "closes.parquet")
+        out = {}
+        for t in _held(prod):
+            if t.symbol not in closes.columns:
+                continue
+            s = closes[t.symbol].dropna()
+            if len(s) > 64:
+                out[t.symbol] = round(float(s.pct_change().iloc[-64:].std()), 5)
+        return out
+    except Exception:
+        return {}
+
+
+def _gather_entry_sigma(prod) -> dict:
+    return {t.symbol: (t.signals or {}).get("sigma") for t in prod.theses
+            if (t.signals or {}).get("sigma")}
+
+
+def _gather_vix() -> float | None:
+    try:
+        from adapters.schwab import research
+        q = research.get_quote("$VIX")
+        return _q_last(q)
+    except Exception:
+        return None
+
+
+def _q_last(q: dict):
+    blk = (q or {}).get("quote", q) or {}
+    for k in ("lastPrice", "mark", "closePrice"):
+        if isinstance(blk.get(k), (int, float)):
+            return float(blk[k])
+    return None
+
+
 def _selftest() -> None:
     # --- one-way geometry: stop may only move UP, targets only pull IN ---
     acc, rej = validate_geometry({"stop": 100.0, "targets": [120.0, 140.0]},
@@ -227,15 +371,86 @@ def _selftest() -> None:
     assert pos["rel_return_vs_spy"] == -0.04                   # lagging SPY
     assert facts["backdrop"]["vix"] == 22.0
 
+    with tempfile.TemporaryDirectory() as d:
+        ovp, dp = Path(d) / "ov.json", Path(d) / "dec.json"
+        dp.write_text(json.dumps([
+            {"symbol": "NVDA", "kind": "tighten_stop", "reason": "trail",
+             "stop": 108.0, "expires": "2026-07-18"},
+            {"symbol": "AMD", "kind": "buy", "reason": "sneaky entry"},   # must be rejected
+        ]))
+        applied, orders, rejected = apply_decisions(
+            json.loads(dp.read_text()),
+            current_geom={"NVDA": {"stop": 100.0, "targets": [120.0], "entry_low": 130.0}},
+            armed=True, overrides_path=ovp, intents_path=Path(d) / "i.json")
+        assert "NVDA" in [a["symbol"] for a in applied], applied
+        assert any(r["symbol"] == "AMD" for r in rejected), rejected      # buy rejected
+        assert read_overrides(path=ovp)["NVDA"]["stop"] == 108.0
+        # a trim/exit is an INTENT (orders), never counted as an applied change
+        applied2, orders2, _ = apply_decisions(
+            [{"symbol": "TSLA", "kind": "exit", "reason": "thesis broke"}],
+            current_geom={}, armed=True,
+            overrides_path=Path(d) / "o2.json", intents_path=Path(d) / "i2.json")
+        assert orders2 and orders2[0]["symbol"] == "TSLA" and not applied2, (orders2, applied2)
+
     print("selftest OK: one-way geometry + action validation")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--facts", action="store_true", help="gather + write risk_review_facts.json")
+    ap.add_argument("--apply", action="store_true", help="apply risk_review_decisions.json")
     args = ap.parse_args()
     if args.selftest:
         _selftest()
+        return
+
+    import strategy as strat            # noqa: E402
+    import governance as gov            # noqa: E402
+    import marks                        # noqa: E402
+    from research_store import read_current, store   # noqa: E402
+    cfg = strat.load()
+    rc = cfg["risk_review"]
+    armed = gov.live_approved(cfg) and not rc.get("alert_only", True)
+
+    if args.facts:
+        valued = marks.load()
+        prod = read_current()
+        if valued is None or prod is None:
+            sys.exit("no snapshot/product yet")
+        # NOTE: highs/spy_ret/entry_sigma/vix are filled from adapters here;
+        # each is best-effort — a failed fetch leaves its flag off (see build_facts).
+        facts = build_facts(valued, prod.theses, rc, highs=_gather_highs(prod),
+                            spy_ret=_gather_rel_strength(prod), cur_sigma=_gather_cur_sigma(prod),
+                            entry_sigma=_gather_entry_sigma(prod),
+                            vix=_gather_vix(), regime_on=(prod.regime.get("status") == "on"),
+                            now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        FACTS.parent.mkdir(parents=True, exist_ok=True)
+        FACTS.write_text(json.dumps(facts, indent=2))
+        print(f"facts -> {FACTS} ({len(facts['positions'])} positions, armed={armed})")
+        return
+
+    if args.apply:
+        decisions = _read_json(DECISIONS, [])
+        prod = read_current()
+        current_geom = {t.symbol: {"stop": t.stop, "targets": t.targets,
+                                   "entry_low": (t.entry_zone or [None])[0]}
+                        for t in (prod.theses if prod else [])}
+        applied, orders, rejected = apply_decisions(decisions, current_geom, armed=armed)
+        store.append_journal({"event": "risk_review",
+                              "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                              "armed": armed, "applied": applied,
+                              "orders_intended": orders, "rejected": rejected})
+        # Phone push ONLY when something de-risking actually happened — a routine
+        # "0 actions" twice a day is exactly the as-designed noise Aaron doesn't
+        # want (see docs/OPSLOG.md / the no-skip-noise rule).
+        acted = applied + orders
+        if acted:
+            from notify import push
+            push(f"Risk review: {len(acted)} de-risk action(s)" + ("" if armed else " (alert-only)"),
+                 "\n".join(f"{a['symbol']} {a['kind']}" for a in acted),
+                 tags="shield")
+        print(f"applied {len(applied)}, orders {len(orders)}, rejected {len(rejected)} (armed={armed})")
         return
 
 
