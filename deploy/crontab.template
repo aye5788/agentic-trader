@@ -20,6 +20,13 @@ HOME=/root
 # Mon–Fri 10:00 (after the open). No-op unless [proof] live_approved=true.
 0 10 * * 1-5 /opt/agentic-trader/deploy/run_fast_loop.sh >> /opt/agentic-trader/logs/fast.log 2>&1
 
+# --- INTRADAY RISK REVIEW (headless Claude, stricter-only de-risk overlay) ---
+# Times are ET per this file's header convention (box is set to US/Eastern) —
+# no CRON_TZ needed, direct local-time entries like the other jobs.
+# 12:00 ET midday check + 15:45 ET pre-close tend, Mon–Fri.
+0 12 * * 1-5  /opt/agentic-trader/deploy/run_risk_review.sh >> /opt/agentic-trader/logs/risk_review.log 2>&1
+45 15 * * 1-5 /opt/agentic-trader/deploy/run_risk_review.sh >> /opt/agentic-trader/logs/risk_review.log 2>&1
+
 # --- WEEKLY INVESTOR LETTER (headless Claude narrative, then email) ---
 # Sunday 21:00, after the slow loop writes the new book — the letter wraps the
 # week and previews Monday's rotation. Emails only once NEWSLETTER_* creds
