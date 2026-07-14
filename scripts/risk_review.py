@@ -65,6 +65,56 @@ def validate_action(action: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+def _read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return default
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via temp-file + os.replace so the always-on 15s monitor never reads a
+    half-written overrides.json. A torn read would make the monitor drop ALL
+    overrides for that tick (not just the one being written) — exactly the wrong
+    moment during a fast breakdown. os.replace is atomic on POSIX."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def read_overrides(path: Path = OVERRIDES) -> dict:
+    """Active geometry overrides, pruning any past their `expires` date."""
+    ov = _read_json(path, {})
+    today = date.today().isoformat()
+    live = {s: o for s, o in ov.items() if str(o.get("expires", "9999")) >= today}
+    if live != ov:
+        _atomic_write(path, json.dumps(live, indent=2))
+    return live
+
+
+def write_override(sym: str, accepted: dict, reason: str, expires: str,
+                   *, path: Path = OVERRIDES) -> None:
+    """Merge one name's ALREADY-VALIDATED geometry (from validate_geometry) into
+    the overrides file. Caller must pass only accepted (stricter) fields."""
+    ov = _read_json(path, {})
+    ov[sym] = {**accepted, "reason": reason, "expires": expires,
+               "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    _atomic_write(path, json.dumps(ov, indent=2))
+
+
+def read_intents(path: Path = INTENTS) -> list:
+    ints = _read_json(path, [])
+    today = date.today().isoformat()
+    return [i for i in ints if str(i.get("expires", "9999")) >= today]
+
+
+def append_intent(intent: dict, *, path: Path = INTENTS) -> None:
+    ints = _read_json(path, [])
+    ints.append({**intent, "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    _atomic_write(path, json.dumps(ints, indent=2))
+
+
 def _selftest() -> None:
     # --- one-way geometry: stop may only move UP, targets only pull IN ---
     acc, rej = validate_geometry({"stop": 100.0, "targets": [120.0, 140.0]},
@@ -95,6 +145,19 @@ def _selftest() -> None:
     ok, why = validate_action({"symbol": "X", "kind": "trim", "fraction": 1.5})
     assert ok is False
     assert validate_action({"symbol": "X", "kind": "trim", "fraction": 0.5}) == (True, None)
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "overrides.json"
+        write_override("NVDA", {"stop": 105.0}, "trail up", "2026-07-18", path=p)
+        got = read_overrides(path=p)
+        assert got["NVDA"]["stop"] == 105.0 and got["NVDA"]["reason"] == "trail up", got
+        # an already-expired override is pruned on read
+        write_override("OLD", {"stop": 1.0}, "stale", "2000-01-01", path=p)
+        assert "OLD" not in read_overrides(path=p)
+        ip = Path(d) / "intents.json"
+        append_intent({"symbol": "AMD", "note": "watch 21d reclaim", "expires": "2026-07-18"}, path=ip)
+        assert read_intents(path=ip)[0]["symbol"] == "AMD"
     print("selftest OK: one-way geometry + action validation")
 
 
