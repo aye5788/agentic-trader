@@ -8,6 +8,33 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-15 — Intraday risk-management overlay shipped + armed
+
+The defensive, de-risk-only intraday risk overlay went live (branch
+`feat/intraday-risk-review`, 14 commits, merged to `main` at `abc8498`). It adds
+two headless-Claude reviews (cron 12:00 + 15:45 ET, Mon–Fri) that tend open
+positions between weekly rebuilds: tighten stops / lower take-profits (written as
+stricter-only overrides the always-on monitor enforces within 15s), and
+trim/exit via the RH MCP — never loosen a stop, raise a target, or open a
+position (enforced in `scripts/risk_review.py`'s one-way invariant, re-checked in
+the monitor's `apply_overrides`). Core files: `scripts/risk_review.py` (new
+deterministic core, `--selftest`), `prompts/risk_review.md` (agentic procedure),
+monitor override overlay, `[risk_review]` config, weekly override-clear in
+`slow_loop.py` (Sunday only — nightly recompute must not wipe intra-week
+tightenings), and `risk_actions_this_week` in the letter facts (armed actions
+only; trim/exit narrated from confirmed fills, never intents).
+
+Built via a 10-task subagent-driven pass with per-task + whole-branch reviews;
+the final review caught two integration issues since fixed (nightly-vs-weekly
+override clear; a malformed agent decision aborting the whole `--apply` batch).
+
+**Armed same day** (principal, 2026-07-15) via `strategy.local.toml`
+`[risk_review] alert_only = false` (with `live_approved = true` already set) —
+`armed = True`. No alert-only observation period was run first; the design's
+observe-then-arm rollout was skipped at the principal's explicit direction.
+Revert to alert-only = flip that flag back to `true`. First armed run: 12:00 ET
+2026-07-15.
+
 ## 2026-07-10 — SPY→XLE rotation: buy leg deferred on unsettled cash
 
 The ETF sleeve rotated SPY out for XLE (slow loop, as_of 2026-07-08). The fast
