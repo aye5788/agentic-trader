@@ -21,6 +21,7 @@ Regime-off or nothing-eligible -> an empty book is a valid, intended state (cash
 """
 import argparse
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -204,13 +205,17 @@ def main() -> None:
 
     # Intraday risk-review overrides/intents are strictly INTRA-WEEK overlays: the
     # fresh weekly geometry supersedes them. Clear them so a Tuesday-tightened stop
-    # is never re-applied on top of next week's rebuilt levels. (spec §7)
-    for _f in ("overrides.json", "deferred_intents.json"):
-        try:
-            (REPO / "research_store" / "monitor" / _f).unlink()
-        except FileNotFoundError:
-            pass
-
+    # is never re-applied on top of next week's rebuilt levels. (spec §7) BUT this
+    # script also runs nightly (Mon-Fri 18:00, per deploy/crontab.template) for the
+    # daily recompute — that run must NOT clear overrides, or a stop the 15:45 risk
+    # review tightened earlier the same day would be wiped before the next open.
+    # Only the Sunday 20:00 weekly rebuild clears (weekday(): Mon=0 ... Sun=6).
+    if date.today().weekday() == 6:
+        for _f in ("overrides.json", "deferred_intents.json"):
+            try:
+                (REPO / "research_store" / "monitor" / _f).unlink()
+            except FileNotFoundError:
+                pass
 
 if __name__ == "__main__":
     main()

@@ -35,17 +35,23 @@ def validate_geometry(current: dict, proposed: dict, *, entry_low=None) -> tuple
     accepted, rejections = {}, []
     cur_stop = current.get("stop")
     if "stop" in proposed and proposed["stop"] is not None:
-        ps = float(proposed["stop"])
-        if cur_stop is not None and ps < cur_stop:
-            rejections.append(f"stop {ps} < current {cur_stop} — loosening rejected")
-        elif entry_low is not None and ps >= entry_low:
-            rejections.append(f"stop {ps} >= entry_low {entry_low} — must stay below entry")
+        ps = proposed["stop"]
+        if not isinstance(ps, (int, float)):
+            rejections.append(f"stop {ps!r} is not numeric — rejected")
         else:
-            accepted["stop"] = ps
+            ps = float(ps)
+            if cur_stop is not None and ps < cur_stop:
+                rejections.append(f"stop {ps} < current {cur_stop} — loosening rejected")
+            elif entry_low is not None and ps >= entry_low:
+                rejections.append(f"stop {ps} >= entry_low {entry_low} — must stay below entry")
+            else:
+                accepted["stop"] = ps
     cur_t = current.get("targets") or []
     if "targets" in proposed and proposed["targets"] is not None:
         pt = proposed["targets"]
-        if len(pt) == len(cur_t) and all(p <= c for p, c in zip(pt, cur_t)):
+        if not isinstance(pt, (list, tuple)) or not all(isinstance(x, (int, float)) for x in pt):
+            rejections.append(f"targets {pt!r} contains non-numeric elements — rejected")
+        elif len(pt) == len(cur_t) and all(p <= c for p, c in zip(pt, cur_t)):
             accepted["targets"] = [float(x) for x in pt]
         else:
             rejections.append(f"targets {pt} not all <= current {cur_t} — extending rejected")
@@ -86,6 +92,8 @@ def _atomic_write(path: Path, text: str) -> None:
 def read_overrides(path: Path = OVERRIDES) -> dict:
     """Active geometry overrides, pruning any past their `expires` date."""
     ov = _read_json(path, {})
+    if not isinstance(ov, dict):
+        ov = {}
     today = date.today().isoformat()
     live = {s: o for s, o in ov.items() if str(o.get("expires", "9999")) >= today}
     if live != ov:
@@ -105,6 +113,8 @@ def write_override(sym: str, accepted: dict, reason: str, expires: str,
 
 def read_intents(path: Path = INTENTS) -> list:
     ints = _read_json(path, [])
+    if not isinstance(ints, list):
+        ints = []
     today = date.today().isoformat()
     return [i for i in ints if str(i.get("expires", "9999")) >= today]
 
@@ -182,33 +192,38 @@ def apply_decisions(decisions, current_geom, *, armed,
     applied, orders, rejected = [], [], []
     for dcn in decisions:
         sym = dcn.get("symbol")
-        ok, why = validate_action(dcn)
-        if not ok:
-            rejected.append({"symbol": sym, "reason": why})
-            continue
-        kind = dcn["kind"]
-        if kind in ("tighten_stop", "lower_tp"):
-            cg = current_geom.get(sym, {})
-            acc, rej = validate_geometry(cg, {k: dcn.get(k) for k in ("stop", "targets")},
-                                         entry_low=cg.get("entry_low"))
-            if not acc:
-                rejected.append({"symbol": sym, "reason": "; ".join(rej) or "no stricter change"})
+        try:
+            ok, why = validate_action(dcn)
+            if not ok:
+                rejected.append({"symbol": sym, "reason": why})
                 continue
-            if armed:
-                write_override(sym, acc, dcn.get("reason", ""),
-                               dcn.get("expires", date.today().isoformat()),
-                               path=overrides_path)
-            applied.append({"symbol": sym, "kind": kind, "geometry": acc})
-        elif kind == "watch":
-            if armed:
-                append_intent({"symbol": sym, "note": dcn.get("note", dcn.get("reason", "")),
-                               "expires": dcn.get("expires", date.today().isoformat())},
-                              path=intents_path)
-            applied.append({"symbol": sym, "kind": "watch"})
-        elif kind in ("trim", "exit"):  # an ORDER — the prompt places it via MCP
-            orders.append({"symbol": sym, "kind": kind, "fraction": dcn.get("fraction"),
-                           "reason": dcn.get("reason", "")})
-        # kind == "hold" is a no-op: nothing to persist, nothing to place.
+            kind = dcn["kind"]
+            if kind in ("tighten_stop", "lower_tp"):
+                cg = current_geom.get(sym, {})
+                acc, rej = validate_geometry(cg, {k: dcn.get(k) for k in ("stop", "targets")},
+                                             entry_low=cg.get("entry_low"))
+                if not acc:
+                    rejected.append({"symbol": sym, "reason": "; ".join(rej) or "no stricter change"})
+                    continue
+                if armed:
+                    write_override(sym, acc, dcn.get("reason", ""),
+                                   dcn.get("expires", date.today().isoformat()),
+                                   path=overrides_path)
+                applied.append({"symbol": sym, "kind": kind, "geometry": acc})
+            elif kind == "watch":
+                if armed:
+                    append_intent({"symbol": sym, "note": dcn.get("note", dcn.get("reason", "")),
+                                   "expires": dcn.get("expires", date.today().isoformat())},
+                                  path=intents_path)
+                applied.append({"symbol": sym, "kind": "watch"})
+            elif kind in ("trim", "exit"):  # an ORDER — the prompt places it via MCP
+                orders.append({"symbol": sym, "kind": kind, "fraction": dcn.get("fraction"),
+                               "reason": dcn.get("reason", "")})
+            # kind == "hold" is a no-op: nothing to persist, nothing to place.
+        except Exception as e:
+            # One malformed decision (e.g. non-numeric stop) must never abort the
+            # whole --apply batch and drop other VALID de-risk decisions alongside it.
+            rejected.append({"symbol": sym, "reason": str(e)})
     return applied, orders, rejected
 
 
@@ -398,6 +413,27 @@ def _selftest() -> None:
             overrides_path=Path(d) / "o2.json", intents_path=Path(d) / "i2.json")
         assert orders2 and orders2[0]["symbol"] == "TSLA" and not applied2, (orders2, applied2)
 
+        # a malformed decision (non-numeric stop) must be rejected, not raised, and
+        # must not knock a valid decision in the SAME batch off the applied list
+        applied3, orders3, rejected3 = apply_decisions(
+            [{"symbol": "GME", "kind": "tighten_stop", "reason": "garbage in",
+              "stop": "garbage", "expires": "2026-07-18"},
+             {"symbol": "NVDA", "kind": "tighten_stop", "reason": "trail",
+              "stop": 109.0, "expires": "2026-07-18"}],
+            current_geom={"NVDA": {"stop": 100.0, "targets": [120.0], "entry_low": 130.0}},
+            armed=True, overrides_path=Path(d) / "o3.json", intents_path=Path(d) / "i3.json")
+        assert any(r["symbol"] == "GME" for r in rejected3), rejected3
+        assert "NVDA" in [a["symbol"] for a in applied3], applied3
+
+        # armed=False must write NO override file — the top ships-safe property
+        applied4, _, _ = apply_decisions(
+            [{"symbol": "AMD", "kind": "tighten_stop", "reason": "trail",
+              "stop": 51.0, "expires": "2026-07-18"}],
+            current_geom={"AMD": {"stop": 50.0, "targets": [70.0], "entry_low": 60.0}},
+            armed=False, overrides_path=Path(d) / "o4.json", intents_path=Path(d) / "i4.json")
+        assert "AMD" in [a["symbol"] for a in applied4], applied4    # validated...
+        assert read_overrides(path=Path(d) / "o4.json") == {}       # ...but never persisted
+
     print("selftest OK: one-way geometry + action validation")
 
 
@@ -429,7 +465,7 @@ def main() -> None:
         facts = build_facts(valued, prod.theses, rc, highs=_gather_highs(prod),
                             spy_ret=_gather_rel_strength(prod), cur_sigma=_gather_cur_sigma(prod),
                             entry_sigma=_gather_entry_sigma(prod),
-                            vix=_gather_vix(), regime_on=(prod.regime.get("status") == "on"),
+                            vix=_gather_vix(), regime_on=((prod.regime or {}).get("status") == "on"),
                             now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"))
         FACTS.parent.mkdir(parents=True, exist_ok=True)
         FACTS.write_text(json.dumps(facts, indent=2))
