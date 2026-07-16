@@ -121,6 +121,10 @@ def main() -> None:
     P, TM = cfg["portfolio"], cfg["trade_management"]
 
     closes = pd.read_parquet(PANEL).sort_index()
+    if closes.empty:
+        sys.exit("price cache is empty — fetch_prices likely failed (auth/lock/"
+                 "network); refusing to rebuild the book off empty data. "
+                 "Fix the fetch, then run scripts/fetch_prices.py --force.")
     names = [t for t in pd.read_csv(REPO / "config" / "universe.csv")["ticker"] if t in closes]
     etfs = [t for t in pd.read_csv(REPO / "config" / "etf_universe.csv")["ticker"] if t in closes]
     asof = closes.index[-1]

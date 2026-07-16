@@ -10,6 +10,7 @@ short (fresh IPOs) so the backtest can drop them honestly.
 import argparse
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 import pandas as pd
@@ -32,17 +33,21 @@ def universe_tickers() -> list[str]:
 
 
 def _try_pull(sym: str, years: int):
-    """Return list[candle] or None. Try a couple symbol spellings Schwab wants."""
+    """Return (list[candle] | None, err_msg | None). Try a couple symbol spellings
+    Schwab wants. On failure return the last error so the caller can tell a dead
+    ticker apart from a systemic outage (expired token / locked DB / network)."""
+    last_err = None
     for cand in (sym, sym.replace(".", "/")):  # BRK.B -> BRK/B fallback
         try:
             ph = research.get_price_history(
                 cand, period_type="year", period=years, frequency_type="daily"
             )
             if ph:
-                return ph
-        except Exception:
+                return ph, None
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
             continue
-    return None
+    return None, last_err
 
 
 def main() -> None:
@@ -62,11 +67,15 @@ def main() -> None:
     print(f"pulling {len(tickers)} tickers, {args.years}y daily from Schwab...")
     series = {}
     meta = []
+    errors = []
     for i, sym in enumerate(tickers, 1):
-        ph = _try_pull(sym, args.years)
+        ph, err = _try_pull(sym, args.years)
         if not ph:
             meta.append((sym, 0, "FAILED"))
-            print(f"  [{i:3}/{len(tickers)}] {sym:6} FAILED")
+            if err:
+                errors.append(err)
+            print(f"  [{i:3}/{len(tickers)}] {sym:6} FAILED"
+                  + (f"  ({err[:90]})" if err else ""))
             continue
         s = pd.Series(
             {pd.Timestamp(c["datetime"], unit="ms").normalize(): c["close"] for c in ph}
@@ -78,6 +87,22 @@ def main() -> None:
         # Schwab limit ~120/min = 1 call / 0.5s. Hold 0.6s to stay safely under.
         time.sleep(0.6)
 
+    ok = sum(1 for _, _, st in meta if st == "ok")
+    # SAFETY GUARD (2026-07-15 incident): never overwrite a good cache with a
+    # systemic-failure result. A handful of dead/illiquid names failing is normal;
+    # a majority failing means auth/lock/network is broken. Writing that
+    # (near-)empty panel would DESTROY the existing 10y cache — which is exactly
+    # what turned a token hiccup into "everything's gone". Abort loudly instead
+    # (non-zero exit -> cron ERR-trap phone alert) and leave the cache untouched.
+    if ok < max(1, len(tickers) // 2):
+        reason = Counter(errors).most_common(1)
+        reason = reason[0][0] if reason else "unknown (no error captured)"
+        print(f"\nABORT: only {ok}/{len(tickers)} tickers fetched — systemic "
+              f"failure, not a few dead names.\n  most common error: {reason}")
+        if CLOSES.exists():
+            print(f"  existing cache LEFT INTACT (not overwritten): {CLOSES}")
+        raise SystemExit(2)
+
     panel = pd.DataFrame(series).sort_index()
     try:
         panel.to_parquet(CLOSES)
@@ -87,12 +112,12 @@ def main() -> None:
         print(f"WARN parquet write failed ({e}); wrote CSV fallback -> {fallback}")
     pd.DataFrame(meta, columns=["ticker", "candles", "status"]).to_csv(META, index=False)
 
-    ok = sum(1 for _, _, st in meta if st == "ok")
     failed = [t for t, _, st in meta if st != "ok"]
     short = [t for t, n, st in meta if st == "ok" and n < 300]
     print(f"\ndone: {ok}/{len(tickers)} ok -> {CLOSES}")
-    print(f"panel: {panel.shape[0]} dates x {panel.shape[1]} tickers, "
-          f"{panel.index.min().date()} .. {panel.index.max().date()}")
+    if not panel.empty:
+        print(f"panel: {panel.shape[0]} dates x {panel.shape[1]} tickers, "
+              f"{panel.index.min().date()} .. {panel.index.max().date()}")
     if failed:
         print(f"FAILED ({len(failed)}):", " ".join(failed))
     if short:

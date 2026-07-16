@@ -8,6 +8,49 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-16 — Slow loop outage: expired Schwab token + dangling tokens.db lock
+
+The Mon–Fri 18:00 slow loop (nightly risk-exit recompute) died on 2026-07-15 —
+`fetch_prices` returned **0/168** and the phone alert fired. Two stacked causes:
+
+1. **Schwab refresh token expired.** The weekly re-auth (last done 2026-07-08)
+   lapsed at 17:20 UTC on 07-15; the 7-day refresh token was dead, so no token
+   could be minted. (A `schwab_auth.py` run that "looked done" earlier never
+   wrote here — see the interactive-stdin note below.)
+2. **`secrets/tokens.db` held a dangling exclusive lock.** The `market_monitor`
+   systemd service's long-lived `schwabdev` connection issues `BEGIN EXCLUSIVE`
+   around each token refresh (schwabdev holds it across the HTTP call to
+   serialize refresh across instances). When the refresh failed it left the
+   transaction open — journald showed `cannot start a transaction within a
+   transaction` looping every 15s from ~11:57 ET. That RESERVED/EXCLUSIVE lock
+   (rollback-journal mode) starved the 18:00 cron of even a read lock →
+   `database is locked` on every ticker.
+
+**Collateral:** `fetch_prices` wrote the empty panel over `closes.parquet` before
+crashing, wiping the 10y cache; the book (`current.json`) went stale a day.
+
+**Fixes (this commit + one runtime change):**
+- **WAL mode on `secrets/tokens.db`** (`PRAGMA journal_mode=WAL`, one-time,
+  persists in the file; `tokens.db-wal`/`-shm` sidecars now present). Readers are
+  never blocked by the monitor's writer — proven live: a concurrent Schwab fetch
+  succeeded while the monitor ran. This is the durable fix for the lock class.
+  Not in git (secrets/ is ignored) — hence this note. Revert with
+  `PRAGMA journal_mode=DELETE` if ever needed.
+- **`fetch_prices.py` abort-guard:** if `<50%` of tickers fetch, it aborts
+  (exit 2 → cron alert) and **leaves the existing cache intact** instead of
+  overwriting it with a systemic-failure result. Per-ticker failures now print
+  the real error (expired token / locked db) instead of a bare `FAILED`.
+- **`slow_loop.py`:** refuses to rebuild the book off an empty panel (clear
+  message, not a cryptic `IndexError`).
+- **`scripts/schwab_finish_auth.py` (new):** completes the OAuth exchange with the
+  pasted redirect URL passed as an *argument*, for agent shells where `input()`
+  hits EOF (Claude Code `!`). The normal weekly re-auth still wants a real TTY:
+  `.venv/bin/python scripts/schwab_auth.py`.
+
+Re-auth done 2026-07-16 (good through ~07-23); prices rebuilt 168/168; book
+rebuilt; monitor restarted clean under WAL; the 07-16 12:00 armed risk review
+ran on the fresh book and held all 13 (0 orders, broker-confirmed).
+
 ## 2026-07-15 — Intraday risk-management overlay shipped + armed
 
 The defensive, de-risk-only intraday risk overlay went live (branch

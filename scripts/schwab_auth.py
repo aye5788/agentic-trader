@@ -19,4 +19,4 @@ from adapters.schwab.client import build_client  # noqa: E402
 
 if __name__ == "__main__":
     build_client(interactive_auth=True)
-    print("\n✅ Auth complete — token stored. Next: python scripts/schwab_scope.py")
+    print("\n✅ Auth complete — token stored. Good for 7 days.")
