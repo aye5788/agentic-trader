@@ -8,6 +8,36 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-17 — Fast loop now honors the stop-out cooldown (churn guard)
+
+**Found while double-checking holdings** (Aaron: "I saw it just bought XLK").
+XLK stopped out 09:31 ET (sold 173.60) and the daily fast loop **rebought it
+10:01 ET** (174.29) — the same session, while XLK was on cooldown until 07-22.
+
+**Root cause.** The cooldown list (`monitor/cooldown.json`, written by the
+monitor on every stop) was honored by `slow_loop.py` (excluded from the weekly
+book rebuild) but **never read by `fast_loop.py`**. The book keeps a stopped
+name until the next weekly rebuild, so the daily fast loop diffed "book wants
+XLK, hold=0 → BUY" and rebought it — the exact stop-vs-momentum churn the
+cooldown exists to prevent. A read-only replay of the live plan showed it queued
+rebuys of **all 8 names stopped out today** (ALAB, AMD, BE, INTC, LRCX, SNDK,
+STX + the AMAT phantom).
+
+**Fix.** `fast_loop.py` gains `load_cooldown()` + `apply_cooldown()`: BUY orders
+for names inside an active cooldown window are moved to `blocked`; sells/exits
+and non-cooled buys pass through untouched (cooldown never blocks getting out).
+Wired in `main()` right after `gov.vet_plan`, mirroring the slow loop. Fails
+open (empty set) on an absent/torn cooldown file. `--selftest` covers it;
+verified live — the 7 cooled names now block, XLK's existing position is left
+alone (the monitor's stop protects it).
+
+**Residual (self-healing):** AMAT is a book name that was never held, so it has
+no cooldown entry and is still a buy candidate; its stale 07-15 stop (528) sits
+above price (~518), so if bought it would stop out once. The Sunday weekly
+rebuild re-ranks/re-geometries the book and clears this.
+
+---
+
 ## 2026-07-17 — Intraday monitor: phantom-holding stop-loop (AMAT) fixed
 
 **Symptom (Aaron):** repeated failed sell orders / "something stuck." The

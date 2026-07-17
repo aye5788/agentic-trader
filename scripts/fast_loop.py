@@ -33,6 +33,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 SNAPSHOT = REPO / "research_store" / "rh" / "positions.json"
 REENTRY = REPO / "research_store" / "monitor" / "reentry_review.json"
+COOLDOWN = REPO / "research_store" / "monitor" / "cooldown.json"
 MIN_ORDER = 1.00          # RH fractional min ~ $1; skip dust
 REBALANCE_BAND = 0.005    # skip trims/adds smaller than 0.5% of the account (churn guard)
 
@@ -95,6 +96,36 @@ def apply_reentry(orders: list[dict], reviews: dict, prices: dict,
     return approved, review, blocked
 
 
+def load_cooldown(path: Path = COOLDOWN, today: str | None = None) -> set:
+    """Symbols still inside their stop-out cooldown window (until-date >= today).
+
+    Same file the slow loop honors (scripts/slow_loop.py) — the monitor writes it
+    when a stop fires. Absent/torn file -> empty set (fail open: never block a buy
+    just because the cooldown file is missing)."""
+    today = today or date.today().isoformat()
+    try:
+        cd = json.loads(path.read_text())
+    except Exception:
+        return set()
+    return {s for s, until in cd.items() if str(until) >= today}
+
+
+def apply_cooldown(orders: list[dict], cooled: set) -> tuple[list[dict], list[dict]]:
+    """Block BUY orders for names on active stop-out cooldown — the fast-loop half
+    of the stop-vs-momentum churn guard, so a name the monitor just stopped out is
+    not rebought against a book that hasn't rebuilt yet. Sells/exits and non-cooled
+    buys pass straight through (cooldown never blocks getting OUT). Returns
+    (kept, blocked). Pure; covered by --selftest."""
+    kept, blocked = [], []
+    for o in orders:
+        if o["side"] == "buy" and o["symbol"] in cooled:
+            blocked.append({**o, "blocked": "cooldown: stopped out recently — "
+                                            "no rebuy until the cooldown window clears"})
+        else:
+            kept.append(o)
+    return kept, blocked
+
+
 def load_reviews(path: Path = REENTRY) -> dict:
     """Active re-entry flags, pruning expired ones on the way through."""
     try:
@@ -136,7 +167,26 @@ def _selftest() -> None:
     assert not rev and blk[0]["symbol"] == "MSFT" and "knife-guard" in blk[0]["blocked"]
     ok, rev, blk = apply_reentry(orders, reviews, {}, 0.04)   # price unknown -> review
     assert rev and rev[0]["reentry"]["price_checked"] is None
-    print("selftest OK: exits, opens, rebalances, band-skip, and reentry routing correct")
+
+    # --- cooldown: block rebuys of stopped-out names, never block sells/exits ---
+    orders = [{"symbol": "XLK", "side": "buy", "amount": 5.0},    # cooled -> blocked
+              {"symbol": "AAPL", "side": "buy", "amount": 25.0},  # not cooled -> kept
+              {"symbol": "XLK", "side": "sell", "amount": 3.0}]   # exit of cooled name -> kept
+    kept, blk = apply_cooldown(orders, {"XLK"})
+    assert [(o["symbol"], o["side"]) for o in kept] == [("AAPL", "buy"), ("XLK", "sell")], kept
+    assert len(blk) == 1 and blk[0]["symbol"] == "XLK" and blk[0]["side"] == "buy"
+    assert "cooldown" in blk[0]["blocked"]
+    kept, blk = apply_cooldown(orders, set())                    # nothing cooled -> all pass
+    assert not blk and len(kept) == 3
+    # load_cooldown honors the until-date; absent file fails open (empty set)
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "cooldown.json"
+        p.write_text(json.dumps({"XLK": "2026-07-22", "OLD": "2020-01-01"}))
+        assert load_cooldown(p, today="2026-07-17") == {"XLK"}   # OLD expired -> excluded
+        assert load_cooldown(p, today="2026-07-25") == set()     # all expired
+        assert load_cooldown(Path(d) / "missing.json") == set()  # absent -> fail open
+    print("selftest OK: exits, opens, rebalances, band-skip, reentry routing, cooldown block")
 
 
 def main() -> None:
@@ -193,6 +243,17 @@ def main() -> None:
         print(f"empty plan -> {out}")
         return
     approved, blocked = gov.vet_plan(plan, acct, cfg)
+
+    # ---- stop-out cooldown: never rebuy a name the monitor just stopped ----
+    # The book won't drop a stopped name until the weekly rebuild, so without this
+    # the daily fast loop rebuys it the same session (churn). Mirrors slow_loop.py.
+    cooled = load_cooldown()
+    if cooled:
+        approved, cblocked = apply_cooldown(approved, cooled)
+        if cblocked:
+            print(f"cooldown: blocking rebuy of "
+                  f"{', '.join(sorted(o['symbol'] for o in cblocked))}")
+        blocked += cblocked
 
     # ---- post-take-profit re-entry: judgment, not rubber-stamp ([reentry]) ----
     review = []
