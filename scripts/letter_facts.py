@@ -148,6 +148,23 @@ def main() -> None:
                     if a.get("kind") in ("tighten_stop", "lower_tp"):
                         risk_actions.append({"symbol": a.get("symbol"), "kind": a.get("kind")})
 
+    # Reconcile raw exit_signals into real exits. The intraday monitor emits a
+    # fresh signal EVERY tick a name is below its stop and only stops once the
+    # sell fills, so a single stop shows up as many identical triggers; a book
+    # name that was never actually held (a phantom, e.g. AMAT on 2026-07-17)
+    # re-fires forever and never fills at all. Collapse to one row per
+    # (symbol, reason) and keep only names that actually sold this week — an
+    # un-filled signal is a monitor artifact, not an exit worth narrating.
+    sold = {f["symbol"] for f in fills if f.get("side") == "sell" and f.get("symbol")}
+    seen, real_exits = set(), []
+    for t in exits:
+        key = (t.get("symbol"), t.get("reason"))
+        if key in seen or t.get("symbol") not in sold:
+            continue
+        seen.add(key)
+        real_exits.append(t)
+    exits = real_exits
+
     days_ahead = (6 - today.weekday()) % 7 or 7           # next Sunday
     facts = {
         "issue_number": f"{issue_number:03d}",
