@@ -46,6 +46,7 @@ COOLDOWN = MON / "cooldown.json"
 REENTRY = MON / "reentry_review.json"
 EXIT_REQ = MON / "exit_request.json"
 EXIT_RES = MON / "exit_result.json"
+RH_POSITIONS = REPO / "research_store" / "rh" / "positions.json"
 ET = ZoneInfo("America/New_York")
 
 
@@ -78,6 +79,19 @@ def _selftest() -> None:
     out = apply_overrides(held, ["nope"])
     assert out["NVDA"].stop == 100.0 and out["NVDA"].targets == [120.0, 140.0], out["NVDA"]
     print("monitor selftest OK: stricter-only override overlay")
+
+    # holdings filter: only names actually held in RH are stop-watched. A book
+    # name that was never bought (phantom) must be excluded so it can't fire an
+    # un-fillable exit every tick (the AMAT infinite-loop bug, 2026-07-17).
+    snap = {"positions": {"IWM": {"qty": 0.02}, "SPY": {"qty": 0.008},
+                          "GONE": {"qty": 0.0}}}
+    assert owned_symbols(snap) == {"IWM", "SPY"}, owned_symbols(snap)
+    assert owned_symbols({"positions": {"X": 1.5}}) == {"X"}   # legacy dollars-at-cost
+    # unreadable / absent snapshot → None → caller fails OPEN (keeps watching all)
+    assert owned_symbols(None) is None
+    assert owned_symbols({}) is None
+    assert owned_symbols({"positions": "torn"}) is None
+    print("monitor selftest OK: holdings filter (phantom-holding guard)")
 
 
 def _last_price(block: dict):
@@ -117,6 +131,28 @@ def apply_overrides(held: dict, overrides: dict) -> dict:
             out[sym] = t
         except Exception:
             out[sym] = th
+    return out
+
+
+def owned_symbols(snap) -> set | None:
+    """Symbols actually held (qty>0) in an RH positions snapshot dict.
+
+    Returns None when the snapshot can't be interpreted (absent / torn / wrong
+    shape) — the caller then FAILS OPEN and keeps watching every thesis, because
+    silently dropping stop protection is worse than a rare re-fire. When it IS
+    readable, this is the guard that keeps a book name that was never actually
+    bought (a phantom holding) out of the stop-watch list, so it can't fire an
+    un-fillable exit every tick."""
+    if not isinstance(snap, dict) or not isinstance(snap.get("positions"), dict):
+        return None
+    out = set()
+    for sym, p in snap["positions"].items():
+        qty = p.get("qty") if isinstance(p, dict) else p   # {qty,...} or legacy dollars
+        try:
+            if float(qty or 0) > 0:
+                out.add(sym)
+        except (TypeError, ValueError):
+            continue
     return out
 
 
@@ -171,6 +207,15 @@ def check_once(cfg, client) -> int:
         return 0
 
     held = {t.symbol: t for t in prod.theses if t.target_weight > 0 and t.stop}
+    try:                                     # watch only names we ACTUALLY hold
+        owned = owned_symbols(_load(RH_POSITIONS, None))
+    except Exception:
+        owned = None                         # torn read → fail open (watch all)
+    if owned is not None:
+        dropped = [s for s in held if s not in owned]
+        held = {s: t for s, t in held.items() if s in owned}
+        if dropped:                          # phantom book names never bought
+            print(f"  not held — skipping stop-watch: {', '.join(sorted(dropped))}")
     try:
         _ov = json.loads((MON / "overrides.json").read_text())   # json already imported at module top
     except Exception:

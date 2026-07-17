@@ -8,6 +8,39 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-17 — Intraday monitor: phantom-holding stop-loop (AMAT) fixed
+
+**Symptom (Aaron):** repeated failed sell orders / "something stuck." The
+`agentic-monitor` service was firing an `exit_signal` for **AMAT** (`reason:
+stop`) every ~60s from ~13:41 UTC and re-running the headless exit executor each
+time — journal + phone spam, a `claude -p` subprocess per tick. No money moved.
+
+**Root cause — a phantom holding.** AMAT was in the slow-loop book
+(`current.json` thesis, stop 528.63) but was **never actually bought** (RH order
+history for AMAT is empty; the account was 100% invested — journal shows repeated
+`insufficient_buying_power` skips). The monitor built its stop-watch list from
+**book theses, not real holdings** (`market_monitor.py:173`). AMAT's price (518)
+sat under its stop, so every tick it fired → executor found nothing to sell →
+wrote an empty `sold` → so the monitor never marked AMAT `fired`
+(`:253–255`, the legit retry-on-transient-failure path) → re-fired next tick.
+Infinite loop. The account's 8 genuinely-sold names of the day (STX, XLK, LRCX,
+AMD, SNDK, INTC, BE, ALAB) were suppressed only by the `fired` flag.
+
+**Fix.** New `owned_symbols()` reads the reconcile snapshot
+(`research_store/rh/positions.json`) and gates the watch list to names actually
+held (`qty>0`). Fails **open** (watches all theses) if that snapshot is
+absent/torn — never silently drops stop protection. Genuinely-held names whose
+sell fails transiently stay in the snapshot, so the retry path is preserved;
+phantoms can't re-fire. `--selftest` covers it.
+
+**Verified live.** After restart (13:57 UTC) the watch list = the 5 real
+holdings (DELL, IWM, MU, SPY, XLE); AMAT dropped. Two clean polls (13:57:33,
+13:58:35) produced zero AMAT signals. Realized P&L for 07-17 stands at −$6.41
+(8 stop exits in a broad semis selloff) — unrelated to the loop, which placed
+no orders.
+
+---
+
 ## 2026-07-16 — Slow loop outage: expired Schwab token + dangling tokens.db lock
 
 The Mon–Fri 18:00 slow loop (nightly risk-exit recompute) died on 2026-07-15 —
