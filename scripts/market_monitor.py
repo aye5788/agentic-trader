@@ -94,6 +94,30 @@ def _selftest() -> None:
     # unreadable / absent snapshot → None → caller fails OPEN (keeps watching all)
     assert owned_symbols(None) is None
     assert owned_symbols({}) is None
+
+    # refire gate: a failing exit backs off between retries and escalates once.
+    from datetime import timezone as _tz
+    t0 = datetime(2026, 1, 1, 15, 0, 0, tzinfo=_tz.utc)
+    trg = [{"symbol": "MU", "reason": "stop", "fraction": 1.0, "price": 1.0, "level": 2.0}]
+    # fresh breach → act, no escalation
+    act, esc = refire_gate(trg, {}, t0, retry_secs=120, escalate_n=3)
+    assert [t["symbol"] for t in act] == ["MU"] and esc == [], (act, esc)
+    # failed once, only 30s later → suppressed (still in backoff)
+    unr = {"MU": {"fails": 1, "last_try_ts": t0.isoformat(), "escalated": False}}
+    act, esc = refire_gate(trg, unr, t0 + timedelta(seconds=30), 120, 3)
+    assert act == [] and esc == [], (act, esc)
+    # backoff elapsed → retry, still below escalate threshold
+    act, esc = refire_gate(trg, unr, t0 + timedelta(seconds=180), 120, 3)
+    assert [t["symbol"] for t in act] == ["MU"] and esc == [], (act, esc)
+    # 3 prior fails + backoff elapsed → retry AND escalate once
+    unr = {"MU": {"fails": 3, "last_try_ts": t0.isoformat(), "escalated": False}}
+    act, esc = refire_gate(trg, unr, t0 + timedelta(seconds=200), 120, 3)
+    assert esc == ["MU"], (act, esc)
+    # already escalated → retry but no repeat escalation
+    unr = {"MU": {"fails": 5, "last_try_ts": t0.isoformat(), "escalated": True}}
+    act, esc = refire_gate(trg, unr, t0 + timedelta(seconds=200), 120, 3)
+    assert [t["symbol"] for t in act] == ["MU"] and esc == [], (act, esc)
+    print("monitor selftest OK: refire backoff + escalation gate")
     assert owned_symbols({"positions": "torn"}) is None
     print("monitor selftest OK: holdings filter (phantom-holding guard)")
 
@@ -199,6 +223,35 @@ def run_executor() -> dict:
     return _load(EXIT_RES, {"sold": []})
 
 
+def refire_gate(triggers, unresolved, now_dt, retry_secs, escalate_n):
+    """Throttle re-firing breaches whose exit keeps FAILING. Pure — no I/O.
+
+    A breach whose sell fails is left un-`fired` so it retries — but re-running the
+    (Claude-subprocess) executor and re-pushing the alert every 15s poll spams the
+    phone AND blocks the watch loop up to 180s per spawn (the AMAT-style loop, but
+    for a genuinely-held name a stop-out can't fill). So: a still-`unresolved` name
+    is suppressed until `retry_secs` elapse, then retried once; after `escalate_n`
+    failures it raises ONE manual-intervention escalation.
+
+    `unresolved`: {sym: {"fails": int, "last_try_ts": iso, "escalated": bool}}.
+    Returns (act, escalate): `act` = triggers to alert/journal/execute this poll;
+    `escalate` = symbols that just crossed the manual-intervention line.
+    """
+    act, escalate = [], []
+    for t in triggers:
+        u = unresolved.get(t["symbol"])
+        if u is None:                                    # fresh breach — always act
+            act.append(t)
+            continue
+        elapsed = (now_dt - datetime.fromisoformat(u["last_try_ts"])).total_seconds()
+        if elapsed < retry_secs:                         # still in backoff — suppress
+            continue
+        act.append(t)                                    # backoff elapsed — retry
+        if u["fails"] >= escalate_n and not u.get("escalated"):
+            escalate.append(t["symbol"])
+    return act, escalate
+
+
 def check_once(cfg, client) -> int:
     """One pass: poll, detect breaches, act. Returns count of triggers acted on."""
     m = cfg["monitor"]
@@ -267,42 +320,77 @@ def check_once(cfg, client) -> int:
                 triggers.append({"symbol": sym, "reason": "target1", "fraction": 0.5,
                                  "price": px, "level": th.targets[0]})
 
+    # drop unresolved entries whose breach has cleared (price recovered above stop)
+    unresolved = st.setdefault("unresolved", {})
+    live = {t["symbol"] for t in triggers}
+    for sym in [s for s in unresolved if s not in live]:
+        del unresolved[sym]
+
     if not triggers:
         _save(STATE, st)
         return 0
 
-    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    for t in triggers:
+    now_dt = datetime.now(timezone.utc)
+    ts = now_dt.isoformat(timespec="seconds")
+    retry_secs = int(m.get("refire_retry_secs", 120))
+    escalate_n = int(m.get("refire_escalate_n", 3))
+    # `act` = fresh breaches + failing ones whose backoff elapsed; `escalate` = names
+    # that just crossed the manual-intervention line. Suppressed re-fires (still in
+    # backoff) neither re-alert nor re-spawn the executor.
+    act, escalate = refire_gate(triggers, unresolved, now_dt, retry_secs, escalate_n)
+    if not act:
+        _save(STATE, st)
+        return 0
+    fresh = [t for t in act if t["symbol"] not in unresolved]   # first alert only
+
+    for t in act:
         print(f"  ⚠ {t['reason'].upper()} {t['symbol']} @ {t['price']} "
               f"(level {t['level']}) — {'EXECUTE' if armed else 'ALERT-ONLY'}")
     store.append_journal({"event": "exit_signal", "ts": ts, "armed": armed,
-                          "triggers": triggers})
-    notify(f"{'Executing' if armed else 'Alert'}: "
-           + ", ".join(f"{t['reason'].upper()} {t['symbol']}" for t in triggers),
-           "\n".join(f"{t['symbol']} {t['reason']} @ {t['price']} (level {t['level']}) "
-                     f"— selling {int(t['fraction'] * 100)}%" for t in triggers)
-           + ("" if armed else "\nALERT-ONLY (not armed): no order will be placed"),
-           tags="chart_with_downwards_trend" if any(t["reason"] == "stop" for t in triggers)
-           else "moneybag")
+                          "triggers": act})
+    if fresh:                                        # routine alert: fresh breaches only
+        notify(f"{'Executing' if armed else 'Alert'}: "
+               + ", ".join(f"{t['reason'].upper()} {t['symbol']}" for t in fresh),
+               "\n".join(f"{t['symbol']} {t['reason']} @ {t['price']} (level {t['level']}) "
+                         f"— selling {int(t['fraction'] * 100)}%" for t in fresh)
+               + ("" if armed else "\nALERT-ONLY (not armed): no order will be placed"),
+               tags="chart_with_downwards_trend" if any(t["reason"] == "stop" for t in fresh)
+               else "moneybag")
 
     if armed:
-        _save(EXIT_REQ, {"ts": ts, "account": "948184924", "exits": triggers})
+        _save(EXIT_REQ, {"ts": ts, "account": "948184924", "exits": act})
         if EXIT_RES.exists():
             EXIT_RES.unlink()
         result = run_executor()
         sold = {s["symbol"] for s in result.get("sold", [])}
-        failed = {t["symbol"] for t in triggers} - sold
-        notify("Exit executor result",
-               (f"SOLD: {', '.join(sorted(sold))}" if sold else "SOLD: nothing")
-               + (f"\nFAILED/skipped (will retry): {', '.join(sorted(failed))}" if failed else ""),
-               tags="white_check_mark" if not failed else "warning")
+        failed = {t["symbol"] for t in act} - sold
+        if failed:
+            notify("Exit executor result",
+                   f"FAILED/skipped (backing off, will retry): {', '.join(sorted(failed))}"
+                   + (f"\nSOLD: {', '.join(sorted(sold))}" if sold else ""),
+                   tags="warning")
+        # track failures for backoff/escalation; a clean sell clears the name
+        for sym in failed:
+            u = unresolved.setdefault(sym, {"fails": 0, "last_try_ts": ts, "escalated": False})
+            u["fails"] += 1
+            u["last_try_ts"] = ts
+            if sym in escalate:
+                u["escalated"] = True
+        for sym in sold:
+            unresolved.pop(sym, None)
+        if escalate:                                 # one loud manual-intervention push
+            notify("🚨 MANUAL INTERVENTION — stop-sell failing",
+                   f"{', '.join(sorted(escalate))} breached its stop but the exit "
+                   f"executor has failed {escalate_n}+ times — position(s) UNPROTECTED. "
+                   f"Sell manually in the Agentic account (948184924).",
+                   tags="rotating_light")
     else:
-        sold = {t["symbol"] for t in triggers}       # alert-only: mark seen, don't sell
+        sold = {t["symbol"] for t in act}            # alert-only: mark seen, don't sell
 
     # mark fired + cooldown the stops we acted on
     fired_key = {"stop": "stop", "target1": "t1", "target2": "t2"}
     reentry = cfg.get("reentry", {})
-    for t in triggers:
+    for t in act:
         if t["symbol"] in sold:
             st["fired"].setdefault(t["symbol"], []).append(fired_key[t["reason"]])
             if t["reason"] == "stop" and armed:
@@ -311,7 +399,7 @@ def check_once(cfg, client) -> int:
                 add_reentry_review(t["symbol"], t["reason"], t["price"],
                                    int(reentry.get("review_days", 5)))
     _save(STATE, st)
-    return len(triggers)
+    return len(act)
 
 
 def main():
