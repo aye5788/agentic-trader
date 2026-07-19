@@ -8,6 +8,63 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-19 — Selection-engine robustness: Piece 1 shipped, Piece 2 planned
+
+Long working session with Aaron. Framed a **3-piece "more robust selection
+engine"** thread (motivated by the 07-17 storage/semi cluster all stopping out
+together — momentum concentrates into the leading theme, amplified by a tech-heavy
+universe) and executed the first piece, plus two monitor fixes and a moomoo
+capability investigation.
+
+**The roadmap:**
+- **Piece 1 — universe maintenance** (keep the candidate list fresh/liquid). SHIPPED.
+- **Piece 2 — concentration control** (stop a co-moving cluster dominating capital).
+  SPEC + PLAN committed; backtest not yet run.
+- **Piece 3 — short-term momentum (TI) overlay** (moomoo MACD/RSI early-warning into
+  the risk review). SCOPED only, not started.
+
+**Monitor fixes shipped early (commits `e68df74`, `74bdd40`).**
+- Log the "not held" skip-set once per change, not every 15s poll; `PYTHONUNBUFFERED=1`
+  in the unit (stdout was block-buffered → journald timestamps up to ~27 min stale).
+- `refire_gate`: a failing exit sell now backs off (`refire_retry_secs=120`) and
+  escalates after 3 consecutive failures — was re-spawning the Claude executor +
+  re-alerting every 15s indefinitely. Added venv-pinned `deploy/run_selftests.sh`.
+
+**Piece 1 — universe maintenance (merged to main, `f95c2ed`).** Quarterly, offline,
+human-reviewed refresh of the fixed 150-name universe: moomoo market-cap screen +
+`get_market_snapshot().turnover` (free, no quota) → seed-protected banded membership
+proposal → AUTO-APPLY routine / HOLD on seed-drops + anomalies (email + read-only
+dashboard panel + phone push) → approve in a Claude session. Weekly stale-seed watch
+rides the slow loop. New: `src/adapters/moomoo/` (data-only — first moomoo
+integration), `src/universe_maint.py`, `scripts/universe_refresh.py`,
+`[universe_maintenance]` config. Built via subagent-driven TDD (8 tasks + whole-branch
+review); the review caught & fixed 4 real bugs (snapshot batch-abort on a delisted
+ticker; silent-corruption on rate-limit; a cron DOM/DOW OR-gotcha; a sticky dashboard
+banner). **NOT ARMED — the quarterly cron is NOT installed;** arming is a deliberate
+`crontab deploy/crontab.template` step. Inert until then; dry-run anytime:
+`/usr/bin/python3 scripts/universe_refresh.py --dry-run`.
+
+**Piece 2 — concentration cap (spec + plan committed; NOT built).** Objective: *cap
+the tail, keep the edge* — down-weight a highly-correlated cluster when its aggregate
+weight is too high, keeping all names + fully invested. Detection = realized
+correlation from the price cache (NO sector taxonomy — so Piece 1's deferred
+sector-tagging is moot). Discipline: **backtest FIRST, live wiring gated on the
+result.** Phase 1 = build pure `src/concentration.py` `cap_weights` + wire into
+`backtest_pit.py` + sweep params + a go/no-go table; pass = drawdown ↓ ≥~3-5pts with
+≤~2pts CAGR give-up (Sharpe ≥ baseline) → write a Phase-2 live-wiring spec; else
+abandon (concentration IS the edge).
+→ **NEXT ACTION: execute `docs/superpowers/plans/2026-07-19-concentration-cap-backtest.md`**
+(3 tasks, offline, no live money). Spec:
+`docs/superpowers/specs/2026-07-19-concentration-cap-backtest-design.md`.
+
+**Pending / watch:**
+- **Schwab weekly re-auth due before Thu 2026-07-23 ~06:28 ET (10:28 UTC).** Hard
+  7-day token expiry; doing it earlier does NOT extend it (slides the window). Mon/Tue.
+- Piece 1 quarterly cron un-armed (above).
+- Piece 3 not started.
+
+---
+
 ## 2026-07-17 — Fast loop now honors the stop-out cooldown (churn guard)
 
 **Found while double-checking holdings** (Aaron: "I saw it just bought XLK").
