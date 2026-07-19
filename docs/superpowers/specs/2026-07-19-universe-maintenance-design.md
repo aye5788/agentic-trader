@@ -121,7 +121,35 @@ fails sanity; screener data looks broken; or a seed is up for drop.
 4. Job failure → existing cron ERR-trap phone alert; broken data → anomaly hold,
    never applies garbage.
 
-## 7. Parameters (config: new `[universe_maintenance]` in `strategy.toml`)
+## 7. Human interaction (view + approve)
+
+The pipeline must not depend on a human for the routine path (that dependence
+caused the original freeze). It reuses existing channels only — **no new web
+write-surface**; the dashboard stays read-only and all mutation flows through the
+agent/CLI apply path.
+
+**Routine (auto-applied) — nothing required.** An FYI is sent (ntfy push, optional
+email): "Universe refreshed: −TSLA, +ABCD (committed `<sha>`)". No action.
+
+**Held proposals (seed-drop or anomaly) — you review, then approve:**
+- **View channels (existing infra):**
+  - **Email** — the held proposal rendered as a readable diff, sent via the
+    existing Resend pipe (the newsletter's path): each drop / add / flagged-seed
+    with its reason.
+  - **Dashboard** — a "Pending universe proposal" panel on `dash.ethobs.uk`
+    renders the same artifact from `research_store/universe/proposals/`.
+  - **Phone push** — ntfy notification that a proposal is waiting (+ change count).
+- **Approval channel — a Claude Code session.** You instruct the agent: "show me
+  the pending universe proposal", then "approve it", or approve-with-edits
+  ("approve but keep NVDA and skip the TSLA drop"). The agent runs
+  `universe_apply.py` against the (possibly edited) proposal, writes `universe.csv`,
+  commits. **There is no human recipient — you instruct the system.**
+- **Why session-based, not one-tap:** held cases are the judgment cases (your
+  convictions / an anomaly) and benefit from approve-with-edits, which a single
+  button can't express. A one-tap phone approve is a possible future add-on but
+  needs a new authenticated write endpoint and can't handle edits — out of scope.
+
+## 8. Parameters (config: new `[universe_maintenance]` in `strategy.toml`)
 
 | Param | Default | Meaning |
 |---|---|---|
@@ -136,7 +164,7 @@ fails sanity; screener data looks broken; or a seed is up for drop.
 | `stale_seed_rank_floor` | 100 | seed in bottom third (of 150) counts toward stale |
 | `stale_seed_weeks` | 8 | consecutive weeks flagged ⇒ surface for decision |
 
-## 8. Data flow
+## 9. Data flow
 
 ```
 quarterly cron
@@ -147,9 +175,9 @@ quarterly cron
        ├─ moomoo: trailing 20d avg $vol per name;  get_owner_plate → sector
        ├─ propose_membership() → adds / fill-drops / flagged-seeds  (banded, seeds protected)
        ├─ classify() → AUTO_APPLY or HOLD_FOR_REVIEW
-       ├─ AUTO_APPLY → write universe.csv + git commit + FYI push
-       └─ HOLD       → write proposal artifact + "needs review" push
-                          └─ (human) universe_apply.py <proposal> → write + commit
+       ├─ AUTO_APPLY → write universe.csv + git commit + FYI push (optional email)
+       └─ HOLD       → write proposal artifact + email + dashboard panel + "needs review" push
+                          └─ (human, via Claude session) universe_apply.py <proposal> → write + commit
 
 weekly slow loop
   └─ append seed momentum ranks → seed_watch.json → flag stale seeds
@@ -158,7 +186,7 @@ weekly slow loop
 Artifacts: `research_store/universe/proposals/YYYY-MM-DD.{json,md}`,
 `research_store/universe/seed_watch.json`.
 
-## 9. Testing
+## 10. Testing
 
 - `universe_refresh.py --selftest`: pure-function coverage of `rank_pond`,
   `propose_membership` (band retain/drop, seed protection, size discipline), and
@@ -167,7 +195,7 @@ Artifacts: `research_store/universe/proposals/YYYY-MM-DD.{json,md}`,
 - `--dry-run`: run the real pass but print the proposal and write nothing.
 - Runs under `deploy/run_selftests.sh` (venv-pinned).
 
-## 10. Risks / open questions (resolve at implementation)
+## 11. Risks / open questions (resolve at implementation)
 
 - moomoo screener: exact filter field for dollar-volume/turnover on US market.
 - Trailing-$vol data path: `get_cur_kline` quota/subscription vs. snapshots vs.
