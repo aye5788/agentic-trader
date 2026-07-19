@@ -2,6 +2,7 @@
 See docs/superpowers/specs/2026-07-19-universe-maintenance-design.md."""
 import argparse
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,20 @@ def _selftest() -> None:
     assert w2["X"] == [2, 3, 4], w2
     print("universe_maint selftest OK: seed-watch")
 
+    import tempfile, os
+    rows = [{"ticker": "AAA", "source": "seed", "sector": "S", "exchange": "NYSE", "flag": "", "as_of": "old"},
+            {"ticker": "BBB", "source": "screen", "sector": "", "exchange": "", "flag": "", "as_of": ""}]
+    fd, tmp = tempfile.mkstemp(suffix=".csv"); os.close(fd)
+    for r in rows:
+        r["as_of"] = "2026-07-19"
+    um.write_universe(tmp, rows)
+    back = um.read_universe(tmp)
+    assert [r["ticker"] for r in back] == ["AAA", "BBB"], back
+    assert all(r["as_of"] == "2026-07-19" for r in back), back
+    assert list(back[0].keys()) == um.FIELDS, back[0]
+    os.remove(tmp)
+    print("universe_maint selftest OK: csv round-trip + as_of stamp")
+
 
 def _render_md(proposal, decision, asof) -> str:
     L = [f"# Universe proposal {asof}", "",
@@ -82,6 +97,31 @@ def _render_md(proposal, decision, asof) -> str:
           f"**Drops — fills ({len(proposal['drop_fills'])}):** " + (", ".join(proposal["drop_fills"]) or "none"),
           f"**Flagged seeds (your decision):** " + (", ".join(proposal["flagged_seeds"]) or "none")]
     return "\n".join(L)
+
+
+def apply_proposal(proposal, asof, cfg) -> None:
+    """Stamp as_of, write config/universe.csv, commit. Git = the undo."""
+    rows = [dict(r) for r in proposal["result"]]
+    for r in rows:
+        r["as_of"] = asof
+    um.write_universe(str(UNI), rows)
+    subprocess.run(["git", "add", str(UNI)], cwd=str(REPO), check=True)
+    msg = (f"chore(universe): refresh {asof} "
+           f"(+{len(proposal['add'])} −{len(proposal['drop_fills'])})")
+    subprocess.run(["git", "commit", "-m", msg], cwd=str(REPO), check=True)
+    print(f"applied: universe.csv written + committed ({msg})")
+
+
+def apply_from_file(asof, cfg) -> None:
+    """Human-gated apply of a previously HELD proposal (via a Claude session)."""
+    data = json.loads((PROP_DIR / f"{asof}.json").read_text())
+    current = um.read_universe(str(UNI))
+    by = {r["ticker"]: r for r in current}
+    # rebuild result rows: kept incumbents (existing rows) + adds (fresh rows)
+    result = [by[t] for t in data["keep"] if t in by]
+    result += [{"ticker": t, "source": "screen", "sector": "", "exchange": "",
+                "flag": "", "as_of": ""} for t in data["add"]]
+    apply_proposal({"result": result, "add": data["add"], "drop_fills": data["drop_fills"]}, asof, cfg)
 
 
 def run(asof: str, dry: bool) -> dict:
@@ -130,9 +170,15 @@ def main() -> None:
     ap.add_argument("--run", action="store_true", help="run the refresh (auto-apply or hold)")
     ap.add_argument("--dry-run", action="store_true", help="compute + write proposal, change nothing")
     ap.add_argument("--asof", default=None, help="YYYY-MM-DD stamp (default: today UTC)")
+    ap.add_argument("--apply", metavar="ASOF", default=None,
+                    help="apply a previously held proposal by its YYYY-MM-DD id")
     args = ap.parse_args()
     if args.selftest:
         _selftest()
+        return
+
+    if args.apply:
+        apply_from_file(args.apply, strategy.load())
         return
 
     if args.run or args.dry_run:
