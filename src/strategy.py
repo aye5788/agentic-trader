@@ -11,7 +11,10 @@ over the base config when present. The committed strategy.toml ships SAFE
 (live_approved=false); arming a box for live trading is a local-override act,
 like installing credentials — it never travels through git.
 """
-import tomllib
+try:
+    import tomllib  # stdlib, Python 3.11+
+except ModuleNotFoundError:  # Python 3.10 (e.g. system python3 for the moomoo SDK)
+    import tomli as tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

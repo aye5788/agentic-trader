@@ -21,6 +21,7 @@ fi
 SELFTESTS=(
     "scripts/market_monitor.py"
     "scripts/fast_loop.py"
+    "scripts/universe_refresh.py"
 )
 
 fail=0

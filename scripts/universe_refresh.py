@@ -1,13 +1,25 @@
 """Universe maintenance — quarterly liquidity refresh. Data-only, offline.
 See docs/superpowers/specs/2026-07-19-universe-maintenance-design.md."""
 import argparse
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
+import strategy  # noqa: E402
 import universe_maint as um  # noqa: E402
+from notify import push  # noqa: E402
+# adapters.moomoo is imported lazily inside run(): the moomoo SDK is only
+# installed under /usr/bin/python3 (not the .venv used for --selftest), so a
+# top-level import here would break --selftest under the venv.
+
+UNI = REPO / "config" / "universe.csv"
+POOL = REPO / "config" / "pit_pool.csv"
+PROP_DIR = REPO / "research_store" / "universe" / "proposals"
+WATCH = REPO / "research_store" / "universe" / "seed_watch.json"
 
 
 def _selftest() -> None:
@@ -61,12 +73,71 @@ def _selftest() -> None:
     print("universe_maint selftest OK: seed-watch")
 
 
+def _render_md(proposal, decision, asof) -> str:
+    L = [f"# Universe proposal {asof}", "",
+         f"**Decision:** {decision['decision']}"]
+    if decision["reasons"]:
+        L += ["", "**Held because:**"] + [f"- {r}" for r in decision["reasons"]]
+    L += ["", f"**Adds ({len(proposal['add'])}):** " + (", ".join(proposal["add"]) or "none"),
+          f"**Drops — fills ({len(proposal['drop_fills'])}):** " + (", ".join(proposal["drop_fills"]) or "none"),
+          f"**Flagged seeds (your decision):** " + (", ".join(proposal["flagged_seeds"]) or "none")]
+    return "\n".join(L)
+
+
+def run(asof: str, dry: bool) -> dict:
+    from adapters.moomoo import research as mm  # lazy: moomoo SDK is system-python-only
+
+    cfg = strategy.load()
+    params = cfg["universe_maintenance"]
+    current = um.read_universe(str(UNI))
+    incumbents = [r["ticker"] for r in current]
+    watch = json.loads(WATCH.read_text()) if WATCH.exists() else {}
+    seed_flags = um.flag_stale_seeds(watch, params)
+
+    pond = mm.candidate_pond(incumbents, str(POOL), params)
+    turnovers = mm.snapshot_turnover(pond)
+    ranked = um.rank_pond(turnovers)
+    proposal = um.propose_membership(ranked, turnovers, current, seed_flags, params)
+    decision = um.classify(proposal, len(ranked), params)
+
+    PROP_DIR.mkdir(parents=True, exist_ok=True)
+    slim = {k: proposal[k] for k in ("keep", "drop_fills", "add", "flagged_seeds")}
+    (PROP_DIR / f"{asof}.json").write_text(json.dumps(
+        {"asof": asof, "decision": decision, **slim}, indent=2))
+    md = _render_md(proposal, decision, asof)
+    (PROP_DIR / f"{asof}.md").write_text(md)
+    print(md)
+
+    if dry:
+        print("\n[dry-run] no changes written, no notification sent")
+        return {"proposal": proposal, "decision": decision}
+
+    if decision["decision"] == "AUTO_APPLY":
+        apply_proposal(proposal, asof, cfg)  # Task 6
+        push("Universe auto-refreshed",
+             f"−{','.join(proposal['drop_fills']) or 'none'}  +{','.join(proposal['add']) or 'none'} (committed)",
+             tags="recycle")
+    else:
+        push("Universe proposal needs review",
+             f"HOLD: {'; '.join(decision['reasons'])}\nApprove in a Claude session.",
+             tags="warning")
+    return {"proposal": proposal, "decision": decision}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--run", action="store_true", help="run the refresh (auto-apply or hold)")
+    ap.add_argument("--dry-run", action="store_true", help="compute + write proposal, change nothing")
+    ap.add_argument("--asof", default=None, help="YYYY-MM-DD stamp (default: today UTC)")
     args = ap.parse_args()
     if args.selftest:
         _selftest()
+        return
+
+    if args.run or args.dry_run:
+        asof = args.asof or datetime.now(timezone.utc).date().isoformat()
+        run(asof, dry=args.dry_run)
         return
 
 
