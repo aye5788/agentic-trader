@@ -37,3 +37,7 @@ HOME=/root
 # Schwab's refresh token can't be renewed unattended; you must re-run the paste
 # flow weekly or the price feed dies. Logs + pushes to the phone (ntfy).
 0 9 * * 1    /opt/agentic-trader/deploy/reauth_reminder.sh
+
+# --- QUARTERLY UNIVERSE REFRESH (Piece 1) — first Sunday of Jan/Apr/Jul/Oct, 19:00 ET ---
+# Auto-applies routine liquidity rotations; HOLDs + phone-alerts on seed-drops/anomalies.
+0 19 1-7 1,4,7,10 0  /opt/agentic-trader/deploy/run_universe_refresh.sh >> /opt/agentic-trader/logs/universe.log 2>&1
