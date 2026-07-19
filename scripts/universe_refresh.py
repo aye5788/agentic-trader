@@ -32,6 +32,23 @@ def _selftest() -> None:
     assert len(p["result"]) == 3, p                  # target size respected
     print("universe_maint selftest OK: rank_pond + propose_membership")
 
+    cp = {"target_size": 150, "auto_apply_max_changes": 5}
+    # routine → AUTO_APPLY
+    small = {"add": ["NEW"], "drop_fills": ["OLD"], "flagged_seeds": []}
+    assert um.classify(small, 400, cp)["decision"] == "AUTO_APPLY"
+    # too many changes → HOLD
+    big = {"add": ["A", "B", "C", "D"], "drop_fills": ["E", "F", "G"], "flagged_seeds": []}
+    assert um.classify(big, 400, cp)["decision"] == "HOLD"
+    # flagged seed → HOLD
+    seed = {"add": [], "drop_fills": [], "flagged_seeds": ["MU"]}
+    assert um.classify(seed, 400, cp)["decision"] == "HOLD"
+    # short pond (broken data) → HOLD
+    assert um.classify(small, 100, cp)["decision"] == "HOLD"
+    # non-common-stock add (leveraged/odd ticker) → HOLD
+    bad = {"add": ["SOXL"], "drop_fills": [], "flagged_seeds": []}
+    assert um.classify(bad, 400, cp)["decision"] == "HOLD"
+    print("universe_maint selftest OK: classify")
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
