@@ -107,6 +107,11 @@
     <div class="status" id="statusPills"></div>
   </header>
 
+  <section class="card" id="pendingCard" style="display:none;margin-bottom:20px;border-color:var(--warn)">
+    <div class="hd"><h2 id="pendingTitle">⚠ Universe proposal pending review</h2></div>
+    <div class="rows" id="pendingRows"></div>
+  </section>
+
   <section class="card hero">
     <div class="hd"><h2>Account value</h2><span class="meta" id="equityMeta"></span></div>
     <div class="chartwrap"><span class="chart-note" id="chartNote"></span><canvas id="eq"></canvas></div>
@@ -188,10 +193,27 @@ const rows=document.getElementById("rows");
 });
 document.getElementById("holdMeta").textContent=`${(DATA.holdings||[]).length} names · ${DATA.holdings&&DATA.holdings.some(h=>h.state==='held')?'live':'target'}`;
 
+// pending universe-maintenance proposal (read-only review surface)
+function prow(k,v,color){return `<div class="row"><span class="k">${k}</span><span class="v"${color?` style="color:var(--${color})"`:''}>${v}</span></div>`;}
+const pend=DATA.pending;
+if(pend){
+  document.getElementById("pendingCard").style.display="";
+  document.getElementById("pendingTitle").textContent=`⚠ Universe proposal pending review (${pend.asof||""})`;
+  const reasons=((pend.decision&&pend.decision.reasons)||[]).join("; ")||"—";
+  const adds=(pend.add||[]).join(", ")||"none";
+  const drops=(pend.drop_fills||[]).join(", ")||"none";
+  const flagged=(pend.flagged_seeds||[]).join(", ")||"none";
+  document.getElementById("pendingRows").innerHTML=
+    prow("Held because",reasons,"warn")+
+    prow("Adds",adds)+
+    prow("Drops",drops)+
+    prow("Flagged seeds",flagged)+
+    `<div class="row"><span class="k" style="font-style:italic">Approve in a Claude session: "apply the pending universe proposal".</span><span class="v"></span></div>`;
+}
+
 // plan vs. actual
 const plan=DATA.plan,ex=DATA.last_execution;
 const planRows=document.getElementById("planRows"),planMeta=document.getElementById("planMeta");
-function prow(k,v,color){return `<div class="row"><span class="k">${k}</span><span class="v"${color?` style="color:var(--${color})"`:''}>${v}</span></div>`;}
 if(!plan){planRows.innerHTML=`<div class="empty">No order plan yet.</div>`;}
 else{
   planMeta.textContent="planned "+((plan.generated||"").replace("T"," ").replace("+00:00","")||plan.as_of||"");

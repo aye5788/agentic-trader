@@ -161,6 +161,24 @@ def run(asof: str, dry: bool) -> dict:
         push("Universe proposal needs review",
              f"HOLD: {'; '.join(decision['reasons'])}\nApprove in a Claude session.",
              tags="warning")
+        try:
+            import os
+            import importlib.util
+            to = os.environ.get("NEWSLETTER_TO")
+            sender = os.environ.get("NEWSLETTER_FROM")
+            api_key = os.environ.get("RESEND_API_KEY")
+            if to and sender and api_key:
+                spec = importlib.util.spec_from_file_location(
+                    "send_newsletter", str(REPO / "scripts" / "send_newsletter.py"))
+                sn = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(sn)
+                html = "<pre>" + md.replace("<", "&lt;") + "</pre>"
+                sn._send_resend(api_key, sender, to, f"Universe proposal {asof} — needs review", html)
+                print("held proposal emailed via resend")
+            else:
+                print("proposal email skipped (RESEND_API_KEY/NEWSLETTER_TO/FROM not set)")
+        except Exception as e:  # email is best-effort; the push + dashboard still cover it
+            print(f"proposal email skipped: {e}")
     return {"proposal": proposal, "decision": decision}
 
 

@@ -67,6 +67,20 @@ def _tail_jsonl(path, n):
     return out
 
 
+def _pending_universe_proposal():
+    """Latest HOLD universe-maintenance proposal, if any (read-only review surface)."""
+    pd = RS / "universe" / "proposals"
+    if not pd.exists():
+        return None
+    files = sorted(pd.glob("*.json"))
+    if not files:
+        return None
+    d = _read_json(files[-1], {})
+    if d.get("decision", {}).get("decision") == "HOLD":
+        return d
+    return None
+
+
 def build_data() -> dict:
     cfg = strat.load()
     prod = read_current()
@@ -145,6 +159,7 @@ def build_data() -> dict:
                        "max_order": round(g["max_order_pct"] * acct_value, 2),
                        "cooldown": list(cooldown.keys())},
         "realized": _read_json(RS / "rh" / "realized.json", None),
+        "pending": _pending_universe_proposal(),
         "activity": recent[-14:][::-1],
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
