@@ -157,3 +157,16 @@ ma_break_days        = 21      # revives the specced-but-dead ma_exit line
 giveback_flag_pct    = 0.10    # flag when a name gives back >10% from its high since entry
 vol_expansion_mult   = 1.75    # flag when daily sigma now > 1.75x the sigma at entry
 earnings_window_days = 5       # flag earnings within this many days (overnight-gap risk)
+
+# --- Universe maintenance (Piece 1) — quarterly liquidity refresh + weekly seed-watch ---
+[universe_maintenance]
+target_size            = 150          # universe size
+keep_rank_max          = 180          # incumbent kept while $-vol rank <= this (band)
+add_rank_max           = 150          # non-incumbent eligible to add while rank <= this
+add_dvol_floor_usd     = 50_000_000   # hard min turnover for an ADD (junk gate)
+screen_top_n           = 400          # market-cap screen depth for the pond
+screen_min_mktcap      = 2_000_000_000
+auto_apply_max_changes = 5            # > this many changes ⇒ HOLD for review
+stale_seed_rank_floor  = 100          # seed in bottom third (of 150) counts toward stale
+stale_seed_weeks       = 8            # consecutive weeks flagged ⇒ surface for decision
+seed_watch_history     = 16           # weeks of rank history to retain per seed
