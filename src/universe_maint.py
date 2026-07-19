@@ -95,3 +95,22 @@ def classify(proposal, pond_count, params) -> dict:
     if bad:
         reasons.append("add(s) failed sanity: " + ", ".join(bad))
     return {"decision": "HOLD" if reasons else "AUTO_APPLY", "reasons": reasons}
+
+
+def update_seed_watch(watch: dict, seed_ranks: dict, max_history: int) -> dict:
+    """Append this week's momentum rank per seed; retain last max_history weeks."""
+    for t, rank in seed_ranks.items():
+        hist = watch.setdefault(t, [])
+        hist.append(rank)
+        watch[t] = hist[-max_history:]
+    return watch
+
+
+def flag_stale_seeds(watch: dict, params) -> list:
+    """A seed is stale if its momentum rank has been worse than stale_seed_rank_floor
+    for stale_seed_weeks consecutive weeks."""
+    floor = params["stale_seed_rank_floor"]
+    weeks = params["stale_seed_weeks"]
+    flagged = [t for t, hist in watch.items()
+               if len(hist) >= weeks and all(r > floor for r in hist[-weeks:])]
+    return sorted(flagged)

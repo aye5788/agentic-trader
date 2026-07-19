@@ -221,5 +221,27 @@ def main() -> None:
             except FileNotFoundError:
                 pass
 
+    # --- weekly stale-seed watch accrual (universe maintenance, Piece 1) ---
+    try:
+        import json as _json
+        import universe_maint as _um
+        cfg_um = cfg["universe_maintenance"]
+        uni_rows = _um.read_universe(str(REPO / "config" / "universe.csv"))
+        seeds = {r["ticker"] for r in uni_rows if r["source"] == "seed"}
+
+        def _rk(sym):
+            r = book_scored.loc[sym, "rank"]
+            return int(r) if r == r else 9999  # NaN (ineligible seed) => worst-rank ⇒ counts as stale
+
+        seed_ranks = {s: _rk(s) for s in names if s in seeds and s in book_scored.index}
+        watch_path = REPO / "research_store" / "universe" / "seed_watch.json"
+        watch_path.parent.mkdir(parents=True, exist_ok=True)
+        watch = _json.loads(watch_path.read_text()) if watch_path.exists() else {}
+        watch = _um.update_seed_watch(watch, seed_ranks, cfg_um["seed_watch_history"])
+        watch_path.write_text(_json.dumps(watch, indent=2))
+        print(f"seed-watch: recorded ranks for {len(seed_ranks)} seeds -> {watch_path}")
+    except Exception as e:  # never let the watch break the slow loop
+        print(f"seed-watch accrual skipped: {e}")
+
 if __name__ == "__main__":
     main()

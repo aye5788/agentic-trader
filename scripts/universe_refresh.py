@@ -49,6 +49,17 @@ def _selftest() -> None:
     assert um.classify(bad, 400, cp)["decision"] == "HOLD"
     print("universe_maint selftest OK: classify")
 
+    w = {}
+    w = um.update_seed_watch(w, {"MU": 120, "AAPL": 5}, max_history=3)
+    w = um.update_seed_watch(w, {"MU": 130, "AAPL": 4}, max_history=3)
+    assert w["MU"] == [120, 130] and w["AAPL"] == [5, 4], w
+    sp = {"stale_seed_rank_floor": 100, "stale_seed_weeks": 2}
+    assert um.flag_stale_seeds(w, sp) == ["MU"], um.flag_stale_seeds(w, sp)  # MU bottom-third 2x; AAPL not
+    # history cap
+    w2 = um.update_seed_watch({"X": [1, 2, 3]}, {"X": 4}, max_history=3)
+    assert w2["X"] == [2, 3, 4], w2
+    print("universe_maint selftest OK: seed-watch")
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
