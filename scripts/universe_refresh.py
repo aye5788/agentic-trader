@@ -122,6 +122,11 @@ def apply_from_file(asof, cfg) -> None:
     result += [{"ticker": t, "source": "screen", "sector": "", "exchange": "",
                 "flag": "", "as_of": ""} for t in data["add"]]
     apply_proposal({"result": result, "add": data["add"], "drop_fills": data["drop_fills"]}, asof, cfg)
+    # Clear the dashboard "pending review" banner: this held proposal is now applied,
+    # so flip its stored status off HOLD (the panel only surfaces HOLD proposals).
+    data["decision"]["decision"] = "APPLIED"
+    data["applied_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    (PROP_DIR / f"{asof}.json").write_text(json.dumps(data, indent=2))
 
 
 def run(asof: str, dry: bool) -> dict:
