@@ -16,6 +16,10 @@ WorkingDirectory=/opt/agentic-trader
 # NO ANTHROPIC_API_KEY (keeps breach-time claude on the subscription).
 Environment=HOME=/root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Unbuffered stdout: without this Python block-buffers the pipe to journald, so log
+# lines (incl. breach messages) can sit ~27 min before appearing. Actions + ntfy
+# pushes are unaffected, but this keeps journalctl timestamps forensically accurate.
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/agentic-trader/deploy/run_monitor.sh
 Restart=always
 RestartSec=10

@@ -49,6 +49,10 @@ EXIT_RES = MON / "exit_result.json"
 RH_POSITIONS = REPO / "research_store" / "rh" / "positions.json"
 ET = ZoneInfo("America/New_York")
 
+# Remembers the last-logged "not held" set so we log it once per change, not every
+# 15s poll (the set is static all day — logging it each tick just floods journald).
+_LAST_DROPPED: frozenset | None = None
+
 
 def _now_et():
     return datetime.now(ET)
@@ -214,8 +218,11 @@ def check_once(cfg, client) -> int:
     if owned is not None:
         dropped = [s for s in held if s not in owned]
         held = {s: t for s, t in held.items() if s in owned}
-        if dropped:                          # phantom book names never bought
-            print(f"  not held — skipping stop-watch: {', '.join(sorted(dropped))}")
+        global _LAST_DROPPED                  # log only when the set changes, not every tick
+        if frozenset(dropped) != _LAST_DROPPED:
+            if dropped:                       # phantom book names never bought
+                print(f"  not held — skipping stop-watch: {', '.join(sorted(dropped))}")
+            _LAST_DROPPED = frozenset(dropped)
     try:
         _ov = json.loads((MON / "overrides.json").read_text())   # json already imported at module top
     except Exception:
