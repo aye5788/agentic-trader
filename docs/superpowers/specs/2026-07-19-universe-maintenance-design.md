@@ -18,7 +18,8 @@ liquid leaders never enter, and stale human seeds accumulate.
 This is **Piece 1 of 3** in a "more robust selection engine" thread:
 - **Piece 1 (this spec):** universe maintenance — keep the candidate pool fresh.
 - **Piece 2 (future):** concentration-aware book construction (cap correlated
-  clusters in `momentum.select`). Piece 1 delivers the sector tags it needs.
+  clusters in `momentum.select`). Owns the sector-taxonomy decision (moomoo
+  industries vs. our sector buckets) — see §3 "Sector tags".
 - **Piece 3 (future):** short-term momentum overlay (moomoo technical indicators
   as early-deterioration context for the risk review).
 
@@ -42,16 +43,17 @@ the contents fresh.
 |---|---|
 | **Seed policy** | **Hybrid** — seeds sticky-but-reviewable: never auto-dropped by the liquidity pass; surfaced for human decision when stale. Fills rotate systematically by dollar-volume. |
 | **Refresh rhythm** | **Quarterly** membership pass + **wide band** (hysteresis); plus a **continuous weekly stale-seed watch** riding the slow loop. |
-| **Candidate pond** | moomoo screener: **top ~200 US names by dollar-volume ∪ current 150 incumbents**, ranked by trailing dollar-volume. |
+| **Candidate pond** | **incumbents ∪ a broad reference set** (a market-cap screen if `MARKET_VAL` filters, else the existing 816-name `pit_pool`), ranked by **dollar-volume from `get_market_snapshot().turnover`** (free, no quota). |
 | **Automation posture** | **Auto-apply the routine case; escalate to human ONLY for seed-drops and anomalies.** The pipeline must not depend on the human for the common path (that dependence is what caused the original freeze). |
-| **Sector tags** | Refresh each name's sector via moomoo `get_owner_plate` while connected — feeds Piece 2. |
+| **Sector tags** | **Deferred to Piece 2.** moomoo industries (`PlateSetType.INDUSTRY`) are a different, more granular taxonomy than our FactSet-style sectors; the mapping decision belongs to Piece 2 (the only consumer). Piece 1 carries existing sectors forward, leaves new names untagged. |
 
 ## 4. Membership yardstick
 
-- **Dollar-volume** = trailing ~20-trading-day average of (close × share volume).
-  A trailing average, not a single day, so a one-day spike can't move membership.
-  Source: moomoo daily bars (`get_cur_kline` / snapshots); the existing
-  `research_store/prices/` cache is the fallback. Exact source confirmed at build.
+- **Dollar-volume** = each name's `turnover` field from `get_market_snapshot`
+  (tested live: AAPL = $21.1B; snapshots are 400/call, **free, no subscription
+  quota**). This is a single-session figure — acceptable for v1 given the wide
+  band + human review. Trailing-average (to damp one-day spikes) is a noted later
+  refinement, not v1.
 - **Membership band (target size 150):** an **incumbent is kept** while its
   trailing-$vol rank ≤ **180**; open slots are filled from the best
   **non-incumbents ranked ≤ 150**. ~30 ranks of hysteresis mirrors
@@ -63,12 +65,13 @@ the contents fresh.
 ## 5. Components (each independently testable)
 
 ### 5.1 `src/adapters/moomoo/` — data-only client (NEW)
-Thin adapter over the already-running OpenD gateway (`127.0.0.1:11111`). Exposes
-only what Piece 1 needs: a dollar-volume screener (`get_stock_filter`), daily
-bars/snapshots for trailing $vol, and sector membership (`get_owner_plate`).
-**No trading surface. No live-quote subscription.** Mirrors the
-`adapters/schwab` interface style. This is the project's first moomoo integration
-but is deliberately scoped to offline batch use.
+Thin adapter over the already-running OpenD gateway (`127.0.0.1:11111`, moomoo
+SDK 10.09.6908 on `/usr/bin/python3`). Exposes only what Piece 1 needs:
+`get_market_snapshot(codes)` → per-name `turnover` (dollar-volume) in ≤400-name
+batches, and optionally `get_stock_filter(Market.US, [SimpleFilter on MARKET_VAL])`
+to source the candidate pond. **No trading surface. No live-quote subscription.**
+Mirrors the `adapters/schwab` interface style. First moomoo integration, scoped to
+offline batch use only.
 
 ### 5.2 `scripts/universe_refresh.py` — the quarterly job (NEW)
 Cron entrypoint. Orchestration + **pure, testable decision functions**:
@@ -84,7 +87,8 @@ does **not** modify `universe.csv`.
 ### 5.3 `scripts/universe_apply.py` — human-gated apply (NEW)
 For held proposals. Takes a proposal id, re-validates it hasn't gone stale,
 rewrites `universe.csv` (swap names, refresh `as_of`, set `source` = seed /
-fill_dvol / screen, preserve `flag`, update `sector`), and commits to git.
+fill_dvol / screen, preserve `flag`, carry `sector` forward — new names untagged
+until Piece 2), and commits to git.
 (May be implemented as `universe_refresh.py --apply <proposal>`.)
 
 ### 5.4 Weekly stale-seed watch (hook in `scripts/slow_loop.py`)
@@ -171,8 +175,8 @@ quarterly cron
   └─ universe_refresh.py
        ├─ read config/universe.csv (current: seeds + fills + flags)
        ├─ read research_store/universe/seed_watch.json (stale-seed flags)
-       ├─ moomoo: screen top-200 by $vol  ∪  incumbents
-       ├─ moomoo: trailing 20d avg $vol per name;  get_owner_plate → sector
+       ├─ pond = incumbents ∪ broad reference (MARKET_VAL screen or pit_pool)
+       ├─ moomoo get_market_snapshot(pond) → per-name turnover ($vol); rank
        ├─ propose_membership() → adds / fill-drops / flagged-seeds  (banded, seeds protected)
        ├─ classify() → AUTO_APPLY or HOLD_FOR_REVIEW
        ├─ AUTO_APPLY → write universe.csv + git commit + FYI push (optional email)
@@ -197,9 +201,13 @@ Artifacts: `research_store/universe/proposals/YYYY-MM-DD.{json,md}`,
 
 ## 11. Risks / open questions (resolve at implementation)
 
-- moomoo screener: exact filter field for dollar-volume/turnover on US market.
-- Trailing-$vol data path: `get_cur_kline` quota/subscription vs. snapshots vs.
-  the existing price cache — pick the one that stays within moomoo quota.
+- **RESOLVED (probe 2026-07-19):** dollar-volume = `get_market_snapshot().turnover`
+  (free, no quota) — the `get_stock_filter` turnover field is unsupported, so
+  snapshots are the source. Sector-tagging deferred to Piece 2 (moomoo INDUSTRY
+  plates ≠ our sector taxonomy).
+- **Candidate pond source:** confirm `MARKET_VAL` is a supported `get_stock_filter`
+  field (turnover was not); if not, fall back to the existing 816-name `pit_pool`
+  as the pond. Either way the ranking is by snapshot turnover.
 - Shared OpenD with `moomoo-vol-desk`: the refresh is a brief quarterly/weekly
   batch → negligible load, but confirm no subscription-slot contention.
 - First run will likely be small (universe only 11 days stale) but may trip the
