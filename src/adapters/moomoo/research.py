@@ -34,9 +34,17 @@ def snapshot_turnover(tickers, ctx=None) -> dict:
     return out
 
 
+# Error-message markers that mean a specific ticker simply can't be quoted
+# (delisted / OTC / unknown) — safe to skip. Anything else (rate limit, network,
+# systemic) must NOT be silently skipped: dropping a good name corrupts the ranking.
+_UNQUOTABLE_MARKERS = ("not available", "unknown stock", "no data")
+
+
 def _snap_chunk(q, codes, out) -> None:
-    """Snapshot `codes` into `out`. On a batch rejection, bisect to isolate and skip
-    the unquotable code(s); a single code that still fails is dropped."""
+    """Snapshot `codes` into `out`. A batch moomoo rejects is bisected to isolate the
+    offending code(s). A single code that fails with a *ticker-unavailable* error is
+    skipped; any OTHER single-code failure (rate limit / systemic) is RAISED so it
+    surfaces loudly rather than silently dropping a good name."""
     if not codes:
         return
     ret, df = q.get_market_snapshot(codes)
@@ -46,7 +54,9 @@ def _snap_chunk(q, codes, out) -> None:
             out[_bare(r["code"])] = float(tv) if tv == tv else 0.0
         return
     if len(codes) == 1:
-        return  # unquotable single ticker — skip it
+        if any(m in str(df).lower() for m in _UNQUOTABLE_MARKERS):
+            return  # genuinely unquotable single ticker — skip it
+        raise RuntimeError(f"snapshot failed for {codes[0]} (non-ticker error): {df}")
     mid = len(codes) // 2
     _snap_chunk(q, codes[:mid], out)
     _snap_chunk(q, codes[mid:], out)
