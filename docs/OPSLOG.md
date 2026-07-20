@@ -58,6 +58,23 @@ managed by the intraday stops.
 
 **Live money: untouched throughout.** No live path ever referenced the cap.
 
+**Piece 3 scoping — flow-decomposition avenue TESTED and REJECTED; TI early-warning
+speced.** Explored a March-2026 paper (Ding-Kang-Yu-Zhao, "Momentum and Reversal on the
+Short-Term Horizon", commodities) Aaron supplied. Its edge = decompose weekly return on
+speculator net-flow (Q, from CFTC COT) → the orthogonal residual R_nonQ carries
+short-term momentum. Equity analog probed via moomoo `get_capital_flow` (daily
+super+big-order net $ = "main"; ~1yr retained history, 30 req/30s per-interface limit).
+Pulled 150 names (safe-paced, no throttle) and ran the transfer test: **it does NOT
+transfer.** Contemporaneous flow→return b_1 = 0.010 (t=8.3) vs the paper's 0.41 — ~40×
+weaker; flow→next-week (reversal) = 0.00005 (t=0.05, exact null); R_nonQ collapses to raw
+return. Structural: equity markets too deep/liquid for order-flow to drive price the way
+speculator positioning does in futures. Avenue closed (more history won't fix a 40×-weak
+link). Reframed Piece 3 back to its actual scope — a **short-term momentum TI
+early-warning into the risk review** (two established indicators in conjunction: MACD or
+RSI-50 absolute + relative-strength-vs-SPY; advisory to the stateless review, fed as
+values). Spec: `docs/superpowers/specs/2026-07-20-short-term-momentum-early-warning-design.md`.
+Validate-first: a "would-it-have-caught-07-17" historical stop-out replay gates the wiring.
+
 **Piece 1 quarterly cron ARMED (same day).** Installed the universe-refresh cron on
 the box — `0 19 1-7 1,4,7,10 *  deploy/run_universe_refresh.sh` (first Sunday of
 Jan/Apr/Jul/Oct, 19:00 ET; the wrapper self-guards to the first Sunday). First live
