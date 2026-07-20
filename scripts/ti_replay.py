@@ -32,6 +32,8 @@ def first_fire(closes, spy, ticker, stop_date, window, key):
         stop_date = prior[-1]
     si = idx.get_loc(stop_date)
     for lead in range(window, 0, -1):             # oldest day in the window first
+        if si - lead < 0:
+            continue
         d = idx[si - lead]
         tag = ti.compute(closes[ticker], spy, d).get(key)
         if tag == "weakening":
