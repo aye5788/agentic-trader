@@ -58,6 +58,19 @@ managed by the intraday stops.
 
 **Live money: untouched throughout.** No live path ever referenced the cap.
 
+**Piece 1 quarterly cron ARMED (same day).** Installed the universe-refresh cron on
+the box — `0 19 1-7 1,4,7,10 *  deploy/run_universe_refresh.sh` (first Sunday of
+Jan/Apr/Jul/Oct, 19:00 ET; the wrapper self-guards to the first Sunday). First live
+fire = **early Oct 2026** (Jul already passed). ⚠️ Installed by APPENDING the single
+line, NOT `crontab deploy/crontab.template` — the live crontab carries two box-only
+jobs (`moomoo-desk` 09:30/09:35 options runs, from `/root/moomoo-vol-desk/`) that the
+template does NOT contain; a wholesale install would have wiped them. Template drift
+noted (moomoo-desk crons live-only; left as-is — separate project). Dry-run preview
+(`python3 scripts/universe_refresh.py --dry-run`) could NOT complete now — moomoo
+snapshot API rate-limited (60/30s cap, shared with the options desk); retry at a quiet
+time (not market hours) to eyeball the proposal. Not a code fault; real run is Sunday
+19:00 when moomoo is idle.
+
 ---
 
 ## 2026-07-19 — Selection-engine robustness: Piece 1 shipped, Piece 2 planned
