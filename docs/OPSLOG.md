@@ -8,7 +8,7 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
-## 2026-07-20 — Piece 2 concentration cap: backtested (PASS), Phase-2 spec written
+## 2026-07-20 — Piece 2 concentration cap: backtested, then ABANDONED (fails live 10% cap)
 
 Executed the Phase-1 build+backtest plan and merged it to main (`27e395d`).
 
@@ -33,16 +33,30 @@ Verdict = qualified PASS; Aaron chose to proceed with the **gentle** setting.
 Deliverable table saved at `/tmp/concentration_sweep.txt` (regenerate:
 `.venv/bin/python scripts/backtest_pit.py --sweep`).
 
-**Phase-2 live-wiring spec written** (`docs/superpowers/specs/2026-07-20-concentration-cap-live-wiring.md`),
-NOT built. Integration point = one place in `slow_loop.py` after `build_theses`,
-config-gated, reversible. **Key issue surfaced:** the cap's redistribution pushes
-receiver weights up, and the risk mandate hard-rejects any name > `max_weight_per_name`
-(0.10); today's names sit at 7–7.5% with thin headroom, and the backtest had no such
-ceiling. Recommended fix = add a `per_name_cap` water-fill to `cap_weights` + re-run
-the sweep with the 10% ceiling to confirm the gentle config survives, THEN wire. Two
-open decisions parked for Aaron (per-name-cap handling; arm-on-merge vs observe-first).
+**Phase-2 live-wiring: ABANDONED same day — failed the go-live re-test.** Built the
+per-name-ceiling handling (a `per_name_cap` water-fill in `cap_weights` +
+`backtest_pit.py --per-name-cap`) and re-ran the gentle config with the LIVE
+`[risk] max_weight_per_name = 0.10` enforced. The edge collapsed:
 
-**Live money: untouched.** The cap is present in the repo but OFF — backtest-only.
+| gentle lb126/thr0.6/cap50 | CAGR | Sharpe | maxDD |
+|---|---|---|---|
+| no ceiling (Phase-1 "PASS") | 22.5% | 0.92 | −29.0% |
+| **+10% ceiling (LIVE reality)** | **20.6%** | **0.87** | **−30.1%** |
+| baseline (no cap) | 21.6% | 0.90 | −31.2% |
+
+Under the real 10% cap the capped book is WORSE than no cap (CAGR & Sharpe below
+baseline; drawdown cut shrinks to ~1 pt). **Root cause is structural:** the cap's
+benefit came from concentrating freed weight into a few uncorrelated names — exactly
+what `max_weight_per_name` forbids. The single-name 10% cap already does most of the
+de-concentration this piece aimed to add, so there's little left to gain (a real
+finding about the system). Likely generalises to the other configs, so not chased
+further. **Aaron's call: shelve it.** Backed out the half-built live wiring
+(`slow_loop.py`, `[concentration]` config, selftest entry all reverted); KEPT the
+pure `cap_weights` (+ `per_name_cap`) and `backtest_pit.py --per-name-cap` as tested,
+inert tooling that produced the finding. Spec marked ABANDONED. The 07-17 tail stays
+managed by the intraday stops.
+
+**Live money: untouched throughout.** No live path ever referenced the cap.
 
 ---
 

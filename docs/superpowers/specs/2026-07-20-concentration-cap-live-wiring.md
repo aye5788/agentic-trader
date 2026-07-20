@@ -1,9 +1,25 @@
 # Concentration Cap — Live Wiring (Piece 2, Phase 2)
 
 **Date:** 2026-07-20
-**Status:** Design for review (Phase 1 backtest PASSED; Aaron chose the gentle setting)
+**Status:** ⛔ ABANDONED (2026-07-20) — failed the go-live re-test. NOT wired live.
 **Author:** Aaron + Claude
-**Precedes:** an implementation plan, written only after the two open decisions below are settled.
+
+> **Why abandoned:** the Phase-1 backtest that favoured the gentle config
+> (lb126/thr0.6/cap50) let freed weight concentrate into a few names with no
+> per-name ceiling. When the same config was re-backtested with the LIVE
+> `[risk] max_weight_per_name = 0.10` ceiling enforced (§4), the edge collapsed:
+> CAGR 22.5%→**20.6%** (below the 21.6% baseline), Sharpe 0.92→**0.87** (below the
+> 0.90 baseline), and the drawdown cut shrank from ~2.2 pts to ~1.1 pts. The
+> benefit *was* the concentration the mandate forbids, so under the real 10% cap
+> the cap makes the book slightly WORSE than no cap. This is a structural conflict
+> (the finding likely generalises to the other configs), not a tuning miss.
+> Aaron's call: shelve it. The single-name 10% cap already does much of the
+> de-concentration work, and the intraday stops handle the 07-17 tail. The pure
+> `cap_weights` (+ `per_name_cap` water-fill) and `backtest_pit.py --per-name-cap`
+> remain as tested tooling that produced this finding; NO live path uses them.
+> Full record: docs/OPSLOG.md 2026-07-20. The design below is kept for provenance.
+
+---
 
 ---
 

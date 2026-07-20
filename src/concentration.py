@@ -32,11 +32,41 @@ def _clusters(corr: pd.DataFrame, threshold: float) -> list:
     return out
 
 
+def _waterfill(w: dict, order: list, freed: float, ceiling: float) -> float:
+    """Pour `freed` weight onto the names in `order`, pro-rata to current weight but
+    never lifting any above `ceiling`; overflow from a name that hits the ceiling
+    spills to the still-under-ceiling names, repeated until placed or all are full.
+    Mutates `w` in place; returns any weight that could not be placed (everyone full)."""
+    tol = 1e-12
+    while freed > tol:
+        under = [n for n in order if w[n] < ceiling - tol]
+        if not under:
+            break
+        base = sum(w[n] for n in under)
+        placed = 0.0
+        for n in under:
+            share = freed * (w[n] / base) if base > tol else freed / len(under)
+            add = min(share, ceiling - w[n])
+            w[n] += add
+            placed += add
+        freed -= placed
+        if placed <= tol:            # numerical stall — everyone effectively full
+            break
+    return freed
+
+
 def cap_weights(weights: dict, closes: pd.DataFrame, asof, params: dict) -> dict:
     """Down-weight any positively-correlated cluster whose aggregate weight exceeds
     params['cluster_cap'] * total; redistribute the freed weight to holdings OUTSIDE
     capped clusters (pro-rata), or — if everything is capped — to the least-correlated
-    holding. Total weight preserved (fully invested). Membership unchanged."""
+    holding. Total weight preserved (fully invested). Membership unchanged.
+
+    When params['per_name_cap'] is set (absolute weight, e.g. the live
+    [risk] max_weight_per_name), redistribution water-fills so NO name is lifted above
+    that ceiling; if receivers fill up before the freed weight is placed, the remainder
+    spills back onto the (scaled-down) cluster members — the mandate ceiling and staying
+    fully-invested both win over hitting cluster_cap exactly. Absent/None -> the
+    unbounded pro-rata redistribution (backtest baseline behaviour), unchanged."""
     names = [t for t in weights if weights[t] > 0]
     if len(names) < 2:
         return dict(weights)
@@ -69,6 +99,15 @@ def cap_weights(weights: dict, closes: pd.DataFrame, asof, params: dict) -> dict
         return w
 
     receivers = [n for n in names if n not in capped]
+    ceiling = params.get("per_name_cap")
+    if ceiling is not None:
+        # water-fill onto receivers first, then spill any remainder back onto the
+        # scaled-down cluster members (both stay <= ceiling, total preserved).
+        leftover = _waterfill(w, receivers, freed, float(ceiling))
+        if leftover > 1e-12:
+            leftover = _waterfill(w, [n for n in names if n not in receivers],
+                                  leftover, float(ceiling))
+        return w
     if receivers:
         base = sum(w[n] for n in receivers)
         for n in receivers:
@@ -119,6 +158,21 @@ def _selftest() -> None:
     w2 = cap_weights(weights, closes, asof, {**params, "cluster_cap": 0.7})
     assert all(abs(w2[k] - weights[k]) < 1e-9 for k in weights), w2
     print("concentration selftest OK: cap_weights (cap + redistribute + no-op)")
+
+    # per_name_cap: freed weight must never push a receiver above an absolute
+    # per-name ceiling (the live [risk] max_weight_per_name). Craft a heavy
+    # cluster + thin receivers so unbounded redistribution WOULD overshoot.
+    heavy = {"A": 0.25, "B": 0.25, "C": 0.25, "D": 0.15, "E": 0.10}   # ABC cluster = 0.75
+    p_heavy = {"lookback": n, "corr_threshold": 0.7, "cluster_cap": 0.50}
+    w_noceil = cap_weights(heavy, closes, asof, p_heavy)
+    assert abs(sum(w_noceil.values()) - 1.0) < 1e-9, w_noceil
+    assert max(w_noceil.values()) > 0.20 + 1e-9, w_noceil            # a receiver overshoots ~0.30
+    w_ceil = cap_weights(heavy, closes, asof, {**p_heavy, "per_name_cap": 0.20})
+    assert abs(sum(w_ceil.values()) - 1.0) < 1e-9, w_ceil            # still fully invested
+    assert max(w_ceil.values()) <= 0.20 + 1e-9, w_ceil              # nobody breaches the ceiling
+    # ceiling absent -> behaviour is exactly the None default (backtest baseline intact)
+    assert cap_weights(heavy, closes, asof, {**p_heavy, "per_name_cap": None}) == w_noceil
+    print("concentration selftest OK: cap_weights (per_name_cap water-fill)")
 
 
 if __name__ == "__main__":
