@@ -8,6 +8,44 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-20 — Piece 2 concentration cap: backtested (PASS), Phase-2 spec written
+
+Executed the Phase-1 build+backtest plan and merged it to main (`27e395d`).
+
+**Built (offline, no live path touched):** `src/concentration.py` — a pure
+correlation "cluster cap" (`cap_weights` + `_clusters`): detect a positively
+co-moving group of holdings (connected components at a correlation threshold) and,
+when it exceeds a weight cap, trim it and redistribute the freed weight to holdings
+outside the cluster. Weights only; stays fully invested; membership never changes.
+Wired into `backtest_pit.py` as an optional layer (baseline byte-identical — verified)
++ a `--sweep` mode (baseline + 18 param combos). Added to `deploy/run_selftests.sh`.
+Fresh Alpaca-IEX pool re-fetch (753/816 names, 2020-07..2026-07-17).
+
+**Backtest result (survivorship-corrected PIT, 2021-08..2026-07, cap-on vs cap-off,
+same engine):** the failure mode we guarded against — "concentration IS the edge,
+capping craters returns" — did NOT occur. At `corr_threshold=0.6` (where clusters
+actually form; 0.8 is inert) the cap trims max drawdown 2–5 pts for ≈nothing:
+CAGR moves −1.0 to **+0.9**, Sharpe −0.04 to **+0.02**, turnover unchanged (3.0).
+- Baseline: CAGR 21.6% / Sharpe 0.90 / maxDD −31.2%.
+- **Gentle (lb126, thr0.6, cap50): 22.5% / 0.92 / −29.0%** — strictly beats baseline.
+- Aggressive (lb63, thr0.6, cap30): 20.8% / 0.86 / **−25.8%** (−5.4 pts drawdown).
+Verdict = qualified PASS; Aaron chose to proceed with the **gentle** setting.
+Deliverable table saved at `/tmp/concentration_sweep.txt` (regenerate:
+`.venv/bin/python scripts/backtest_pit.py --sweep`).
+
+**Phase-2 live-wiring spec written** (`docs/superpowers/specs/2026-07-20-concentration-cap-live-wiring.md`),
+NOT built. Integration point = one place in `slow_loop.py` after `build_theses`,
+config-gated, reversible. **Key issue surfaced:** the cap's redistribution pushes
+receiver weights up, and the risk mandate hard-rejects any name > `max_weight_per_name`
+(0.10); today's names sit at 7–7.5% with thin headroom, and the backtest had no such
+ceiling. Recommended fix = add a `per_name_cap` water-fill to `cap_weights` + re-run
+the sweep with the 10% ceiling to confirm the gentle config survives, THEN wire. Two
+open decisions parked for Aaron (per-name-cap handling; arm-on-merge vs observe-first).
+
+**Live money: untouched.** The cap is present in the repo but OFF — backtest-only.
+
+---
+
 ## 2026-07-19 — Selection-engine robustness: Piece 1 shipped, Piece 2 planned
 
 Long working session with Aaron. Framed a **3-piece "more robust selection
