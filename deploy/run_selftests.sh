@@ -23,6 +23,7 @@ SELFTESTS=(
     "scripts/fast_loop.py"
     "scripts/universe_refresh.py"
     "src/concentration.py"
+    "src/ti_signals.py"
 )
 
 fail=0
