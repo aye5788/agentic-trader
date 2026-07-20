@@ -21,6 +21,8 @@ dead-name backbone is S&P-500 PIT membership + a hand-list, so a liquid non-inde
 name that died and we didn't list could still be missed. This is a strong
 correction, not a perfect one.
 """
+import argparse
+import itertools
 import sys
 from pathlib import Path
 
@@ -177,5 +179,38 @@ def main() -> None:
     print(f"\nequity curve -> {out}")
 
 
+SWEEP = {"lookback": [63, 126],
+         "corr_threshold": [0.6, 0.7, 0.8],
+         "cluster_cap": [0.30, 0.40, 0.50]}
+
+
+def run_sweep():
+    """Baseline (cap off) + every concentration-cap param combo on the SAME PIT
+    engine. One comparison table: CAGR / Sharpe / max drawdown / turnover. A '<'
+    marks configs that cut drawdown without giving up >2 pts CAGR (the go/no-go
+    shortlist — the human reads the full table, not just the flagged rows)."""
+    (closes, dvol, candidates, etfs, spy, etf_panel, rebals, P) = _load_pit_data()
+    base = run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, None)
+    print(f"\n{'config':28}{'CAGR':>8}{'Sharpe':>8}{'maxDD':>8}{'turn':>7}")
+    print("-" * 59)
+    print(f"{'BASELINE (no cap)':28}{base['cagr']:>7.1%}{base['sharpe']:>8.2f}"
+          f"{base['maxdd']:>8.1%}{base['avg_turnover']:>7.1f}")
+    combos = itertools.product(SWEEP["lookback"], SWEEP["corr_threshold"], SWEEP["cluster_cap"])
+    for lb, th, cap in combos:
+        cp = {"lookback": lb, "corr_threshold": th, "cluster_cap": cap}
+        r = run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cp)
+        tag = f"lb{lb} thr{th} cap{int(cap*100)}"
+        print(f"{tag:28}{r['cagr']:>7.1%}{r['sharpe']:>8.2f}"
+              f"{r['maxdd']:>8.1%}{r['avg_turnover']:>7.1f}"
+              f"{'  <' if (r['maxdd'] > base['maxdd'] and r['cagr'] >= base['cagr'] - 0.02) else ''}")
+
+
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--sweep", action="store_true",
+                    help="run the concentration-cap parameter sweep + comparison table")
+    args = ap.parse_args()
+    if args.sweep:
+        run_sweep()
+    else:
+        main()
