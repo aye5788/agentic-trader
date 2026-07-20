@@ -21,6 +21,8 @@ dead-name backbone is S&P-500 PIT membership + a hand-list, so a liquid non-inde
 name that died and we didn't list could still be missed. This is a strong
 correction, not a perfect one.
 """
+import argparse
+import itertools
 import sys
 from pathlib import Path
 
@@ -33,6 +35,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import momentum as mom       # noqa: E402
 import strategy as strat     # noqa: E402
 import backtest as bt        # noqa: E402  (weekly_rebalance_dates, annualized, max_drawdown, simulate helpers)
+import concentration as conc  # noqa: E402
 
 PRICES = REPO / "research_store" / "prices"
 DVOL_WINDOW = 63             # trailing days to smooth the noisy IEX volume
@@ -55,13 +58,13 @@ def pit_universe(dvol: pd.DataFrame, candidates: list[str], asof, closes: pd.Dat
     return liq.sort_values(ascending=False).head(size).index.tolist()
 
 
-def main() -> None:
+def _load_pit_data():
+    """Load the survivorship-free pool + config once, shared by main() and
+    run_sweep(). Returns (closes, dvol, candidates, etfs, spy, etf_panel, rebals, P)."""
     if not (PRICES / "pool_closes.parquet").exists():
         sys.exit("no pool cache — run scripts/fetch_pool.py first")
     cfg = strat.load()
     P = cfg["portfolio"]
-    book_w, sleeve_w = P["book_weight"], P["sleeve_weight"]
-    book_hold, book_band, sleeve_hold = P["book_hold"], P["book_band"], P["sleeve_hold"]
 
     closes = pd.read_parquet(PRICES / "pool_closes.parquet").sort_index()
     dvol = pd.read_parquet(PRICES / "pool_dvol.parquet").sort_index()
@@ -75,9 +78,14 @@ def main() -> None:
 
     rebals = bt.weekly_rebalance_dates(closes.index)
     rebals = [d for d in rebals if len(closes.loc[:d]) >= mom.LOOKBACK + 5]
-    print(f"pool: {len(candidates)} single-name candidates + {len(etfs)} ETFs | "
-          f"{len(rebals)} weekly rebalances {rebals[0].date()}..{rebals[-1].date()}")
+    return closes, dvol, candidates, etfs, spy, etf_panel, rebals, P
 
+
+def run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cap_params=None):
+    """One PIT backtest run. cap_params=None -> baseline (equal slots, no cap);
+    a params dict -> concentration.cap_weights applied to each week's weights."""
+    book_w, sleeve_w = P["book_weight"], P["sleeve_weight"]
+    book_hold, book_band, sleeve_hold = P["book_hold"], P["book_band"], P["sleeve_hold"]
     per_slot_book = book_w / book_hold
     per_slot_etf = sleeve_w / sleeve_hold
 
@@ -86,7 +94,6 @@ def main() -> None:
     curve, turnover, univ_sizes, dead_held = [], [], [], []
     for i in range(len(rebals) - 1):
         t0, t1 = rebals[i], rebals[i + 1]
-
         univ = pit_universe(dvol, candidates, t0, closes)
         univ_sizes.append(len(univ))
         regime = mom.regime_on(spy, t0, 50)
@@ -101,34 +108,50 @@ def main() -> None:
         turnover.append(len(set(new_book) ^ held_book) + len(set(new_etf) ^ held_etf))
         held_book, held_etf = set(new_book), set(new_etf)
 
+        # equal slots -> optional concentration cap -> per-name weights
+        weights = {t: per_slot_book for t in new_book}
+        weights.update({t: per_slot_etf for t in new_etf})
+        if cap_params is not None:
+            weights = conc.cap_weights(weights, closes, t0, cap_params)
+
         # realize t0 -> t1; a name that delists mid-week has NaN at t1 -> we mark
         # it a total loss of that slot (held into the void), not a free exit.
-        def leg_ret(holds, per_slot):
-            r = 0.0
-            for t in holds:
-                p0 = closes.loc[t0, t] if t in closes.columns else np.nan
-                p1 = closes.loc[t1, t] if t in closes.columns else np.nan
-                if pd.isna(p0) or p0 <= 0:
-                    continue
-                if pd.isna(p1):
-                    r += per_slot * (-1.0)      # delisted to zero while held
-                else:
-                    r += per_slot * (p1 / p0 - 1)
-            return r
+        def name_ret(t):
+            p0 = closes.loc[t0, t] if t in closes.columns else np.nan
+            p1 = closes.loc[t1, t] if t in closes.columns else np.nan
+            if pd.isna(p0) or p0 <= 0:
+                return 0.0
+            return -1.0 if pd.isna(p1) else (p1 / p0 - 1)
 
         # count names we held whose price vanished by t1 (survivorship in action)
         dead_held.append(sum(1 for t in new_book
                              if pd.notna(closes.loc[t0, t]) and pd.isna(closes.loc[t1, t])))
-        port_ret = leg_ret(new_book, per_slot_book) + leg_ret(new_etf, per_slot_etf)
+        port_ret = sum(wt * name_ret(t) for t, wt in weights.items())
         equity *= (1 + port_ret)
         curve.append((t1, equity, port_ret, len(new_book), len(new_etf), regime))
 
     res = pd.DataFrame(curve, columns=["date", "equity", "ret", "n_book", "n_etf", "regime"]
                        ).set_index("date")
+    cagr, vol, sharpe = bt.annualized(res["ret"], 52.0)
+    return {"res": res, "cagr": cagr, "vol": vol, "sharpe": sharpe,
+            "maxdd": bt.max_drawdown(res["equity"]),
+            "total_return": res["equity"].iloc[-1] - 1,
+            "avg_turnover": float(np.mean(turnover)),
+            "univ_sizes": univ_sizes, "dead_held": dead_held,
+            "regime_frac": res["regime"].mean()}
+
+
+def main() -> None:
+    (closes, dvol, candidates, etfs, spy, etf_panel, rebals, P) = _load_pit_data()
+    print(f"pool: {len(candidates)} single-name candidates + {len(etfs)} ETFs | "
+          f"{len(rebals)} weekly rebalances {rebals[0].date()}..{rebals[-1].date()}")
+
+    r = run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, None)
+    res = r["res"]
     bench = spy.loc[res.index[0]:res.index[-1]].reindex(res.index).ffill()
     bench_eq = bench / bench.iloc[0]
 
-    scagr, svol, ssharpe = bt.annualized(res["ret"], 52.0)
+    scagr, svol, ssharpe = r["cagr"], r["vol"], r["sharpe"]
     bcagr, bvol, bsharpe = bt.annualized(bench_eq.pct_change().dropna(), 52.0)
 
     print("\n" + "=" * 62)
@@ -142,10 +165,10 @@ def main() -> None:
     print(f"{'volatility':16}{svol:>11.1%}{bvol:>12.1%}")
     print(f"{'Sharpe (rf=0)':16}{ssharpe:>11.2f}{bsharpe:>12.2f}")
     print(f"{'max drawdown':16}{bt.max_drawdown(res['equity']):>11.1%}{bt.max_drawdown(bench_eq):>12.1%}")
-    print(f"{'avg turnover/wk':16}{np.mean(turnover):>11.1f}{'—':>12}")
-    print(f"{'pct weeks reg-on':16}{res['regime'].mean():>11.0%}{'—':>12}")
-    print(f"{'avg universe':16}{np.mean(univ_sizes):>11.0f}{'—':>12}")
-    print(f"{'held-into-death':16}{sum(dead_held):>11}{'—':>12}  (slots that delisted while held)")
+    print(f"{'avg turnover/wk':16}{r['avg_turnover']:>11.1f}{'—':>12}")
+    print(f"{'pct weeks reg-on':16}{r['regime_frac']:>11.0%}{'—':>12}")
+    print(f"{'avg universe':16}{np.mean(r['univ_sizes']):>11.0f}{'—':>12}")
+    print(f"{'held-into-death':16}{sum(r['dead_held']):>11}{'—':>12}  (slots that delisted while held)")
     print("=" * 62)
     print("survivorship-CORRECTED: pool includes since-delisted names, ranked in")
     print("by point-in-time liquidity. Window 2020-07+ (Alpaca free-tier floor);")
@@ -156,5 +179,38 @@ def main() -> None:
     print(f"\nequity curve -> {out}")
 
 
+SWEEP = {"lookback": [63, 126],
+         "corr_threshold": [0.6, 0.7, 0.8],
+         "cluster_cap": [0.30, 0.40, 0.50]}
+
+
+def run_sweep():
+    """Baseline (cap off) + every concentration-cap param combo on the SAME PIT
+    engine. One comparison table: CAGR / Sharpe / max drawdown / turnover. A '<'
+    marks configs that cut drawdown without giving up >2 pts CAGR (the go/no-go
+    shortlist — the human reads the full table, not just the flagged rows)."""
+    (closes, dvol, candidates, etfs, spy, etf_panel, rebals, P) = _load_pit_data()
+    base = run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, None)
+    print(f"\n{'config':28}{'CAGR':>8}{'Sharpe':>8}{'maxDD':>8}{'turn':>7}")
+    print("-" * 59)
+    print(f"{'BASELINE (no cap)':28}{base['cagr']:>7.1%}{base['sharpe']:>8.2f}"
+          f"{base['maxdd']:>8.1%}{base['avg_turnover']:>7.1f}")
+    combos = itertools.product(SWEEP["lookback"], SWEEP["corr_threshold"], SWEEP["cluster_cap"])
+    for lb, th, cap in combos:
+        cp = {"lookback": lb, "corr_threshold": th, "cluster_cap": cap}
+        r = run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cp)
+        tag = f"lb{lb} thr{th} cap{int(cap*100)}"
+        print(f"{tag:28}{r['cagr']:>7.1%}{r['sharpe']:>8.2f}"
+              f"{r['maxdd']:>8.1%}{r['avg_turnover']:>7.1f}"
+              f"{'  <' if (r['maxdd'] > base['maxdd'] and r['cagr'] >= base['cagr'] - 0.02) else ''}")
+
+
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--sweep", action="store_true",
+                    help="run the concentration-cap parameter sweep + comparison table")
+    args = ap.parse_args()
+    if args.sweep:
+        run_sweep()
+    else:
+        main()
