@@ -39,7 +39,7 @@ def outcome_from_exit(*, symbol, as_of, entry_price, exit_price, stop, targets,
     hit_target = bool(targets) and exit_price >= float(targets[0])
 
     rel = None
-    if spy_entry and spy_exit:
+    if spy_entry and spy_exit:  # Truthiness guard: both must be supplied AND non-zero; spy_entry==0 would divide by zero below
         spy_ret = (float(spy_exit) - float(spy_entry)) / float(spy_entry)
         rel = round(pnl_pct - spy_ret, 4)
 
@@ -88,7 +88,17 @@ def _selftest() -> None:
     assert s["return_vs_spy"] is None    # no spy inputs -> None
     assert s["holding_days"] == 3
 
-    print("selftest OK: decision_id, outcome_from_exit (win/target, loss/stop, no-spy)")
+    # SPY entry == 0.0: truthiness guard prevents division by zero
+    z = outcome_from_exit(
+        symbol="XLE", as_of="2026-07-06", entry_price=100.0, exit_price=110.0,
+        stop=95.0, targets=[108.0], exit_reason="target",
+        entry_date="2026-07-06", exit_date="2026-07-20",
+        spy_entry=0.0, spy_exit=505.0,
+    )
+    assert z["return_vs_spy"] is None    # spy_entry==0 fails truthiness, no div-by-zero
+    assert z["pnl_pct"] == 0.1           # position PnL still computed
+
+    print("selftest OK: decision_id, outcome_from_exit (win/target, loss/stop, no-spy, spy_entry=0)")
 
 
 if __name__ == "__main__":
