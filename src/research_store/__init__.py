@@ -22,7 +22,9 @@ from datetime import datetime
 
 import sys as _sys
 from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+_SRC = str(_Path(__file__).resolve().parents[1])
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
 from ledger import decision_id as _decision_id  # noqa: E402
 
 from . import store
