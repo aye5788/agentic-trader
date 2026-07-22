@@ -33,6 +33,9 @@ HOME=/root
 # exist in .env; until then it just writes research_store/newsletters/.
 0 21 * * 0   /opt/agentic-trader/deploy/run_newsletter.sh >> /opt/agentic-trader/logs/newsletter.log 2>&1
 
+# --- NIGHTLY LEDGER BACKUP (catch-all in case a run's inline backup missed) ---
+30 22 * * *  cd /opt/agentic-trader && deploy/backup_ledger.sh >> logs/backup.log 2>&1
+
 # --- SCHWAB WEEKLY RE-AUTH REMINDER (manual — token expires every 7 days) ---
 # Schwab's refresh token can't be renewed unattended; you must re-run the paste
 # flow weekly or the price feed dies. Logs + pushes to the phone (ntfy).

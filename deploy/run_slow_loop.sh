@@ -9,3 +9,5 @@ PY=.venv/bin/python
 [ -x "$PY" ] || PY=python3
 "$PY" scripts/fetch_prices.py --force
 "$PY" scripts/slow_loop.py
+# mirror the non-regenerable ledger off-box (best-effort; never fails the run)
+deploy/backup_ledger.sh || true

@@ -22,3 +22,5 @@ mkdir -p logs
 claude -p --model claude-opus-4-8 "$(cat prompts/fast_loop.md)"
 # record a daily equity point for the dashboard (best-effort; never fail the run)
 .venv/bin/python scripts/log_equity.py || true
+# mirror the non-regenerable ledger off-box (best-effort; never fails the run)
+deploy/backup_ledger.sh || true
