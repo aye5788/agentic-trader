@@ -50,8 +50,11 @@ PROCEDURE — follow exactly:
 7c. **Record the outcome (the learning label).** For each symbol you sold to a
     FULL close (position now zero), compute and journal its outcome. In a short
     python snippet run with `.venv/bin/python`:
-      - entry_price = that symbol's `avg_cost` from the pre-sell
-        `research_store/rh/positions.json`
+      - entry_price = that symbol's `avg_cost` (average buy price) as returned
+        by `get_equity_positions` in step 3, captured BEFORE any sells this
+        run — do NOT re-read `positions.json` here: step 7 has already
+        overwritten it to post-sell state and a fully-closed symbol is
+        dropped from it.
       - exit_price  = the sell's `average_price` from `get_equity_orders`
       - stop/targets/as_of = from that symbol's thesis in
         `research_store/current.json`
@@ -62,7 +65,7 @@ PROCEDURE — follow exactly:
       `record_outcome(symbol, outcome, now_iso)`. This attaches the label to the
       thesis and appends an `outcome` event. Partial (scale-out) exits: skip —
       only full closes get an outcome (known first-cut limitation).
-7d. **Reconcile.** Write `research_store/rh/orders_dump.json` (same schema as the
+7d. **Ledger reconcile.** Write `research_store/rh/orders_dump.json` (same schema as the
     fast loop's step 8) from `get_equity_orders`, then run
     `.venv/bin/python scripts/reconcile_ledger.py`. Don't suppress its exit code.
 8. Report one concise line per exit: symbol, reason, amount sold, order id (or why

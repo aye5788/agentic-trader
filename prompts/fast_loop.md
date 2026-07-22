@@ -73,7 +73,8 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    `research_store/rh/orders_dump.json` — a JSON array of
    `{order_id, symbol, side, quantity, average_price, state, executed_at}` from
    `get_equity_orders` (state is RH's, e.g. "filled"/"cancelled"). This is the
-   ground-truth dump the reconciler checks the journal against.
+   ground-truth dump the reconciler checks the journal against (the
+   `reconcile_ledger.py` reconciler itself is run at the end of step 9, not here).
    If any SELL filled, also refresh the realized-P&L
    snapshot: `get_realized_pnl(account, span="month", asset_classes=["equity"])`
    → write `research_store/rh/realized.json` as
