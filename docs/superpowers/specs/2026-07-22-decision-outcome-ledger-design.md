@@ -144,6 +144,36 @@ compute the outcome and call the **already-existing** `record_outcome()`.
   `rebalance`, `regime_off`). Written by the same `record_fills.py` /
   `record_outcome` path — no new agent workflow, no transcript dump.
 
+### 4.45 Component E — off-box durability (backup)  [NEW — required, not optional]
+
+**Why this is in-scope, not polish:** the `.gitignore` justification for excluding
+`research_store/` is *"regenerated on the box each run."* That is TRUE for prices
+(re-fetchable) and `current.json` (weekly rebuild) — and FALSE for the ledger. A
+real-money trade record and its outcome labels **cannot be regenerated from code.**
+Today they exist in exactly one copy, on one disk, with no backup anywhere
+(verified: no rsync/S3/snapshot in `deploy/`, 0 files tracked in git). Losing that
+disk loses the entire corpus — which defeats the purpose of collecting it.
+
+**What to back up** — only the *non-regenerable* files:
+`journal.jsonl` (the ledger), `history/equity.jsonl`, `flows.jsonl`, and the
+`archive/` dir (dated beliefs = the context features). NOT prices, NOT `rh/*.json`
+snapshots (both re-derivable).
+
+**Mechanism (recommended):** a **private git mirror**. The box already has git and
+push credentials and pushes code daily — reuse that. A new
+`deploy/backup_ledger.sh` commits+pushes the files above to a **separate private
+repo** (kept out of the public code repo). Append-only JSONL → tiny diffs → cheap
+to commit after every run. This gives versioned, off-box, point-in-time history
+for free (you can see the ledger as it was on any past day).
+
+**Wiring:** called at the end of `run_fast_loop.sh`, `run_slow_loop.sh`, and the
+exit path, plus a nightly crontab entry as a catch-all. **Non-fatal:** a failed
+backup fires an `ntfy` alert but never blocks or fails a trading run.
+
+**Alternative considered:** object storage (S3 / DO Spaces) — rejected for the
+first cut (new account, new credentials, new tooling) in favor of reusing the git
+path already on the box. Can revisit if the corpus outgrows git.
+
 ### 4.5 Component D — derived views  (#5, #7)
 
 Two pure read-only functions over `journal.jsonl` (no new storage):
@@ -189,6 +219,9 @@ reconstructed, the ledger has a hole — a good test).
 - Rationale is **structured + short**, not a transcript dump.
 - #5/#7 are **derived**, not separately stored.
 - `decision_id = symbol:as_of`.
+- The ledger is **backed up off-box** to a private git mirror (Component E) —
+  required, because the ledger is the one thing in `research_store/` that cannot
+  be regenerated.
 
 ## 8. Risks / watch-items
 
@@ -209,4 +242,6 @@ reconstructed, the ledger has a hole — a good test).
 3. Thread `decision_id` through `product` write and `record_fills` /
    `record_outcome`.
 4. Wire auto-outcome + rationale into `prompts/exit.md` and `prompts/fast_loop.md`.
-5. Adopt derived views in dashboard / letter_facts (incremental, optional last).
+5. `deploy/backup_ledger.sh` — private-git-mirror backup + selftest, wired into
+   the deploy scripts and crontab (Component E).
+6. Adopt derived views in dashboard / letter_facts (incremental, optional last).
