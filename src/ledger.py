@@ -146,7 +146,8 @@ def _selftest() -> None:
         {"event": "execution", "ts": "2026-07-06T14:00:00+00:00", "fills": [
             {"symbol": "XLE", "side": "buy", "amount": 5.0, "order_id": "o1", "avg_price": 100.0}]},
         {"event": "execution", "ts": "2026-07-20T14:00:00+00:00", "fills": [
-            {"symbol": "XLE", "side": "sell", "amount": 5.5, "order_id": "o2", "avg_price": 110.0}]},
+            {"symbol": "XLE", "side": "sell", "amount": 5.5, "order_id": "o2", "avg_price": 110.0},
+            {"symbol": "XLE", "side": "buy", "amount": 5.0, "order_id": "oX", "status": "skipped", "reason": "pending_settlement"}]},
         {"event": "outcome", "symbol": "XLE", "at": "2026-07-20T14:01:00+00:00",
          "outcome": {"pnl_pct": 0.1, "status": "target", "decision_id": "XLE:2026-07-06"}},
     ]
@@ -158,6 +159,7 @@ def _selftest() -> None:
     ph = position_history(jrnl)
     assert set(ph) == {"XLE"}
     assert [(e["side"], e["order_id"]) for e in ph["XLE"]] == [("buy", "o1"), ("sell", "o2")]
+    assert "oX" not in [e["order_id"] for e in ph["XLE"]]   # skipped fill excluded
 
     print("selftest OK: decision_id, outcome_from_exit, realized_history, position_history")
 
