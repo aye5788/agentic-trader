@@ -18,7 +18,13 @@ fail() {
   exit 0
 }
 
-[ -d "$MIRROR/.git" ] || fail "mirror not cloned at $MIRROR — run the one-time git clone (see script header)"
+# Mirror not set up yet = an expected pre-setup state, NOT a failure: skip
+# QUIETLY (log only, no phone push). Only genuine failures once the mirror
+# exists (commit/push) warrant an alert. See the one-time git clone in the header.
+if [ ! -d "$MIRROR/.git" ]; then
+  echo "backup_ledger: mirror not cloned at $MIRROR — skipping quietly (run the one-time git clone; see header)" >&2
+  exit 0
+fi
 
 # Copy only the non-regenerable files.
 mkdir -p "$MIRROR/history" "$MIRROR/archive"
