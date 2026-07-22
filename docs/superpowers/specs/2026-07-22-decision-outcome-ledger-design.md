@@ -162,7 +162,10 @@ snapshots (both re-derivable).
 **Mechanism (recommended):** a **private git mirror**. The box already has git and
 push credentials and pushes code daily — reuse that. A new
 `deploy/backup_ledger.sh` commits+pushes the files above to a **separate private
-repo** (kept out of the public code repo). Append-only JSONL → tiny diffs → cheap
+repo**, provisioned by Aaron: **`github.com/aye5788/agentic-trader-ledger`**
+(private, empty). Build-time task: confirm the box has push access to it (the
+existing push path is for the code repo; this repo may need its remote/credentials
+wired — verify in step 5, don't assume). Append-only JSONL → tiny diffs → cheap
 to commit after every run. This gives versioned, off-box, point-in-time history
 for free (you can see the ledger as it was on any past day).
 
