@@ -57,6 +57,48 @@ def outcome_from_exit(*, symbol, as_of, entry_price, exit_price, stop, targets,
     }
 
 
+def realized_history(journal: list) -> list:
+    """Full-life realized-P&L series from `outcome` events (not RH's rolling
+    window). Each item: {symbol, at, pnl_pct, status, decision_id}."""
+    out = []
+    for e in journal:
+        if e.get("event") != "outcome":
+            continue
+        o = e.get("outcome") or {}
+        out.append({
+            "symbol": e.get("symbol"),
+            "at": e.get("at"),
+            "pnl_pct": o.get("pnl_pct"),
+            "status": o.get("status"),
+            "decision_id": o.get("decision_id"),
+        })
+    return out
+
+
+def position_history(journal: list) -> dict:
+    """Reconstruct per-symbol execution history from `execution` events —
+    the ledger-derived record of buys/sells over time (dollar-notional +
+    order_id). Skipped orders (no fill) are excluded."""
+    hist: dict = {}
+    for e in journal:
+        if e.get("event") != "execution":
+            continue
+        for f in e.get("fills") or []:
+            if f.get("status") == "skipped":
+                continue
+            sym = f.get("symbol")
+            if not sym:
+                continue
+            hist.setdefault(sym, []).append({
+                "ts": e.get("ts"),
+                "side": f.get("side"),
+                "amount": f.get("amount"),
+                "avg_price": f.get("avg_price"),
+                "order_id": f.get("order_id"),
+            })
+    return hist
+
+
 def _selftest() -> None:
     # decision_id: upper-cases symbol, joins on as_of
     assert decision_id("xle", "2026-07-20") == "XLE:2026-07-20"
@@ -98,7 +140,26 @@ def _selftest() -> None:
     assert z["return_vs_spy"] is None    # spy_entry==0 fails truthiness, no div-by-zero
     assert z["pnl_pct"] == 0.1           # position PnL still computed
 
-    print("selftest OK: decision_id, outcome_from_exit (win/target, loss/stop, no-spy, spy_entry=0)")
+    # --- derived views over a fixture journal ---
+    jrnl = [
+        {"event": "product", "as_of": "2026-07-06"},
+        {"event": "execution", "ts": "2026-07-06T14:00:00+00:00", "fills": [
+            {"symbol": "XLE", "side": "buy", "amount": 5.0, "order_id": "o1", "avg_price": 100.0}]},
+        {"event": "execution", "ts": "2026-07-20T14:00:00+00:00", "fills": [
+            {"symbol": "XLE", "side": "sell", "amount": 5.5, "order_id": "o2", "avg_price": 110.0}]},
+        {"event": "outcome", "symbol": "XLE", "at": "2026-07-20T14:01:00+00:00",
+         "outcome": {"pnl_pct": 0.1, "status": "target", "decision_id": "XLE:2026-07-06"}},
+    ]
+    rh = realized_history(jrnl)
+    assert rh == [{"symbol": "XLE", "at": "2026-07-20T14:01:00+00:00",
+                   "pnl_pct": 0.1, "status": "target",
+                   "decision_id": "XLE:2026-07-06"}], rh
+
+    ph = position_history(jrnl)
+    assert set(ph) == {"XLE"}
+    assert [(e["side"], e["order_id"]) for e in ph["XLE"]] == [("buy", "o1"), ("sell", "o2")]
+
+    print("selftest OK: decision_id, outcome_from_exit, realized_history, position_history")
 
 
 if __name__ == "__main__":
