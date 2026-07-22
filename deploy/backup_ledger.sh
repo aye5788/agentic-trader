@@ -4,9 +4,12 @@
 # and current.json), and research_store/ is git-ignored with no other backup.
 # Non-fatal by contract: a failure phone-alerts but never blocks a trading run.
 #
-# One-time setup on the box:
-#   git clone git@github.com:aye5788/agentic-trader-ledger.git "$HOME/agentic-trader-ledger"
-#   (or https with a stored credential/token; verify `git -C ... push` works)
+# One-time setup on the box (DONE 2026-07-22): a dedicated deploy key
+# (~/.ssh/agentic_ledger_deploy) is registered on the ledger repo with write
+# access, reached via the SSH alias `github.com-ledger` (~/.ssh/config). The
+# code repo's own deploy key is repo-scoped and cannot be reused (GitHub blocks
+# a deploy key on two repos), hence the separate key. Mirror cloned with:
+#   git clone git@github.com-ledger:aye5788/agentic-trader-ledger.git "$HOME/agentic-trader-ledger"
 set -uo pipefail   # NOT -e: this script must never hard-fail its caller
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
