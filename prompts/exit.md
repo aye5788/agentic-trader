@@ -47,5 +47,23 @@ PROCEDURE — follow exactly:
    "total_rate":<total_rate_of_return as number>,
    "days":[{"date":"<bucket start_time YYYY-MM-DD>","gain":<realized_gain>,
    "trades":<number_of_trades>} for buckets with number_of_trades > 0]}`.
+7c. **Record the outcome (the learning label).** For each symbol you sold to a
+    FULL close (position now zero), compute and journal its outcome. In a short
+    python snippet run with `.venv/bin/python`:
+      - entry_price = that symbol's `avg_cost` from the pre-sell
+        `research_store/rh/positions.json`
+      - exit_price  = the sell's `average_price` from `get_equity_orders`
+      - stop/targets/as_of = from that symbol's thesis in
+        `research_store/current.json`
+      - spy_entry/spy_exit = optional; pass None if unknown
+    Call:
+      `from ledger import outcome_from_exit` (add `src` to sys.path) to build the
+      dict, then `from research_store import record_outcome` and
+      `record_outcome(symbol, outcome, now_iso)`. This attaches the label to the
+      thesis and appends an `outcome` event. Partial (scale-out) exits: skip —
+      only full closes get an outcome (known first-cut limitation).
+7d. **Reconcile.** Write `research_store/rh/orders_dump.json` (same schema as the
+    fast loop's step 8) from `get_equity_orders`, then run
+    `.venv/bin/python scripts/reconcile_ledger.py`. Don't suppress its exit code.
 8. Report one concise line per exit: symbol, reason, amount sold, order id (or why
    skipped). That is your entire output.

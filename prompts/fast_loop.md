@@ -68,7 +68,13 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    as step 4, fresh `ts`) so the store reflects post-trade reality — the
    dashboard and equity log read this file. Check each placed order's state
    with `get_equity_orders(order_id=...)` to get its fill (`state`,
-   `average_price`). If any SELL filled, also refresh the realized-P&L
+   `average_price`).
+   Also write ALL orders you touched this run (placed AND filled-from-prior) to
+   `research_store/rh/orders_dump.json` — a JSON array of
+   `{order_id, symbol, side, quantity, average_price, state, executed_at}` from
+   `get_equity_orders` (state is RH's, e.g. "filled"/"cancelled"). This is the
+   ground-truth dump the reconciler checks the journal against.
+   If any SELL filled, also refresh the realized-P&L
    snapshot: `get_realized_pnl(account, span="month", asset_classes=["equity"])`
    → write `research_store/rh/realized.json` as
    `{"ts":"<now iso>","window":"month","total":<total_returns as number>,
@@ -77,12 +83,17 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    "trades":<number_of_trades>} for buckets with number_of_trades > 0]}`.
 9. **Journal.** Write the placed fills AND any skipped orders to
    `research_store/rh/fills.json` (a JSON array of
-   `{symbol, side, amount, order_id, status, avg_price}` — status and avg_price
-   from step 8's order check; skips instead carry `"status":"skipped"` and
+   `{symbol, side, amount, order_id, status, avg_price, note}` — status and
+   avg_price from step 8's order check; `note` is ≤15 words on WHY (e.g.
+   `"open: momentum rank 1"`, `"rebalance trim"`, `"stop breach"`) — the
+   joinable rationale, not prose; skips instead carry `"status":"skipped"` and
    `"reason"`, no order_id), then run `.venv/bin/python scripts/record_fills.py`.
    Run it whenever ANYTHING was placed or skipped — it journals the event and
    pushes the phone notification (the human's only alert besides Robinhood's
    own). Do NOT hand-edit `journal.jsonl` and do NOT write throwaway helper
    scripts — use only record_fills.py.
+   Then run `.venv/bin/python scripts/reconcile_ledger.py`. It appends any RH
+   fill missing from the journal and PHONE-ALARMS + exits non-zero if the
+   journal is still incomplete. Do not suppress its exit code.
 10. **Report** concisely: account value, orders placed, any blocked/failed, and
     the resulting book. That is your entire output.
