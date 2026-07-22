@@ -46,6 +46,7 @@ COOLDOWN = MON / "cooldown.json"
 REENTRY = MON / "reentry_review.json"
 EXIT_REQ = MON / "exit_request.json"
 EXIT_RES = MON / "exit_result.json"
+FEED_ALERT = MON / "feed_alert.json"    # cooldown clock for the "quotes down" push
 RH_POSITIONS = REPO / "research_store" / "rh" / "positions.json"
 ET = ZoneInfo("America/New_York")
 
@@ -118,6 +119,23 @@ def _selftest() -> None:
     act, esc = refire_gate(trg, unr, t0 + timedelta(seconds=200), 120, 3)
     assert [t["symbol"] for t in act] == ["MU"] and esc == [], (act, esc)
     print("monitor selftest OK: refire backoff + escalation gate")
+
+    # feed-failure escalation: recover on transients, alert at threshold, exit at cap
+    assert _feed_action(0, 4, 12) == "recover"
+    assert _feed_action(3, 4, 12) == "recover"        # below alert band
+    assert _feed_action(4, 4, 12) == "alert"          # crosses alert threshold
+    assert _feed_action(11, 4, 12) == "alert"         # still in alert band
+    assert _feed_action(12, 4, 12) == "exit"          # hits exit cap
+    assert _feed_action(99, 4, 12) == "exit"
+    # feed-alert cooldown: fires first time, suppressed within window, re-fires after
+    from datetime import timezone as _tzf
+    nf = datetime(2026, 1, 1, 15, 0, 0, tzinfo=_tzf.utc)
+    assert _feed_alert_due(nf, None, 1800) is True                       # never fired
+    assert _feed_alert_due(nf, nf.isoformat(), 1800) is False            # just fired
+    assert _feed_alert_due(nf + timedelta(seconds=1799), nf.isoformat(), 1800) is False
+    assert _feed_alert_due(nf + timedelta(seconds=1801), nf.isoformat(), 1800) is True
+    assert _feed_alert_due(nf, "garbage", 1800) is True                  # unparseable → fire
+    print("monitor selftest OK: feed-failure recover/alert/exit + cooldown")
     assert owned_symbols({"positions": "torn"}) is None
     print("monitor selftest OK: holdings filter (phantom-holding guard)")
 
@@ -191,6 +209,56 @@ def _load(path, default):
 def _save(path, obj):
     MON.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2))
+
+
+class QuoteFeedError(Exception):
+    """The Schwab quote poll failed. Raised (not swallowed) so the main loop can
+    rebuild the client and, if the feed stays down, exit for a clean restart.
+
+    Root cause this guards against (2026-07-15 lock-starve + 2026-07-22 stale
+    token): a long-lived process holding long-lived schwabdev state that rots
+    with no self-recovery. We treat a wedged feed as recoverable, not silent."""
+
+
+def _feed_action(consec_fail: int, alert_after: int, exit_after: int) -> str:
+    """Classify what to do after N consecutive quote-feed failures.
+
+    'recover' — rebuild the client, keep polling (handles the common transient).
+    'alert'   — feed down long enough to warrant one phone push.
+    'exit'    — give up and let systemd restart us with a clean client."""
+    if consec_fail >= exit_after:
+        return "exit"
+    if consec_fail >= alert_after:
+        return "alert"
+    return "recover"
+
+
+def _feed_alert_due(now, last_ts, cooldown_secs: int) -> bool:
+    """True if a feed-down push may fire: never fired, unparseable clock, or the
+    cooldown has elapsed. Keeps a genuine multi-day outage to a periodic reminder
+    (survives restarts via FEED_ALERT) instead of a per-tick storm."""
+    if not last_ts:
+        return True
+    try:
+        last = datetime.fromisoformat(last_ts)
+    except Exception:
+        return True
+    return (now - last).total_seconds() >= cooldown_secs
+
+
+def _maybe_feed_alert(consec_fail: int, cooldown_secs: int) -> None:
+    """Fire ONE cooldown-gated phone push that the quote feed is down and stops
+    are therefore unwatched. Cooldown clock persists in FEED_ALERT."""
+    now = datetime.now(timezone.utc)
+    st = _load(FEED_ALERT, {})
+    if not _feed_alert_due(now, st.get("last_ts"), cooldown_secs):
+        return
+    notify("🚨 Monitor feed DOWN — stops unwatched",
+           f"Schwab quotes failing {consec_fail}× in a row; the stop-loss watcher "
+           f"is blind. Auto-recovering (client rebuilt each tick; restarts if it "
+           f"persists). If it keeps failing, re-auth Schwab (weekly token).")
+    _save(FEED_ALERT, {"last_ts": now.isoformat(timespec="seconds"),
+                       "consec_fail": consec_fail})
 
 
 def add_cooldown(symbol: str, days: int):
@@ -293,8 +361,9 @@ def check_once(cfg, client) -> int:
     try:
         quotes = research.get_quotes(list(held), client=client)
     except Exception as e:
-        print(f"  quote error (will retry next tick): {e}")
-        return 0
+        # Do NOT swallow: signal the main loop so it rebuilds the client and, if
+        # the feed stays wedged, exits for a clean systemd restart + phone alert.
+        raise QuoteFeedError(str(e)) from e
 
     # persist the marks we just paid for — the dashboard + equity logger value
     # positions from this file (via src/marks.py) instead of stale snapshots
@@ -419,19 +488,46 @@ def main():
         if not args.force and not market_open():
             print("market closed — nothing to do (use --force to test)")
             return
-        check_once(cfg, client)
+        try:
+            check_once(cfg, client)
+        except QuoteFeedError as e:
+            print(f"  quote error: {e}")
         return
 
     print(f"monitor up — polling every {poll}s during 09:30–16:00 ET")
+    m = cfg["monitor"]
+    alert_after = int(m.get("feed_fail_alert", 4))          # ~1 min @ 15s poll
+    exit_after = int(m.get("feed_fail_exit", 12))           # ~3 min @ 15s poll
+    cooldown = int(m.get("feed_alert_cooldown_mins", 30)) * 60
+    consec_fail = 0
     while True:
         if market_open():
             try:
                 check_once(cfg, client)
+                consec_fail = 0                       # healthy tick — reset the counter
+            except QuoteFeedError as e:
+                consec_fail += 1
+                print(f"  quote feed error #{consec_fail} (recovering): {e}")
+                # LAYER 1 (root cause): discard the possibly token-rotten client so
+                # a fresh one reloads/refreshes creds from tokens.db next tick.
+                try:
+                    client = research.build_client(interactive_auth=False)
+                except Exception as be:
+                    print(f"  client rebuild failed (will retry): {be}")
+                action = _feed_action(consec_fail, alert_after, exit_after)
+                if action == "alert":                 # LAYER 3: cooldown-gated push
+                    _maybe_feed_alert(consec_fail, cooldown)
+                elif action == "exit":                # LAYER 2: hand off to systemd
+                    _maybe_feed_alert(consec_fail, cooldown)
+                    print(f"  feed down {consec_fail}× — exiting nonzero for a clean "
+                          f"systemd restart (fresh client)")
+                    sys.exit(1)
             except Exception as e:
                 print(f"loop error (continuing): {e}")
             time.sleep(poll)
         else:
-            time.sleep(60)                            # closed — check again in a minute
+            consec_fail = 0                           # closed — don't carry failures over
+            time.sleep(60)                            # check again in a minute
 
 
 if __name__ == "__main__":

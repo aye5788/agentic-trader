@@ -108,6 +108,14 @@ refire_retry_secs = 120   # if an exit sell FAILS, back off this long before ret
                           #   alerts; without backoff it storms every 15s poll)
 refire_escalate_n = 3     # after this many consecutive failed exits, send ONE loud
                           #   "manual intervention — position unprotected" phone push
+feed_fail_alert = 4       # consecutive quote-poll failures (~1 min @15s) before ONE
+                          #   "feed down — stops unwatched" phone push. Each failing
+                          #   tick rebuilds the Schwab client, so transients self-heal
+                          #   long before this (guards the 2026-07-22 stale-token hang).
+feed_fail_exit  = 12      # consecutive failures (~3 min) → monitor exits nonzero so
+                          #   systemd (Restart=always) restarts it with a clean client.
+feed_alert_cooldown_mins = 30  # min gap between feed-down pushes; a genuine multi-day
+                          #   outage becomes a periodic reminder, not a per-tick storm.
 alert_only     = false    # true = detect+journal breaches but place NO sells
                           #   (also forced alert-only whenever live_approved=false)
 
