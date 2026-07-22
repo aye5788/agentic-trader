@@ -132,7 +132,15 @@ compute the outcome and call the **already-existing** `record_outcome()`.
   line: "for each fully-closed symbol, call record_outcome with the computed
   outcome". The arithmetic lives in code; the agent only supplies the exit price
   it already fetched.
-- Result: theses stop being `outcome: null`. Every closed position gets a label.
+- Result: theses stop being `outcome: null` for the exit path.
+
+> **IMPLEMENTED SCOPE (2026-07-22 merge):** only `prompts/exit.md` (stop/take-profit
+> closes) records outcomes. The fast-loop rotation full-close branch was NOT wired,
+> because `record_outcome` requires the symbol to still be in the current book and a
+> rotated-out name is not — naive wiring would raise on the live path. Rotation-close
+> outcome recording (attaching to the ARCHIVED thesis by `decision_id`) is the tracked
+> immediate follow-up. Until it lands, `realized_history()` covers stop/target closes
+> only, not the dominant rotation path. See the follow-up note in §9.
 
 ### 4.4 Component C — structured rationale  (#1)
 

@@ -59,7 +59,15 @@ def outcome_from_exit(*, symbol, as_of, entry_price, exit_price, stop, targets,
 
 def realized_history(journal: list) -> list:
     """Full-life realized-P&L series from `outcome` events (not RH's rolling
-    window). Each item: {symbol, at, pnl_pct, status, decision_id}."""
+    window). Each item: {symbol, at, pnl_pct, status, decision_id}.
+
+    SCOPE (as of 2026-07-22): only the stop/take-profit exit path records
+    `outcome` events (prompts/exit.md step 7c). Weekly-rotation full closes in
+    the fast loop currently emit `execution` events but NOT `outcome` events, so
+    this series does NOT yet cover rotation exits — the dominant close path.
+    Wiring rotation-close outcomes (they must attach to the ARCHIVED thesis, not
+    the current book, or record_outcome raises) is the tracked follow-up. Treat
+    this as stop/target-close coverage until then, not a complete P&L ledger."""
     out = []
     for e in journal:
         if e.get("event") != "outcome":
