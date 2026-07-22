@@ -12,7 +12,11 @@ cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 MIRROR="${LEDGER_MIRROR:-$HOME/agentic-trader-ledger}"
 
-fail() { .venv/bin/python -c "import sys; sys.path.insert(0,'src'); from notify import push; push('Agentic: ledger backup FAILED', '''$1''', tags='floppy_disk')" 2>/dev/null || true; echo "backup_ledger: $1" >&2; exit 0; }
+fail() {
+  MSG="$1" "$REPO_ROOT/.venv/bin/python" -c "import os, sys; sys.path.insert(0, '$REPO_ROOT/src'); from notify import push; push('Agentic: ledger backup FAILED', os.environ['MSG'], tags='floppy_disk')" 2>/dev/null || true
+  echo "backup_ledger: $1" >&2
+  exit 0
+}
 
 [ -d "$MIRROR/.git" ] || fail "mirror not cloned at $MIRROR — run the one-time git clone (see script header)"
 

@@ -58,6 +58,9 @@ PROCEDURE — follow exactly:
       - exit_price  = the sell's `average_price` from `get_equity_orders`
       - stop/targets/as_of = from that symbol's thesis in
         `research_store/current.json`
+      - exit_reason = that exit's `reason` from `exit_request.json` (step 1)
+      - entry_date = the thesis `as_of` (from `current.json`)
+      - exit_date = today's date (YYYY-MM-DD)
       - spy_entry/spy_exit = optional; pass None if unknown
     Call:
       `from ledger import outcome_from_exit` (add `src` to sys.path) to build the

@@ -114,7 +114,9 @@ def record_outcome(symbol: str, outcome: dict, now_iso: str) -> None:
     for t in d.get("theses", []):
         if str(t.get("symbol", "")).upper() == symbol.upper():
             t["outcome"] = outcome
-            did = t.get("decision_id") or _decision_id(symbol, t.get("as_of", ""))
+            did = t.get("decision_id")
+            if not did and t.get("as_of"):
+                did = _decision_id(symbol, t["as_of"])
             break
     else:
         raise KeyError(f"{symbol} not in current product")
