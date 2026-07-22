@@ -36,6 +36,7 @@ class Thesis:
     as_of: str | None = None
     review_by: str | None = None                      # e.g. "2026-07-30 (next earnings)"
     outcome: dict | None = None                       # set on close: {status, pnl_pct, ...}
+    decision_id: str | None = None                    # "<SYMBOL>:<as_of>" join key
 
     def to_dict(self) -> dict:
         return asdict(self)

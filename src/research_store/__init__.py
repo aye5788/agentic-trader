@@ -20,6 +20,11 @@ package never reads the clock itself, so behavior is reproducible/testable.
 """
 from datetime import datetime
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))
+from ledger import decision_id as _decision_id  # noqa: E402
+
 from . import store
 from .models import ResearchProduct, Thesis, TRADEABLE_VERDICTS, VERDICTS
 from .validate import DEFAULT_MANDATE, reward_risk, validate_product
@@ -45,6 +50,9 @@ def write_product(product, mandate=DEFAULT_MANDATE, *, archive: bool = True):
     errors = validate_product(product, mandate)
     if errors:
         raise MandateViolation("; ".join(errors))
+    for t in product.theses:
+        if t.as_of:
+            t.decision_id = _decision_id(t.symbol, t.as_of)
     store.save_current(product.to_dict(), archive=archive)
     held = [t for t in product.theses if t.target_weight > 0]
     store.append_journal({
@@ -100,15 +108,19 @@ def record_outcome(symbol: str, outcome: dict, now_iso: str) -> None:
     d = store.load_current()
     if not d:
         raise MandateViolation("no current product to record an outcome against")
+    did = None
     for t in d.get("theses", []):
         if str(t.get("symbol", "")).upper() == symbol.upper():
             t["outcome"] = outcome
+            did = t.get("decision_id") or _decision_id(symbol, t.get("as_of", ""))
             break
     else:
         raise KeyError(f"{symbol} not in current product")
     store.save_current(d, archive=False)
-    store.append_journal({"event": "outcome", "symbol": symbol.upper(),
-                          "at": now_iso, "outcome": outcome})
+    ev = {"event": "outcome", "symbol": symbol.upper(), "at": now_iso, "outcome": outcome}
+    if did:
+        ev["decision_id"] = did
+    store.append_journal(ev)
 
 
 def recent_journal(n: int = 20) -> list:
