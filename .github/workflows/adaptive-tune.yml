@@ -34,11 +34,14 @@ jobs:
         env:
           LEDGER_TOKEN: ${{ secrets.LEDGER_TOKEN }}
         run: |
-          if [ -z "$LEDGER_TOKEN" ]; then
+          # Strip any stray whitespace/newline a pasted secret may carry — a
+          # trailing \n breaks the clone URL ("credential url cannot be parsed").
+          TOKEN="$(printf '%s' "$LEDGER_TOKEN" | tr -d '[:space:]')"
+          if [ -z "$TOKEN" ]; then
             echo "LEDGER_TOKEN secret not set — skipping (see workflow header)."; exit 0
           fi
           git clone --depth 1 \
-            "https://x-access-token:${LEDGER_TOKEN}@github.com/aye5788/agentic-trader-ledger.git" _ledger \
+            "https://x-access-token:${TOKEN}@github.com/aye5788/agentic-trader-ledger.git" _ledger \
             || { echo "ledger mirror clone failed (token/access?) — skipping."; exit 0; }
           mkdir -p research_store/prices research_store
           cp _ledger/prices/closes.parquet research_store/prices/ 2>/dev/null || true
