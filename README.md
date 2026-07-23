@@ -88,6 +88,17 @@ python scripts/schwab_auth.py     # prints a URL; log in, paste the redirected U
 The login is headless-friendly (no local browser server needed): you open the URL
 yourself and paste the redirect URL back — which is what makes VPS deployment viable.
 
+**Check status any time** with:
+
+```bash
+python scripts/schwab_status.py     # issued/expiry + days left + a live API call
+```
+
+Use this, **not** the `secrets/tokens.db` file date — the db is WAL-mode, so a fresh
+re-auth lands in the `-wal` sidecar and the main file's mtime lags (it can read as a
+week old while the token is minutes old). `schwab_status.py` checkpoints the WAL and
+reports the real issue time plus a live pass/fail.
+
 ### Re-auth: which method, and the 30-second window
 
 Schwab's authorization **code expires in ~30 seconds** and is single-use, so how
