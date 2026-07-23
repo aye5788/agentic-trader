@@ -193,6 +193,15 @@ def main():
     inc_idx = int(np.argmin(np.abs(np.array(GRID) - incumbent)))
     rec = adaptive.recommend(np.array(GRID), pm, pc, inc_idx, confidence=0.9)
     gap = adaptive.oos_gap(tr_mean, ho_mean, rec["recommended_idx"])
+    best_idx = int(np.argmax(pm))   # the posterior's favourite (may be the incumbent itself)
+
+    if rec["moved"]:
+        rationale = f"moved to {rec['recommended_value']} (p_better={rec['p_better']:.2f} >= 0.90)"
+    elif best_idx == inc_idx:
+        rationale = f"incumbent {incumbent} is the posterior peak — retained"
+    else:
+        rationale = (f"incumbent {incumbent} retained — challenger {GRID[best_idx]} leads but "
+                     f"only p_better={rec['p_better']:.2f} < 0.90")
 
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     art = {
@@ -207,9 +216,7 @@ def main():
             "survivorship": "biased",
         },
         "oos_gap": round(gap, 4),
-        "rationale": (f"moved to {rec['recommended_value']} (p={rec['p_better']:.2f})"
-                      if rec["moved"] else
-                      f"incumbent {incumbent} retained (best challenger p={rec['p_better']:.2f} < 0.90)"),
+        "rationale": rationale,
         "provenance": (f"adaptive layer {now[:10]} from replay_n={int(tr_cnt.sum())} "
                        f"live_n={int(live_cnt.sum())}; incumbent was {incumbent}"),
     }
