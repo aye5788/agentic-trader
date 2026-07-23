@@ -8,6 +8,16 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-23 — Adaptive-input layer (dial #1: stop_atr_mult)
+
+Off-box weekly learner (GitHub Actions) proposes a bounded stop_atr_mult from
+replayed + live outcomes. It NEVER applies. To act on a proposal:
+`python scripts/promote_proposal.py` prints the exact strategy.local.toml stanza;
+paste it to accept. Proposals live in research_store/adaptive/proposals/ (mirror-
+backed). Spec: docs/superpowers/specs/2026-07-23-adaptive-input-layer-design.md
+
+---
+
 ## 2026-07-20 — Piece 2 concentration cap: backtested, then ABANDONED (fails live 10% cap)
 
 Executed the Phase-1 build+backtest plan and merged it to main (`27e395d`).
