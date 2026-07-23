@@ -76,16 +76,53 @@ def _load_proposal() -> dict | None:
 
 
 def _review(prop: dict) -> None:
-    print(f"proposal for {prop['knob']} generated {prop['generated_at']}")
-    print(f"  incumbent={prop['incumbent']}  recommended={prop['recommended']}  "
-          f"moved={prop['moved']}  p_better={prop['p_better']}  oos_gap={prop['oos_gap']}")
-    print(f"  evidence: {prop['evidence']}")
-    print(f"  rationale: {prop['rationale']}")
-    if prop["moved"]:
-        print("\nRecommends a MOVE. To apply your decision:")
-        print("  python scripts/promote_proposal.py --apply")
+    """Plain-English review — no jargon. `--raw` dumps the underlying numbers."""
+    inc = prop["incumbent"]
+    rec = prop["recommended"]
+    moved = prop["moved"]
+    ev = prop.get("evidence", {})
+    replay_n = ev.get("replay_n", 0)
+    live_n = ev.get("live_n", 0)
+    names = ev.get("effective_candidates", "?")
+    overfit_ok = prop.get("oos_gap", 0.0) <= 0.10
+    date = str(prop.get("generated_at", ""))[:10]
+
+    print(f"Stop-loss width check — {date}")
+    print("(how far below your entry the stop sits, in units of the stock's own daily swing)")
+    print()
+
+    if not moved:
+        print(f"  VERDICT: Keep your current setting ({inc}). No change needed.")
+        print()
+        print(f"  The system replayed {replay_n:,} past trades at tighter and wider stops,")
+        print(f"  and your current {inc} came out best — so there's nothing to change.")
     else:
-        print("\nNo change recommended — nothing to apply.")
+        direction = "WIDER" if rec > inc else "TIGHTER"
+        conf = round(float(prop.get("p_better", 0)) * 100)
+        print(f"  VERDICT: Consider moving your stop  {inc} → {rec}  ({direction}).")
+        print()
+        print(f"  Across {replay_n:,} replayed past trades, {rec} scored better than your current")
+        print(f"  {inc} — clearing the {conf}% confidence the system needs before it suggests a change.")
+
+    print()
+    print("  How much to trust this:")
+    live_note = ("none from your live trading yet — this is all historical simulation"
+                 if not live_n else f"{live_n} from your own real trades so far")
+    print(f"    • Evidence base : {replay_n:,} simulated trades ({live_note})")
+    print(f"    • Overfitting   : {'looks solid — held up on unseen data' if overfit_ok else 'CAUTION — may be too good to be true on unseen data'}")
+    print(f"    • Coverage      : {names} of your names, today's survivors only")
+    print("                      (that slightly favours tighter stops, so trust 'wider' more than 'tighter')")
+    print()
+
+    if not moved:
+        print("  → Nothing to do.")
+    else:
+        if rec < inc:
+            print("  ⚠ Note: this TIGHTENS the stop — the direction the biased data leans anyway,")
+            print("    so be extra skeptical unless real live trades back it up.")
+            print()
+        print("  If you agree:  python scripts/promote_proposal.py --apply")
+        print("  If not:        do nothing (it re-checks next week).")
 
 
 def main() -> None:
@@ -94,7 +131,13 @@ def main() -> None:
                     help="apply the local proposal's recommended value (only if it moved)")
     ap.add_argument("--set", type=float, metavar="VALUE", default=None,
                     help="apply a specific approved stop_atr_mult, e.g. --set 3.0")
+    ap.add_argument("--raw", action="store_true", help="print the raw proposal JSON (all numbers)")
     args = ap.parse_args()
+
+    if args.raw:
+        prop = _load_proposal()
+        print(json.dumps(prop, indent=2) if prop else f"no proposal found: {PROPOSAL}")
+        return
 
     if args.set is not None:
         today = dt.date.today().isoformat()
