@@ -1,9 +1,21 @@
 """Adaptive tuner for stop_atr_mult — the off-box weekly payload.
 
-Builds per-candidate realized-R evidence by replaying PIT-pool entries under each
-grid multiple (walk-forward: most recent fold held out for the overfit gap), folds
+Builds per-candidate realized-R evidence by replaying entries under each grid
+multiple (walk-forward: most recent fold held out for the overfit gap), folds
 in live stop-outs from the ledger, runs the Bayesian estimator, and writes a
 PROPOSAL. Never promotes, never trades (spec §3, §8).
+
+⚠️ Survivorship bias, by design, not oversight: entries are replayed over
+research_store/prices/{closes,highs,lows}.parquet, which fetch_prices.py
+populates from config/universe.csv — TODAY'S ~150-name LIVE universe, not the
+816-name survivorship-free PIT pool (config/pit_pool.csv, used by
+scripts/backtest_pit.py). The true PIT pool has close + dollar-volume only
+(Alpaca IEX) — no intraday high/low — so a stop-touch replay cannot run on it.
+This replay is therefore a PRIOR built on clean-but-survivorship-biased data;
+the live stop-outs folded in via `ledger` (once populated) are the
+survivorship-free correction the posterior leans on over time. See
+`evidence`/`survivorship` fields in the written artifact for a machine-visible
+disclosure of this on every run.
 
     python scripts/tune_stop.py [--selftest]
 
@@ -48,8 +60,9 @@ def build_samples(entries, panels, grid, tm):
 
 
 def generate_entries(panels, pool_tickers, tm, portfolio, fold_days=252):
-    """Reconstruct historical entries over the PIT pool: at each weekly rebalance
-    date (regime-on dates only — production holds cash otherwise), the book-only
+    """Reconstruct historical entries over the CURRENT ~150-name live universe
+    (survivorship-biased — see module docstring): at each weekly rebalance date
+    (regime-on dates only — production holds cash otherwise), the book-only
     names momentum.select would have bought, their entry close, momentum's own
     trailing sigma (converted to dollar risk-per-share), and the forward OHLC
     window. Reuses the SAME pure signal + selection the live loop uses
@@ -58,8 +71,18 @@ def generate_entries(panels, pool_tickers, tm, portfolio, fold_days=252):
     (stop = entry - m*frac_sigma*entry; see build_samples's dollar-sigma stop).
 
     `pool_tickers` should already be restricted to the single-name candidate
-    pool (ETF sleeve + SPY excluded) that exist in the price panel — mirrors
-    scripts/backtest_pit.py's candidate construction.
+    pool (ETF sleeve + SPY excluded) that exist in the price panel. NOTE: this
+    is NOT the same universe as scripts/backtest_pit.py, which ranks the
+    816-name survivorship-free pool (pool_closes/pool_dvol, no highs/lows);
+    this replay is confined to whatever of pit_pool.csv survives into today's
+    closes/highs/lows panels — i.e. effectively today's live ~150 names.
+
+    Caveat — stateless selection: each rebalance calls momentum.select with an
+    empty `held` set, so this does not model production's stateful band
+    hysteresis. A name that stays durably top-ranked across several weekly
+    dates yields multiple overlapping (correlated) entries here rather than
+    one independent holding period — a known evidence-correlation
+    simplification, not a production behavior.
 
     Returns list[dict] with keys sym, entry_price, sigma, fwd_highs, fwd_lows,
     fwd_closes, entry_date (ISO). See momentum.compute/select for the ranking."""
@@ -114,10 +137,14 @@ def _load_panels():
 
 def _pool_candidates(closes):
     """Single-name candidate pool: pit_pool.csv tickers present in the price
-    panel, minus the ETF sleeve and the SPY regime proxy — mirrors
-    scripts/backtest_pit.py's candidate construction so the tuner ranks the
-    same universe the PIT backtest (and, restricted to today's 150, the live
-    slow loop) does."""
+    panel, minus the ETF sleeve and the SPY regime proxy. NOTE on fidelity:
+    `closes` here is research_store/prices/closes.parquet, built from today's
+    live config/universe.csv (~150 names), NOT the 816-name PIT pool that
+    scripts/backtest_pit.py ranks — so despite starting from pit_pool.csv,
+    the `t in closes.columns` filter collapses this to (a subset of) today's
+    live universe. Ticker-exclusion logic (ETF sleeve + SPY) is unaffected
+    and correct; only the "mirrors the PIT backtest's universe" framing was
+    wrong and has been removed."""
     import pandas as pd
     pool = pd.read_csv(REPO / "config" / "pit_pool.csv")["ticker"].tolist()
     etfs = set(pd.read_csv(REPO / "config" / "etf_universe.csv")["ticker"])
@@ -170,7 +197,12 @@ def main():
         "incumbent": INCUMBENT, "recommended": rec["recommended_value"],
         "moved": rec["moved"], "p_better": round(rec["p_better"], 4), "band": list(BAND),
         "grid": GRID, "posterior_mean": [round(float(x), 4) for x in pm],
-        "evidence": {"replay_n": int(tr_cnt.sum()), "live_n": int(live_cnt.sum())},
+        "evidence": {
+            "replay_n": int(tr_cnt.sum()), "live_n": int(live_cnt.sum()),
+            "candidate_universe": "live-150 (config/universe.csv, survivorship-biased)",
+            "effective_candidates": len({e["sym"] for e in entries}),
+            "survivorship": "biased",
+        },
         "oos_gap": round(gap, 4),
         "rationale": (f"moved to {rec['recommended_value']} (p={rec['p_better']:.2f})"
                       if rec["moved"] else
