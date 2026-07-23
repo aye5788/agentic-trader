@@ -1,20 +1,32 @@
-"""Human-in-the-loop promotion helper for adaptive proposals.
+"""Human-in-the-loop promotion for adaptive proposals — review, then apply.
 
-Reads a proposal and prints the exact config/strategy.local.toml stanza to paste
-to ACCEPT it (propose-not-apply, spec §8). Never edits config itself — promotion
-is a deliberate human act. Flags a proposal that recommends a move but hasn't been
-promoted.
+Propose-not-apply (spec §8): the off-box tuner only ever writes a PROPOSAL. This
+tool is where a human turns a proposal into a live config value — but only by
+running it. Nothing here auto-applies without you.
 
-    python scripts/promote_proposal.py [--selftest]
+    python scripts/promote_proposal.py            # review the local proposal
+    python scripts/promote_proposal.py --apply     # apply the proposal's recommended value
+                                                   #   (only if it recommends a move)
+    python scripts/promote_proposal.py --set 3.0   # apply a specific value you approved
+                                                   #   (use when you reviewed the CI run)
+
+--apply / --set write config/strategy.adaptive.toml (machine-owned, git-ignored),
+which strategy.load() deep-merges UNDER your strategy.local.toml — so a hand edit
+always overrides the learner. Every apply is band-guarded [1.5, 3.5], provenance-
+stamped, and journalled to the ledger. Revert with `--set 2.5` or delete the file.
 """
 from __future__ import annotations
 
+import argparse
+import datetime as dt
 import json
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 PROPOSAL = REPO / "research_store" / "adaptive" / "proposals" / "stop_atr_mult.json"
+ADAPTIVE_TOML = REPO / "config" / "strategy.adaptive.toml"
+BAND = (1.5, 3.5)
 
 
 def pending_line(proposal: dict) -> str:
@@ -24,21 +36,88 @@ def pending_line(proposal: dict) -> str:
             f"stop_atr_mult = {p['recommended']}")
 
 
-def main():
-    if not PROPOSAL.exists():
-        print("no proposal found:", PROPOSAL)
-        return
-    prop = json.loads(PROPOSAL.read_text())
+def _journal_apply(value: float, provenance: str, now_iso: str) -> None:
+    """Best-effort audit trail into the ledger. Never blocks the apply."""
+    try:
+        sys.path.insert(0, str(REPO / "src"))
+        from research_store.store import append_journal
+        append_journal({
+            "event": "adaptive_apply",
+            "at": now_iso,
+            "knob": "trade_management.stop_atr_mult",
+            "value": value,
+            "provenance": provenance,
+        })
+    except Exception as e:  # noqa: BLE001 — journaling must never fail the apply
+        print(f"  (note: journal append skipped — {type(e).__name__}: {e})")
+
+
+def apply_value(value: float, provenance: str) -> None:
+    value = float(value)
+    if not (BAND[0] <= value <= BAND[1]):
+        raise SystemExit(f"refusing to apply {value}: outside band {BAND}")
+    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ADAPTIVE_TOML.write_text(
+        "# AUTO-WRITTEN by scripts/promote_proposal.py — do not hand-edit (overwritten\n"
+        "# on the next promotion). strategy.local.toml still overrides this. Revert:\n"
+        "# `python scripts/promote_proposal.py --set 2.5` or delete this file.\n"
+        f"# {provenance}\n"
+        f"# applied {now}\n"
+        "[trade_management]\n"
+        f"stop_atr_mult = {value}\n"
+    )
+    _journal_apply(value, provenance, now)
+    print(f"✅ applied stop_atr_mult = {value}  ->  {ADAPTIVE_TOML.relative_to(REPO)}")
+    print("   effective on the next slow-loop rebuild. Revert: --set 2.5 or delete the file.")
+
+
+def _load_proposal() -> dict | None:
+    return json.loads(PROPOSAL.read_text()) if PROPOSAL.exists() else None
+
+
+def _review(prop: dict) -> None:
     print(f"proposal for {prop['knob']} generated {prop['generated_at']}")
     print(f"  incumbent={prop['incumbent']}  recommended={prop['recommended']}  "
           f"moved={prop['moved']}  p_better={prop['p_better']}  oos_gap={prop['oos_gap']}")
     print(f"  evidence: {prop['evidence']}")
     print(f"  rationale: {prop['rationale']}")
     if prop["moved"]:
-        print("\nTo ACCEPT, append to config/strategy.local.toml:\n")
-        print(pending_line(prop))
+        print("\nRecommends a MOVE. To apply your decision:")
+        print("  python scripts/promote_proposal.py --apply")
     else:
-        print("\nNo change recommended — nothing to promote.")
+        print("\nNo change recommended — nothing to apply.")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Review or apply an adaptive proposal.")
+    ap.add_argument("--apply", action="store_true",
+                    help="apply the local proposal's recommended value (only if it moved)")
+    ap.add_argument("--set", type=float, metavar="VALUE", default=None,
+                    help="apply a specific approved stop_atr_mult, e.g. --set 3.0")
+    args = ap.parse_args()
+
+    if args.set is not None:
+        today = dt.date.today().isoformat()
+        apply_value(args.set, provenance=f"manual --set {args.set} on {today}")
+        return
+
+    prop = _load_proposal()
+
+    if args.apply:
+        if prop is None:
+            raise SystemExit(
+                "no local proposal file — review the Actions run and apply with: "
+                "python scripts/promote_proposal.py --set VALUE")
+        if not prop.get("moved"):
+            print(f"proposal recommends NO change ({prop.get('rationale', '')}). Nothing to apply.")
+            return
+        apply_value(prop["recommended"], provenance=prop.get("provenance", "adaptive proposal"))
+        return
+
+    if prop is None:
+        print("no proposal found:", PROPOSAL)
+        return
+    _review(prop)
 
 
 def _selftest() -> None:
@@ -48,7 +127,13 @@ def _selftest() -> None:
     assert "stop_atr_mult = 3.0" in line, line
     assert "[trade_management]" in line, line
     assert line.startswith("# adaptive layer"), line
-    print("selftest OK: pending_line")
+    # band guard must refuse an out-of-band apply
+    try:
+        apply_value(9.9, "selftest")
+        raise AssertionError("apply_value should have refused 9.9")
+    except SystemExit:
+        pass
+    print("selftest OK: pending_line + band guard")
 
 
 if __name__ == "__main__":

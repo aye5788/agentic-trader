@@ -6,10 +6,15 @@ rules, and the regime floor. TOML → human-editable with comments, read via std
 `tomllib` (no dependency). The slow/fast loops load this instead of hard-coding
 parameters, so tuning the strategy is a config edit, not a code change.
 
-Box-local overrides: config/strategy.local.toml (git-ignored) is deep-merged
-over the base config when present. The committed strategy.toml ships SAFE
-(live_approved=false); arming a box for live trading is a local-override act,
-like installing credentials — it never travels through git.
+Override layers (deep-merged, low → high precedence):
+  1. config/strategy.toml          — committed base (ships SAFE, live_approved=false)
+  2. config/strategy.adaptive.toml — machine-written by the adaptive layer's
+                                     promote step (scripts/promote_proposal.py
+                                     --apply/--set); git-ignored, box-local.
+  3. config/strategy.local.toml    — box-local / human override; git-ignored.
+The human's local override is highest, so it always wins over the learner —
+arming a box for live trading, or pinning a knob by hand, is a local-override act
+that never travels through git.
 """
 try:
     import tomllib  # stdlib, Python 3.11+
@@ -19,6 +24,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PATH = REPO_ROOT / "config" / "strategy.toml"
+ADAPTIVE_PATH = REPO_ROOT / "config" / "strategy.adaptive.toml"
 LOCAL_PATH = REPO_ROOT / "config" / "strategy.local.toml"
 
 
@@ -32,13 +38,17 @@ def _merge(base: dict, override: dict) -> dict:
 
 
 def load(path: Path = DEFAULT_PATH) -> dict:
-    """Parse the strategy config, deep-merging the git-ignored local override
-    (config/strategy.local.toml) over it when one exists."""
+    """Parse the strategy config, deep-merging overrides when present. Precedence
+    low → high: base (strategy.toml) < adaptive (strategy.adaptive.toml, learner-
+    written) < local (strategy.local.toml, human). The human local override is
+    applied last so it always wins over the learner."""
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
-    if path == DEFAULT_PATH and LOCAL_PATH.exists():
-        with open(LOCAL_PATH, "rb") as f:
-            _merge(cfg, tomllib.load(f))
+    if path == DEFAULT_PATH:
+        for override in (ADAPTIVE_PATH, LOCAL_PATH):   # adaptive first (lower), then local (wins)
+            if override.exists():
+                with open(override, "rb") as f:
+                    _merge(cfg, tomllib.load(f))
     return cfg
 
 
