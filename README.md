@@ -88,6 +88,43 @@ python scripts/schwab_auth.py     # prints a URL; log in, paste the redirected U
 The login is headless-friendly (no local browser server needed): you open the URL
 yourself and paste the redirect URL back — which is what makes VPS deployment viable.
 
+### Re-auth: which method, and the 30-second window
+
+Schwab's authorization **code expires in ~30 seconds** and is single-use, so how
+you paste matters:
+
+- **A real SSH terminal (most reliable):** run `.venv/bin/python
+  scripts/schwab_auth.py`. It blocks at `paste the address bar url here:` — paste
+  the FULL redirect URL (`https://127.0.0.1:8182/?code=…&session=…`, everything,
+  not just the code) right at that prompt. Same-process, so the whole 30s budget
+  goes to the browser→paste hop.
+- **Claude Code `!` (two-step, race-prone):** `schwab_auth.py`'s `input()` EOFs
+  under `!`, so use the split flow — `! .venv/bin/python scripts/schwab_auth.py`
+  prints the URL (ignore the trailing `EOFError`), then
+  `! .venv/bin/python scripts/schwab_finish_auth.py "<full redirect url>"`. The
+  chat round-trip often blows the 30s window; prefer the SSH method.
+
+### Troubleshooting `invalid_grant` ("Authorization code is invalid, expired or revoked")
+
+This is Schwab rejecting the **code**, not your credentials (a bad secret returns
+`invalid_client`). The scripts + schwabdev are correct; the exchange sends the
+matching `redirect_uri` and Basic key:secret auth. When it fails on a fresh code,
+check in order:
+
+1. **Complete the FULL consent** — Schwab's flow is login → *select account(s) to
+   link* → *final Allow*. The `127.0.0.1:8182` redirect is only valid if you
+   reached it via that last button; grabbing the URL early yields a dead code.
+2. **Beat the 30s window** — use the SSH-interactive method above.
+3. **Clock** — `timedatectl` must show `System clock synchronized: yes` (skew
+   makes every code look expired). Ours is NTP-synced.
+4. **Config** — `SCHWAB_APP_KEY` must equal the authorize URL's `client_id`, and
+   `SCHWAB_CALLBACK_URL` must be exactly `https://127.0.0.1:8182` (matches the app
+   registration). Both verified correct as of 2026-07-23.
+5. **Schwab-side** — if 1–4 are clean and it still fails on fresh codes, it's
+   Schwab (often paired with a "we can't log you in right now" page). Wait
+   30–60 min, confirm the app is **"Ready For Use"** at developer.schwab.com, and
+   as a last resort regenerate the app secret there and update `.env`.
+
 ## Scope the data
 
 ```bash
