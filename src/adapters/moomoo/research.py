@@ -113,7 +113,6 @@ def _unwrap(out):
 
 def capital_flow_daily(ctx, ticker):
     """Daily capital-flow records for one US name (newest ~1yr). [] on any failure."""
-    from moomoo import PeriodType
     try:
         ret, data = _unwrap(ctx.get_capital_flow(_us(ticker), period_type=PeriodType.DAY))
         if ret != RET_OK or data is None or not len(data):

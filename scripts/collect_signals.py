@@ -78,10 +78,13 @@ def main():
             event["gaps"].append("OpenD unreachable or returned nothing")
         else:
             for sym, did in held:
-                panel, gaps = _panel_for(ctx, sym, overview, snaps)
-                panel["decision_id"] = did
-                event["names"][sym] = panel
-                event["gaps"].extend(gaps)
+                try:
+                    panel, gaps = _panel_for(ctx, sym, overview, snaps)
+                    panel["decision_id"] = did
+                    event["names"][sym] = panel
+                    event["gaps"].extend(gaps)
+                except Exception as e:  # one bad name must not lose the rest of the book
+                    event["gaps"].append(f"{sym}: panel error: {type(e).__name__}: {e}")
     except Exception as e:  # never crash the cycle
         event["opend_ok"] = False
         event["gaps"].append(f"collector error: {type(e).__name__}: {e}")
