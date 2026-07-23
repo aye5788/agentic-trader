@@ -24,6 +24,7 @@ Spec: docs/superpowers/specs/2026-07-23-adaptive-input-layer-design.md §6
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -37,7 +38,6 @@ import adaptive                                   # noqa: E402
 
 GRID = [1.5, 2.0, 2.5, 3.0, 3.5]
 BAND = (1.5, 3.5)
-INCUMBENT = 2.5
 PROPOSAL = REPO / "research_store" / "adaptive" / "proposals" / "stop_atr_mult.json"
 
 
@@ -54,7 +54,8 @@ def build_samples(entries, panels, grid, tm):
             target = e["entry_price"] + target_mult * (e["entry_price"] - stop)
             r = replay_position(e["entry_price"], stop, target,
                                 e["fwd_highs"], e["fwd_lows"], e["fwd_closes"], horizon)
-            sums[gi] += r["realized_r"]; counts[gi] += 1
+            if not math.isnan(r["realized_r"]):
+                sums[gi] += r["realized_r"]; counts[gi] += 1
     mean_r = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
     return mean_r, counts
 
@@ -100,8 +101,9 @@ def generate_entries(panels, pool_tickers, tm, portfolio, fold_days=252):
 
     entries = []
     dates = list(closes.index)
-    # weekly cadence: step 5 trading days; leave a forward window for replay
-    for di in range(fold_days, len(dates) - 5, 5):
+    # weekly cadence: step 5 trading days; leave a full horizon+5 forward
+    # window for replay so every generated entry has enough forward data.
+    for di in range(fold_days, len(dates) - (horizon + 5), 5):
         asof = dates[di]
         if not momentum.regime_on(spy, asof, 50):
             continue          # production holds cash on regime-off: no entries
@@ -187,14 +189,15 @@ def main():
         np.array(GRID), tot_mean, tot_cnt, noise_var=1.0,
         prior_mean=float(np.average(tot_mean, weights=tot_cnt)) if tot_cnt.sum() else 0.0,
         length_scale=0.6, prior_var=1.0)
-    inc_idx = GRID.index(INCUMBENT)
+    incumbent = float(tm["stop_atr_mult"])
+    inc_idx = int(np.argmin(np.abs(np.array(GRID) - incumbent)))
     rec = adaptive.recommend(np.array(GRID), pm, pc, inc_idx, confidence=0.9)
     gap = adaptive.oos_gap(tr_mean, ho_mean, rec["recommended_idx"])
 
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     art = {
         "knob": "trade_management.stop_atr_mult", "generated_at": now,
-        "incumbent": INCUMBENT, "recommended": rec["recommended_value"],
+        "incumbent": incumbent, "recommended": rec["recommended_value"],
         "moved": rec["moved"], "p_better": round(rec["p_better"], 4), "band": list(BAND),
         "grid": GRID, "posterior_mean": [round(float(x), 4) for x in pm],
         "evidence": {
@@ -206,11 +209,12 @@ def main():
         "oos_gap": round(gap, 4),
         "rationale": (f"moved to {rec['recommended_value']} (p={rec['p_better']:.2f})"
                       if rec["moved"] else
-                      f"incumbent {INCUMBENT} retained (best challenger p={rec['p_better']:.2f} < 0.90)"),
+                      f"incumbent {incumbent} retained (best challenger p={rec['p_better']:.2f} < 0.90)"),
         "provenance": (f"adaptive layer {now[:10]} from replay_n={int(tr_cnt.sum())} "
-                       f"live_n={int(live_cnt.sum())}; incumbent was {INCUMBENT}"),
+                       f"live_n={int(live_cnt.sum())}; incumbent was {incumbent}"),
     }
-    assert BAND[0] <= art["recommended"] <= BAND[1], art     # hard band guard
+    if not (BAND[0] <= art["recommended"] <= BAND[1]):
+        raise ValueError(f"recommended {art['recommended']} outside band {BAND}: {art}")
     PROPOSAL.parent.mkdir(parents=True, exist_ok=True)
     PROPOSAL.write_text(json.dumps(art, indent=2))
     print(f"wrote proposal -> {PROPOSAL}\n  {art['rationale']}")
