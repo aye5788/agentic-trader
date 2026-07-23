@@ -30,11 +30,17 @@ if [ ! -d "$MIRROR/.git" ]; then
 fi
 
 # Copy only the non-regenerable files.
-mkdir -p "$MIRROR/history" "$MIRROR/archive"
+mkdir -p "$MIRROR/history" "$MIRROR/archive" "$MIRROR/prices"
 cp -f research_store/journal.jsonl        "$MIRROR/journal.jsonl"        2>/dev/null || true
 cp -f research_store/history/equity.jsonl "$MIRROR/history/equity.jsonl" 2>/dev/null || true
 cp -f research_store/flows.jsonl          "$MIRROR/flows.jsonl"          2>/dev/null || true
 cp -f research_store/archive/*.json       "$MIRROR/archive/"             2>/dev/null || true
+
+# OHLC price cache — the off-box adaptive tuner (GitHub Actions) reads these from
+# the mirror; they can't be re-fetched off-box (no Schwab creds there). A few MB.
+cp -f research_store/prices/closes.parquet "$MIRROR/prices/closes.parquet" 2>/dev/null || true
+cp -f research_store/prices/highs.parquet  "$MIRROR/prices/highs.parquet"  2>/dev/null || true
+cp -f research_store/prices/lows.parquet   "$MIRROR/prices/lows.parquet"   2>/dev/null || true
 
 cd "$MIRROR" || fail "cannot cd $MIRROR"
 git add -A

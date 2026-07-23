@@ -1,0 +1,79 @@
+name: adaptive-tune
+
+# Off-box weekly learner for the adaptive-input layer (dial #1: stop_atr_mult).
+# Runs the tuner on GitHub's runners (never the droplet), reads price + ledger
+# data from the private ledger mirror, and surfaces a bounded PROPOSAL in the run
+# summary + as a downloadable artifact. It NEVER trades and NEVER writes config —
+# promotion is a deliberate human step (see scripts/promote_proposal.py).
+#
+# Requires repo secret LEDGER_TOKEN: a fine-grained PAT with READ (Contents) on
+# aye5788/agentic-trader-ledger. No write scope needed — nothing is committed back.
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"        # Mondays 08:00 UTC — clear of the weekday market-hours pileup
+  workflow_dispatch: {}         # manual runs allowed from the Actions tab
+
+permissions:
+  contents: read
+
+jobs:
+  tune-stop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install pandas pyarrow numpy
+
+      - name: Fetch OHLC + journal from the ledger mirror
+        env:
+          LEDGER_TOKEN: ${{ secrets.LEDGER_TOKEN }}
+        run: |
+          if [ -z "$LEDGER_TOKEN" ]; then
+            echo "LEDGER_TOKEN secret not set — skipping (see workflow header)."; exit 0
+          fi
+          git clone --depth 1 \
+            "https://x-access-token:${LEDGER_TOKEN}@github.com/aye5788/agentic-trader-ledger.git" _ledger \
+            || { echo "ledger mirror clone failed (token/access?) — skipping."; exit 0; }
+          mkdir -p research_store/prices research_store
+          cp _ledger/prices/closes.parquet research_store/prices/ 2>/dev/null || true
+          cp _ledger/prices/highs.parquet  research_store/prices/ 2>/dev/null || true
+          cp _ledger/prices/lows.parquet   research_store/prices/ 2>/dev/null || true
+          cp _ledger/journal.jsonl         research_store/journal.jsonl 2>/dev/null || true
+
+      - name: Run the tuner
+        run: |
+          if [ ! -f research_store/prices/highs.parquet ]; then
+            echo "## Adaptive tune — skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "No OHLC cache in the mirror yet. On the droplet run \`fetch_prices.py --force\`; the nightly backup then ships highs/lows to the mirror." >> "$GITHUB_STEP_SUMMARY"
+            echo "no OHLC in mirror — nothing to tune this run."
+            exit 0
+          fi
+          python scripts/tune_stop.py
+
+      - name: Surface the proposal (run summary + log)
+        run: |
+          P=research_store/adaptive/proposals/stop_atr_mult.json
+          if [ ! -f "$P" ]; then
+            echo "No proposal produced this run." >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          {
+            echo "## Adaptive stop_atr_mult proposal"
+            echo '```'
+            python scripts/promote_proposal.py
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python scripts/promote_proposal.py
+
+      - name: Upload the proposal artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stop_atr_mult-proposal
+          path: research_store/adaptive/proposals/stop_atr_mult.json
+          if-no-files-found: ignore
