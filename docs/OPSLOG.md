@@ -8,6 +8,20 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-23 — Docs audit: moomoo/FRED/finnhub + runtimes brought current
+
+Closed real doc gaps that had been causing repeated rediscovery: `CLAUDE.md` and
+`DESIGN.md` Layer-1 omitted the **moomoo** and **FRED** adapters entirely, marked
+FRED "planned" (it's built), and implied finnhub was the analyst-ranking source
+(it's actually event-calendar-only, not retired). Added: the **two-runtime split**
+(moomoo → system `/usr/bin/python3` 3.10, not `.venv`), the shared **OpenD**
+gateway, the **sibling repos** (`moomoo-vol-desk`, `moomoo-data-collector`,
+`time-spread-lab`), and the **adaptive-input layer**. New `docs/DATA_SOURCES.md`
+records the **live-verified moomoo surface** (capital flow, short interest,
+put/call+IV overview, insider, earnings-price-move, institutional) with history
+depths — key finding: moomoo history is **shallow (~1–2 yr)**, so those signals are
+**forward-logged, not backtested**.
+
 ## 2026-07-23 — Adaptive-input layer (dial #1: stop_atr_mult)
 
 Off-box weekly learner (GitHub Actions) proposes a bounded stop_atr_mult from

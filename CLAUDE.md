@@ -20,7 +20,10 @@ in `docs/DESIGN.md`.
    - **Schwab** is data-only *by credential*: its Accounts & Trading API returns
      HTTP 401. It structurally cannot trade. Do not attempt to route orders
      through it.
-   - **Finnhub** and **Alpaca** are read-only data providers. No trading surface.
+   - **Finnhub**, **Alpaca**, **moomoo**, and **FRED** are read-only data
+     providers here. No trading surface is used. (moomoo's API *can* trade, but
+     this repo uses only its **data quote channel**; `unlock_trade` is never
+     scripted here — see `docs/DATA_SOURCES.md`.)
 3. **This is LIVE money.** The Agentic account holds real funds (currently ~$20,
    demonstration scale). Real orders move real money. Prefer the
    review → place pattern; respect any human-approval / guardrail config.
@@ -31,14 +34,56 @@ in `docs/DESIGN.md`.
 
 ## Data sources and their roles
 
-Full scope + verified availability is in `docs/DESIGN.md` (Layer 1). Summary:
+Full scope + **verified moomoo surface** is in [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md);
+architecture in `docs/DESIGN.md` (Layer 1). Summary:
 
 | Source | Role | Notes |
 | ------ | ---- | ----- |
-| **Schwab** (`src/adapters/schwab/`) | Fundamentals, NBBO quotes, price history, options+greeks, movers | Market Data only. OAuth, **refresh token expires every 7 days** → weekly re-auth. |
-| **Finnhub** (`src/adapters/finnhub/`) | Analyst *recommendation trends*, earnings *surprises*, 133 basic-financial metrics | Free tier. Price-target *level* and forward EPS estimates are **premium (403) — skipped**. Slow-loop only (~60 calls/min). |
-| **Alpaca** (`src/adapters/alpaca/`) | Live symbol-tagged news; screeners (movers, most-active) via MCP | Free tier. Price data is **IEX-only (not full NBBO)** → do not use it for quotes; use Schwab/RH. |
+| **Schwab** (`src/adapters/schwab/`) | PRIMARY market data: price history/OHLC, NBBO quotes, fundamentals, options+greeks, movers | OAuth, **refresh token expires every 7 days** → weekly re-auth (`scripts/schwab_auth.py`; check with `scripts/schwab_status.py`). |
+| **moomoo** (`src/adapters/moomoo/`) | Data-only via the local **OpenD** gateway. **WIRED** today only for universe maintenance (turnover, market-cap). The API ALSO serves capital-flow, short-interest, put/call+IV, insider, earnings-price-move, institutional — most **unwired**; see `docs/DATA_SOURCES.md`. | ⚠️ Runs under **system `/usr/bin/python3` (3.10)**, NOT `.venv` (3.12). OpenD on `127.0.0.1:11111`, **shared with sibling repo `moomoo-vol-desk`**. Re-pull of a known symbol = 0 quota. moomoo history is **shallow (~1–2 yr)** → forward-log, don't backtest. |
+| **Finnhub** (`src/adapters/finnhub/`) | Analyst *recommendation trends*, earnings *surprises*, basic financials. **NOT retired** — but currently consumed only by `src/event_calendar/` (earnings spine), not the ranking signal. | Free tier. Price-target *level* + forward EPS estimates are **premium (403)**. |
+| **Alpaca** (`src/adapters/alpaca/`) | Symbol-tagged news; IEX close+$-vol for the survivorship-free **PIT pool** (only free feed serving DELISTED names). | Free tier. Price is **IEX-only (not NBBO)** → don't use for quotes. |
+| **FRED** (`src/adapters/fred/`) | Macro regime indicators: VIX (`VIXCLS`), 10y-2y curve (`T10Y2Y`), HY OAS (`BAMLH0A0HYM2`). **Deep history (decades).** Confirms — does not replace — the Schwab regime gate. | Needs `FRED_API_KEY`. |
 | **Robinhood** (MCP) | **Execution** + its own fundamentals/earnings | The only execution venue. Agentic account only. |
+
+---
+
+## ⚙️ Runtimes, OpenD & sibling repos on the box  (READ — easy to get wrong)
+
+- **Two Python runtimes.** The core system runs under the repo **`.venv` (Python
+  3.12)**. The **moomoo SDK is installed ONLY in system `/usr/bin/python3`
+  (3.10)** — so anything importing `moomoo` MUST run under `/usr/bin/python3`
+  (`deploy/run_universe_refresh.sh` does this deliberately). A `.venv` script
+  **cannot** `import moomoo`.
+- **OpenD gateway.** moomoo data flows through a local **OpenD** daemon on
+  `127.0.0.1:11111` (`opend.service`), **shared** with the sibling repos — never
+  launch a second one. Data needs only the quote channel (`qot_logined: True`).
+- **Sibling repos on the SAME droplet — NOT this project, don't conflate:**
+  `~/moomoo-vol-desk` (a separate options/vol trading system with its own MCP +
+  cron; owns the OpenD login), `~/moomoo-data-collector` (15m K-line for ~3–5
+  index/vol symbols → feeds the vol-desk; **not** our signal panel),
+  `~/time-spread-lab` (resident Streamlit options app). The droplet is
+  memory-tight (~2 GB, often swapping); the heavy consumers are headless `claude`
+  runs (~500 MB each) across all these. Keep new on-box work pure-Python and off
+  the weekday market-hours pileup — prefer off-box (GitHub Actions).
+
+## Adaptive-input layer (self-tuning strategy knobs)
+
+An **off-box** background learner tunes `strategy.toml` knobs from the Decision→
+Outcome Ledger. It NEVER trades — it emits a bounded PROPOSAL a human promotes.
+- **Dial #1 (live): `stop_atr_mult`.** `scripts/tune_stop.py` (Bayesian grid +
+  smoothness prior, `src/adaptive.py`; replay via `src/stop_replay.py`) runs
+  weekly on **GitHub Actions** (`.github/workflows/adaptive-tune.yml`), reads
+  OHLC+journal from the ledger mirror, writes a proposal. Review it in the Actions
+  run; apply with `scripts/promote_proposal.py --apply` / `--set VALUE`, which
+  writes **`config/strategy.adaptive.toml`** (git-ignored) that `strategy.load()`
+  merges UNDER `strategy.local.toml` (**human always overrides the learner**).
+  Band-guarded, provenance-stamped, journalled as `adaptive_apply`.
+- **Methodology rule:** deep-history signals (price → residual momentum, from the
+  survivorship-free pool) are **backtested** dials; shallow-history signals
+  (all moomoo edges) are **forward-logged** into the ledger and validated
+  prospectively (meta-labeling) — never backtested on 1 yr. Spec:
+  `docs/superpowers/specs/2026-07-23-adaptive-input-layer-design.md`.
 
 ---
 
@@ -61,7 +106,15 @@ The operationally critical bit:
 
 ```
 src/adapters/schwab/    Schwab Market Data client + research functions
-src/adapters/finnhub/   Finnhub analyst/estimates client + research functions
+src/adapters/finnhub/   Finnhub analyst/estimates client + research (event-calendar spine)
+src/adapters/moomoo/    Data-only moomoo client via OpenD — RUNS UNDER SYSTEM
+                        /usr/bin/python3 (3.10), not .venv. research.py wired:
+                        snapshot_turnover, screen_top_marketcap, candidate_pond
+                        (universe maintenance). The moomoo API offers MUCH more
+                        (capital flow, short interest, put/call+IV, insider,
+                        earnings-price-move, institutional) — see docs/DATA_SOURCES.md.
+src/adapters/fred/      Macro regime indicators (VIX, 10y-2y, HY spread) — deep
+                        history; confirms the Schwab regime gate. Needs FRED_API_KEY.
 config/strategy.toml    CODIFIED STRATEGY — single source of truth: risk gates,
                         universe, signal, trade management, regime floor.
                         Tune the strategy HERE, not in code. `[risk]` = the store's
@@ -154,6 +207,18 @@ scripts/fast_loop.py    FAST LOOP diff core: stored targets vs. RH holdings →
                         account guardrail. NEVER places — placement is the agent's
                         review_equity_order→place_equity_order MCP step, gated by
                         the proof gate. --selftest covers the diff logic.
+src/adaptive.py         ADAPTIVE CORE — dial-agnostic Bayesian grid estimator
+                        (smoothness prior + uncertainty-gated recommendation +
+                        oos_gap). Pure. Reused by every adaptive dial.
+src/stop_replay.py      Pure stop-aware single-position replay → realized-R (models
+                        intra-week stop/target/horizon exits the backtest lacks).
+scripts/tune_stop.py    Adaptive tuner for stop_atr_mult — off-box weekly on GitHub
+                        Actions. PIT-replay + live → bounded proposal artifact.
+scripts/promote_proposal.py  Human promotion of a proposal: --apply / --set writes
+                        config/strategy.adaptive.toml (merged UNDER strategy.local.toml).
+scripts/schwab_status.py  Unambiguous Schwab-token freshness (checkpoints tokens.db
+                        WAL, prints issued/expiry + a live API check). Beats reading
+                        the tokens.db file date (WAL makes it lag).
 src/research_store/     Research Store — validated slow→fast handoff (belief +
                         journal). write_product enforces the [risk] mandate.
 src/adapters/alpaca/    Alpaca news client + get_news (data-only, no trading)
@@ -180,7 +245,11 @@ secrets/                OAuth token store (git-ignored)
 
 ## Setup / env
 
-Copy `.env.example` → `.env` and fill in credentials. Required keys:
+Copy `.env.example` → `.env` and fill in credentials. Keys:
 `SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, `SCHWAB_CALLBACK_URL`, `FINNHUB_API_KEY`,
-`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`.
-See `README.md` for the Schwab weekly-login and API-scope commands.
+`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `FRED_API_KEY`.
+- **moomoo** has **no `.env` key** — it authenticates through the running **OpenD**
+  gateway (`OpenD.xml`, gitignored, on the box); import needs `/usr/bin/python3`.
+- **GitHub Actions** (adaptive tuner) uses repo secret **`LEDGER_TOKEN`** (a
+  fine-grained PAT with *read* on the `agentic-trader-ledger` mirror).
+See `README.md` for the Schwab weekly-login/status and API-scope commands.

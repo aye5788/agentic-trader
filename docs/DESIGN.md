@@ -125,13 +125,17 @@ review_by, outcome`.
 
 ## Layer 1 — Sensing (data sources)
 
+> **Detailed per-adapter capabilities, verified history depths, and the full
+> (mostly unwired) moomoo surface live in [`DATA_SOURCES.md`](DATA_SOURCES.md).**
+
 | Source | Role | Status |
 | ------ | ---- | ------ |
-| **Schwab API** | Fundamentals, price history, options+greeks, movers, quotes (true SIP/NBBO) | ✅ connected (Market Data only) |
-| **Finnhub API** | Analyst recommendation *trends*, earnings *surprises*, 133 basic-financial metrics | ✅ connected (free tier) |
-| **Alpaca API** | News (live, free, symbol-tagged); movers/screeners via MCP | ✅ connected (news adapter, free tier) |
-| **Robinhood MCP** | Fundamentals, **earnings calendar/results**, its own screeners | available |
-| **FRED API** | Macro regime indicators (VIX, `T10Y2Y` curve, `BAMLH0A0HYM2` HY spread) + economic release calendar | planned (supplementary; cached + retry) |
+| **Schwab API** | PRIMARY: price history/OHLC, fundamentals, options+greeks, movers, quotes (SIP/NBBO) | ✅ connected (Market Data only; 7-day OAuth) |
+| **moomoo** (OpenD) | Data-only. WIRED: universe-maint (turnover, market-cap). UNWIRED but available: capital flow, short interest, put/call+IV, insider, earnings-price-move, institutional | ✅ connected. ⚠️ system `python3.10`; OpenD `:11111` shared w/ `moomoo-vol-desk`; history **shallow (~1–2yr)** → forward-log, don't backtest |
+| **FRED API** | Macro regime indicators (VIX, `T10Y2Y` curve, `BAMLH0A0HYM2` HY spread). Deep history (decades) | ✅ **built** (`src/adapters/fred/`); confirms the Schwab regime gate |
+| **Finnhub API** | Analyst recommendation *trends*, earnings *surprises*, basic financials | ✅ connected (free tier); consumed by `event_calendar` only, **not** the ranking |
+| **Alpaca API** | News (symbol-tagged); IEX close+$-vol for the survivorship-free PIT pool (dead names) | ✅ connected (free tier; IEX price only) |
+| **Robinhood MCP** | Fundamentals, **earnings calendar/results**, its own screeners; **the execution venue** | available |
 | **Web Search / Fetch** | Filings, analyst commentary, macro | available |
 | **CryptoQuant / HF** | On-chain, models/papers | available (thematic) |
 | **Airtable / Drive** | Structured research DB / store | available |
