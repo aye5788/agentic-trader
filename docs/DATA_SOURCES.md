@@ -130,11 +130,11 @@ earnings, positions, quotes via MCP tools. See `CLAUDE.md` hard rules.
 
 ---
 
-## The signal-panel plan (in design)
+## The signal-panel (BUILT)
 
-A lean, forward-logged **moomoo signal panel** stamped onto each weekly decision in
-the ledger (for later meta-labeling) is being designed — see the brainstorm in the
-adaptive-input follow-up. Candidate fields: capital-flow (super+big net, 20d),
-short interest + days-to-cover, put/call vol+OI ratio, 52wk-high proximity +
-volume_ratio (and possibly `iv_rank` as a fragility flag). Insider was dropped
-(gameable). This is *forward-collection*, not a backtested dial (per §5a).
+A lean, forward-logged **moomoo signal panel** is logged weekly to the ledger's
+`signal_panel` journal event (book-scoped, per held name) for later meta-labeling,
+written by `scripts/collect_signals.py` (runs Sunday 20:15, after the rebalance).
+Fields: `capflow_bignet_20d`, `short_pct`, `days_to_cover`, `short_pct_chg`,
+`pc_vol_ratio`, `pc_oi_ratio`, `iv_rank`, `pct_52w_high`, `volume_ratio`. This is
+*forward-collection*, not a backtested dial (per §5a).
