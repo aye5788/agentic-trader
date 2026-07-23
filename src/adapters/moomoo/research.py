@@ -1,7 +1,7 @@
 """Data-only moomoo research calls for universe maintenance."""
 import csv
 
-from moomoo import RET_OK, Market, SimpleFilter, SortDir, StockField
+from moomoo import RET_OK, Market, PeriodType, SimpleFilter, SortDir, StockField
 
 from .client import quote_ctx
 
@@ -102,6 +102,67 @@ def candidate_pond(incumbents, pit_pool_path, params, ctx=None) -> list:
         with open(pit_pool_path, newline="") as f:
             ref = [row["ticker"] for row in csv.DictReader(f)]
     return sorted(set(incumbents) | set(ref))
+
+
+def _unwrap(out):
+    """moomoo calls return (ret, data) — but some return longer tuples. Normalize."""
+    if isinstance(out, tuple):
+        return out[0], (out[1] if len(out) > 1 else None)
+    return RET_OK, out
+
+
+def capital_flow_daily(ctx, ticker):
+    """Daily capital-flow records for one US name (newest ~1yr). [] on any failure."""
+    try:
+        ret, data = _unwrap(ctx.get_capital_flow(_us(ticker), period_type=PeriodType.DAY))
+        if ret != RET_OK or data is None or not len(data):
+            return []
+        return data.to_dict("records")
+    except Exception:
+        return []
+
+
+def short_interest(ctx, ticker):
+    """Short-interest readings for one US name. [] on any failure."""
+    try:
+        ret, data = _unwrap(ctx.get_short_interest(_us(ticker)))
+        if ret != RET_OK or data is None or not len(data):
+            return []
+        return data.to_dict("records")
+    except Exception:
+        return []
+
+
+def option_overview(ctx, tickers):
+    """Batched option overview → {bare: {call/put volume+OI, iv_rank}}. {} on failure."""
+    try:
+        ret, data = _unwrap(ctx.get_option_underlying_overview([_us(t) for t in tickers]))
+        if ret != RET_OK or data is None or not len(data):
+            return {}
+        keep = ["call_volume", "put_volume", "call_open_interest",
+                "put_open_interest", "iv_rank"]
+        out = {}
+        for rec in data.to_dict("records"):
+            out[_bare(rec.get("code", ""))] = {k: rec.get(k) for k in keep}
+        return out
+    except Exception:
+        return {}
+
+
+def snapshot_fields(ctx, tickers):
+    """Batched snapshot → {bare: {last_price, highest52weeks_price, volume_ratio,
+    total_market_val}}. {} on failure."""
+    try:
+        ret, data = _unwrap(ctx.get_market_snapshot([_us(t) for t in tickers]))
+        if ret != RET_OK or data is None or not len(data):
+            return {}
+        keep = ["last_price", "highest52weeks_price", "volume_ratio", "total_market_val"]
+        out = {}
+        for rec in data.to_dict("records"):
+            out[_bare(rec.get("code", ""))] = {k: rec.get(k) for k in keep}
+        return out
+    except Exception:
+        return {}
 
 
 def _selftest() -> None:
