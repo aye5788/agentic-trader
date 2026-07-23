@@ -80,16 +80,31 @@ droplet as a lean "final stop before execution."
 Each adaptive dial carries a **posterior distribution over its best value**,
 updated as evidence (replayed + live outcomes) accumulates.
 
-- The knob's bounded band is discretized into a small grid of candidate values
-  (e.g. `stop_atr_mult ∈ {1.8, 2.0, … 3.2}`). Each grid point holds a posterior
-  over its **objective** (§6.2) — a running Normal (mean, variance) fed by samples.
+- **Representation — interpretable grid with a Bayesian smoothness prior.** The
+  knob's bounded band is discretized into a small grid of candidate values
+  (e.g. `stop_atr_mult ∈ {1.8, 2.0, … 3.2}`), each holding a posterior over its
+  **objective** (§6.2). Crucially the grid points are **not independent**: a
+  smoothness prior ties neighbours together ("the objective-vs-multiple relation is
+  a smooth, single-peaked hill"), so an outcome at 2.2 also sharpens belief about
+  2.3. This keeps the *inspectability* of a scoreboard (a human can read the
+  candidates and the leader at a glance — which the propose-and-bound governance in
+  §8 needs) while gaining the *sample efficiency* of a fitted curve — the decisive
+  property in our chronically data-starved regime, especially on the slow live side.
+  The smoothness assumption lives exactly where Bayesian methods put assumptions:
+  in the prior. (A plain *independent*-grid posterior — the simpler alternative —
+  was rejected: independence is itself an unnatural prior for a smooth problem and
+  wastes evidence; a fully-continuous Gaussian Process was rejected as harder to
+  inspect and easier to be confidently wrong when money is downstream. The
+  correlated grid is the middle path.)
 - **The recommendation rule is uncertainty-aware:** stay on the incumbent value
   unless a challenger's posterior *confidently* dominates it by a margin (Bayesian
   best-arm style). This is what makes **the uncertainty itself the activation
   gate** — the layer simply does not move a dial until the data justifies it. It is
-  correct and inert on day 1 (N=0 → flat posteriors → no move), and it "switches
+  correct and inert on day 1 (N=0 → prior-only → no move), and it "switches
   on" automatically as the posterior tightens. No hard min-N cutoff needed; the
-  posterior width *is* the gate.
+  posterior width *is* the gate. The smoothness prior makes that width **better
+  calibrated early** (evidence is pooled across neighbours, not left per-point
+  starved), so the gate fires appropriately sooner rather than staying stuck wide.
 - This dissolves the batch-vs-online question: updates are incremental (append
   samples, update sufficient statistics), and a periodic full recompute is just a
   consistency audit, not a separate mechanism.
@@ -189,6 +204,9 @@ handled later by leaning on replay as primary evidence for the signal.
 - `src/adaptive.py --selftest` — pure Bayesian estimator: known samples → expected
   posterior; the uncertainty gate holds the incumbent at N=0 and on a
   low-separation challenger; moves only when a challenger confidently dominates.
+  Smoothness prior verified: an outcome at one grid point measurably sharpens its
+  neighbours' posteriors, and neighbour uncertainty is tighter than an
+  independent-grid baseline at equal N.
 - Stop-aware replay unit-tested against a hand-built OHLC fixture (stop touched vs
   not; recovery vs not).
 - Walk-forward split correctness: a candidate is never scored on its fit window;
@@ -199,6 +217,9 @@ handled later by leaning on replay as primary evidence for the signal.
 ## 12. Decisions already made (no open questions)
 
 - **Spine = Bayesian posterior-per-knob**; uncertainty is the activation gate.
+- **Representation = interpretable grid + Bayesian smoothness prior** (correlated
+  neighbours) — the middle path between an independent scoreboard (wastes evidence)
+  and a continuous GP (harder to inspect, easier to be confidently wrong). §5.
 - **First dial = `stop_atr_mult`**; the signal is the strategic target but comes
   *after* this, reusing the substrate.
 - **Evidence = hybrid (c)** — replay-primary prior + live-correction update;
@@ -233,9 +254,9 @@ handled later by leaning on replay as primary evidence for the signal.
 2. **Stop-aware replay** — pure function: given OHLC + entry + candidate multiple →
    per-position outcome (stop touched? recovery? realized-R). Reusable by the
    backtest. Selftest on a fixture. (§6.1, §6.2)
-3. **`src/adaptive.py`** — dial-agnostic Bayesian estimator: grid posteriors,
-   incremental update, uncertainty-gated recommendation, walk-forward OOS, held-out
-   gap. Selftest. (§5, §7)
+3. **`src/adaptive.py`** — dial-agnostic Bayesian estimator: grid posteriors with a
+   smoothness prior across neighbours, incremental update, uncertainty-gated
+   recommendation, walk-forward OOS, held-out gap. Selftest. (§5, §7)
 4. **`scripts/tune_stop.py`** — wire dial #1: read ledger mirror + OHLC, run replay
    across the PIT pool + live outcomes, emit the proposal artifact with provenance.
 5. **GitHub Actions workflow** — scheduled weekly; runs step 4 off-box; commits the
