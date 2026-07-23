@@ -19,3 +19,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# local Claude Code permission overrides (personal, not for the repo)
+.claude/settings.local.json
