@@ -27,20 +27,31 @@ def _dd_2022(equity: pd.Series) -> float:
     return bt.max_drawdown(sl) if len(sl) > 1 else float("nan")
 
 
+SECTORS = ["XLE", "XLF", "XLK", "XLV", "XLI", "XLP", "XLY", "XLU", "XLB", "XLRE", "XLC"]
+
+
+def _row(r, base_cagr):
+    eq = r["res"]["equity"]
+    delta = "" if base_cagr is None else f"{(r['cagr'] - base_cagr):+.1f}"
+    return f"{r['cagr']*100:>6.1f}{r['sharpe']:>7.2f}{r['maxdd']*100:>7.1f}{_dd_2022(eq)*100:>7.1f}"
+
+
 def main() -> None:
     data = pit._load_pit_data()   # (closes, dvol, candidates, etfs, spy, etf_panel, rebals, P)
-    print(f"\n{'residual_tilt':>13}{'CAGR':>9}{'Sharpe':>8}{'MaxDD':>9}{'2022DD':>9}{'vs w=0':>10}")
-    print("-" * 58)
-    base_cagr = None
+    closes = data[0]
+    sect = [s for s in SECTORS if s in closes.columns]
+    factor_panel = closes[sect]
+    print(f"  using {len(sect)}/11 sector ETFs: {sect}")
+    hdr = f"{'tilt':>5} | {'MARKET-ONLY  CAGR  Shrp  MaxDD 2022':>34} | {'SECTOR      CAGR  Shrp  MaxDD 2022':>34}"
+    print("\n" + hdr); print("-" * len(hdr))
+    base_m = None
     for w in GRID:
-        r = pit.run_backtest(*data, residual_tilt=w)
-        eq = r["res"]["equity"]
-        dd22 = _dd_2022(eq)
-        if base_cagr is None:
-            base_cagr = r["cagr"]
-        delta = "" if w == 0.0 else f"{(r['cagr'] - base_cagr):+.1%} CAGR"
-        print(f"{w:>13.2f}{r['cagr']:>8.1%}{r['sharpe']:>8.2f}{r['maxdd']:>9.1%}{dd22:>9.1%}{delta:>10}")
-    print("\nRead all three lenses (return / Sharpe / drawdown). Adjudicate — no auto-adopt.")
+        rm_ = pit.run_backtest(*data, residual_tilt=w)                    # market-only
+        rs_ = pit.run_backtest(*data, residual_tilt=w, factors=factor_panel)  # sector
+        if base_m is None:
+            base_m = rm_["cagr"]
+        print(f"{w:>5.2f} | {'':>6}{_row(rm_, None)} | {'':>6}{_row(rs_, None)}")
+    print("\nRead all three lenses per variant (return / Sharpe / drawdown). Adjudicate — no auto-adopt.")
 
 
 if __name__ == "__main__":
