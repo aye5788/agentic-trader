@@ -42,13 +42,72 @@ import health  # noqa: E402
 
 # ---------------------------------------------------------------- check 1
 
-def check_cron_paths(root: pathlib.Path) -> list[str]:
-    """Every non-comment cron *command* must be absolute-path-rooted, or the
-    line must `cd /opt/agentic-trader` first.
+# Redirection / shell-operator tokens that are never path arguments to check.
+_REDIRECT_STARTS = (">", "<", "2>", "&>", "1>")
+_SHELL_OPS = {"&&", "||", "|", ";", "&"}
+# A bare token with no `/` still names a script if it carries a script suffix.
+_SCRIPT_SUFFIX_RE = re.compile(r"\.(py|sh|bash|pl|rb|js)$")
 
-    Catches: the two `cd`-prefix bugs where cron's cwd is `/root` and a
-    relative path (`deploy/foo.sh`, `scripts/bar.py`) silently resolves to
-    nothing and fails with no visible error.
+
+def _cron_line_id(parts: list[str]) -> str:
+    """A publishable identifier for a cron line: the 5 schedule fields plus the
+    command's FIRST token only.
+
+    Never the whole line. This module's output is filed verbatim into a public
+    GitHub issue, and a cron line can carry inline env assignments
+    (`FOO=secret /usr/bin/thing`) whose values must not be republished. Even the
+    first token is redacted past the `=` if it is itself such an assignment.
+    """
+    schedule = " ".join(parts[:5])
+    toks = parts[5].split()
+    head = toks[0] if toks else ""
+    if "=" in head:
+        head = head.split("=", 1)[0] + "=<redacted>"
+    return f"{schedule} {head}"
+
+
+def _relative_path_tokens(command: str) -> list[str]:
+    """Tokens in `command` that name a path/script but are RELATIVE.
+
+    Covers the whole command, not just the first token: an absolute interpreter
+    with a relative script argument (`/usr/bin/python3 scripts/foo.py`) is the
+    same cwd bug and used to pass. Skipped: flags (`-x`), redirect operators and
+    their targets (`>> logs/x.log`, `2>&1`), shell operators, absolute/`~` paths,
+    and `$VAR` expansions that cannot be resolved statically.
+    """
+    bad: list[str] = []
+    expect_redirect_target = False
+    for tok in command.split():
+        if expect_redirect_target:
+            expect_redirect_target = False
+            continue
+        if tok in _SHELL_OPS:
+            continue
+        if tok.startswith(_REDIRECT_STARTS):
+            # bare `>>` takes the NEXT token as its target; `2>&1` / `>>foo` don't
+            expect_redirect_target = tok in {">", ">>", "<", "2>", "&>", "1>"}
+            continue
+        if tok.startswith(("-", "/", "~", "$")):
+            continue
+        if "/" in tok or _SCRIPT_SUFFIX_RE.search(tok):
+            bad.append(tok)
+    return bad
+
+
+def check_cron_paths(root: pathlib.Path) -> list[str]:
+    """Every non-comment cron *command* must be absolute-path-rooted — the
+    command itself AND any script/path argument it passes — or the line must
+    `cd /opt/agentic-trader` first.
+
+    Catches: the `cd`-prefix bugs where cron's cwd is `/root` and a relative
+    path (`deploy/foo.sh`, `scripts/bar.py`) silently resolves to nothing and
+    fails with no visible error — including the form where the interpreter is
+    absolute but its script argument is not
+    (`/usr/bin/python3 scripts/health_check.py`), which an inspection of only
+    the first token reports clean.
+
+    Failure text carries file:line plus schedule + command name only; the rest
+    of the line is withheld because this output is published (see _cron_line_id).
     """
     path = root / "deploy" / "crontab.template"
     try:
@@ -68,13 +127,23 @@ def check_cron_paths(root: pathlib.Path) -> list[str]:
         if len(parts) < 6:
             continue
         command = parts[5]
-        if command.startswith("/") or "cd /opt/agentic-trader" in command:
+        if "cd /opt/agentic-trader" in command:
             continue
-        failures.append(
-            f"deploy/crontab.template:{lineno}: command is neither absolute-path "
-            f"nor prefixed with `cd /opt/agentic-trader` — cron's cwd is /root, "
-            f"so a relative path here silently fails: {line!r}"
-        )
+        where = f"deploy/crontab.template:{lineno} [{_cron_line_id(parts)}]"
+        if not command.startswith("/"):
+            failures.append(
+                f"{where}: command is neither absolute-path nor prefixed with "
+                "`cd /opt/agentic-trader` — cron's cwd is /root, so a relative "
+                "path here silently fails"
+            )
+            continue
+        relative = _relative_path_tokens(command)
+        if relative:
+            failures.append(
+                f"{where}: absolute command but RELATIVE path argument(s) "
+                f"{relative!r} — cron's cwd is /root, so these silently resolve "
+                "to nothing; use an absolute path or prefix `cd /opt/agentic-trader`"
+            )
     return failures
 
 
@@ -101,17 +170,38 @@ NOT_CRON = {"monitor", "adaptive_tune"}
 
 def check_scheduled_jobs_armed(root: pathlib.Path) -> list[str]:
     """Every health.SPECS key that names a cron-run job must have its arming
-    substring present in deploy/crontab.template.
+    substring present on a NON-COMMENT line of deploy/crontab.template.
 
-    Catches: the moomoo signal panel — built, documented as running weekly,
-    even added to this template — but never appended to the live crontab, so
-    it silently never ran.
+    Scope — what this does and does not cover, stated honestly:
+
+    COVERS: template drift only. A job that health.SPECS says is scheduled but
+    that has no live line in deploy/crontab.template (absent entirely, or
+    present but commented out) — and, via the CRON_SUBSTRINGS/NOT_CRON
+    completeness rule, a newly-added SPECS key nobody mapped.
+
+    DOES NOT COVER: the live crontab. This check reads a checked-in template
+    file and nothing else. It CANNOT see `crontab -l`.
+
+    It would therefore NOT have caught the 2026-07-24 moomoo signal-panel
+    incident: that line WAS present in this template, correct and uncommented,
+    and the failure was that it was never appended to the live crontab on the
+    box. Only src/health.py's artifact-freshness checks see that class of
+    failure — a job that stopped producing its artifact. Comment lines are
+    stripped before matching precisely so that this check cannot be satisfied
+    by prose *about* a job (the substring appearing in a `#` narration, or in a
+    commented-out line, used to count as armed).
     """
     path = root / "deploy" / "crontab.template"
     try:
         text = path.read_text()
     except OSError:
         return [f"missing {path} — cannot verify scheduled jobs are armed"]
+
+    # Match against live lines ONLY: a `#`-commented line arms nothing, and
+    # substring-matching the whole file made a commented-out job report armed.
+    live_text = "\n".join(
+        ln for ln in text.splitlines() if not ln.strip().startswith("#")
+    )
 
     failures: list[str] = []
     for key, (label, _max_age_days, _source) in health.SPECS.items():
@@ -125,10 +215,15 @@ def check_scheduled_jobs_armed(root: pathlib.Path) -> list[str]:
                 "add a mapping or mark it NOT_CRON with a comment explaining why"
             )
             continue
-        if expected not in text:
+        if expected not in live_text:
+            commented_out = expected in text
+            why = (
+                "it appears ONLY on a commented-out/prose line, which arms nothing"
+                if commented_out else "it is not present at all"
+            )
             failures.append(
                 f"deploy/crontab.template: health.SPECS key {key!r} ({label}) "
-                f"expects {expected!r} in a cron line but it is not present — "
+                f"expects {expected!r} on a live cron line but {why} — "
                 "the job may be documented but never armed"
             )
     return failures
@@ -203,6 +298,52 @@ def check_workflow_failure_exits(root: pathlib.Path) -> list[str]:
 _API_KEY_ASSIGN_RE = re.compile(r"ANTHROPIC_API_KEY\s*=\s*(\S+)")
 _SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__"}
 
+# What a value must look like once markdown/shell wrapping is peeled off, to be
+# treated as plausibly a real credential: a bare opaque token, >= 9 chars, made
+# only of the characters that appear in API keys.
+_CREDENTIAL_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+/=\-]{7,}$")
+
+
+def _looks_like_credential(raw: str) -> bool:
+    """True iff the text assigned to ANTHROPIC_API_KEY plausibly IS a live key.
+
+    The point is the FALSE-POSITIVE class, not stylistic tidiness: the naive
+    "any non-empty value" rule accepted a bare backtick, so ordinary markdown
+    prose of the shape  the literal `ANTHROPIC_API_KEY=`  matched and fired.
+    This repo's docs discuss that footgun constantly (docs/superpowers/plans/,
+    CLAUDE.md, DEPLOY.md), so with this check wired into a daily job that files
+    a public issue, a sentence in a design doc would file an issue every day
+    forever — and a checker that cries wolf daily is a checker nobody reads.
+
+    Fixed at the root class rather than by excluding paths or file types: .md
+    files are still scanned in full, so a REAL key committed in markdown is
+    still caught. Rejected here are only values that cannot be a key —
+
+      * prose/markdown wrapping that leaves nothing behind:
+        `ANTHROPIC_API_KEY=` , "ANTHROPIC_API_KEY=" , trailing sentence
+        punctuation, or end-of-line (no value at all);
+      * shell-safe forms this repo uses on purpose: ${ANTHROPIC_API_KEY:-},
+        $OTHER, "" / '' (and `unset ANTHROPIC_API_KEY`, which has no `=` and
+        never reached the regex);
+      * fragments too short or too punctuated to be a credential ("sk-ant-...").
+
+    Note a leading quote is peeled, NOT treated as an automatic pass: a real
+    shell assignment quotes its value (ANTHROPIC_API_KEY="sk-ant-real"), and
+    that must stay caught. It is the peeled INNER text that has to look like a
+    secret.
+    """
+    v = raw.strip()
+    # peel markdown code fences / shell quoting from both ends, then any
+    # sentence punctuation a prose line left clinging to the token.
+    v = v.strip("`'\"")
+    v = v.rstrip("`'\".,;:!?)]}>")
+    v = v.strip()
+    if not v:
+        return False            # `ANTHROPIC_API_KEY=` in prose, or an empty placeholder
+    if "$" in v or "{" in v:
+        return False            # ${VAR:-} / $VAR expansion, not a literal secret
+    return bool(_CREDENTIAL_VALUE_RE.match(v))
+
 
 def _iter_candidate_files(root: pathlib.Path) -> list[pathlib.Path]:
     """Git-tracked files if root is a git repo; otherwise every regular file
@@ -225,8 +366,14 @@ def _iter_candidate_files(root: pathlib.Path) -> list[pathlib.Path]:
 
 
 def check_no_api_key(root: pathlib.Path) -> list[str]:
-    """No tracked file may set `ANTHROPIC_API_KEY=` to a non-empty value, and
-    deploy/crontab.template may only mention the name inside a `#` comment.
+    """No tracked file may set `ANTHROPIC_API_KEY=` to a value that plausibly
+    IS a credential (see _looks_like_credential — prose and `${VAR:-}` forms do
+    not count), and deploy/crontab.template may only mention the name inside a
+    `#` comment.
+
+    Findings report file:line ONLY, never the matched value: this output is
+    filed verbatim into a public GitHub issue, so echoing the offending text
+    would leak the key it just found.
 
     Catches: the per-token billing footgun — a stray ANTHROPIC_API_KEY set
     anywhere silently overrides the Claude subscription plan and bills the
@@ -259,12 +406,12 @@ def check_no_api_key(root: pathlib.Path) -> list[str]:
             m = _API_KEY_ASSIGN_RE.search(line)
             if not m:
                 continue
-            value = m.group(1).strip("'\"")
-            if not value:
-                continue  # e.g. `.env.example`'s empty placeholder — not a live key
+            if not _looks_like_credential(m.group(1)):
+                continue  # prose, ${VAR:-}, or `.env.example`'s empty placeholder
             failures.append(
-                f"{rel}:{lineno}: literal `ANTHROPIC_API_KEY=` with a non-empty "
-                "value — this silently switches billing to per-token API use"
+                f"{rel}:{lineno}: literal `ANTHROPIC_API_KEY=` assigned a "
+                "credential-shaped value (withheld) — this silently switches "
+                "billing to per-token API use"
             )
 
     crontab = root / "deploy" / "crontab.template"
@@ -274,9 +421,16 @@ def check_no_api_key(root: pathlib.Path) -> list[str]:
                 continue
             if line.strip().startswith("#"):
                 continue
+            # Report the LOCATION only. Interpolating the line here published
+            # the very secret this check exists to find: if someone really did
+            # write ANTHROPIC_API_KEY=sk-ant-... on a live cron line, the old
+            # message pasted that key into a public GitHub issue and its
+            # notification emails. The general scan above already reports
+            # file:line with no value; this branch now matches it.
             failures.append(
                 f"deploy/crontab.template:{lineno}: mentions ANTHROPIC_API_KEY "
-                f"outside a warning comment: {line.strip()!r}"
+                "outside a warning comment (line content withheld — this "
+                "output is published; open the file at that line to inspect)"
             )
     return failures
 
@@ -342,6 +496,47 @@ HOME=/root
         assert len(bad) == 1, bad
         assert "crontab.template:2" in bad[0], bad
 
+    # FINDING 3 fixture: absolute interpreter, RELATIVE script argument. Only
+    # the first token is absolute, so the old first-token-only check reported
+    # this clean — yet cron's cwd is /root, so scripts/health_check.py resolves
+    # to nothing and the job silently no-ops.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "deploy/crontab.template", """\
+0 8 * * * /usr/bin/python3 scripts/health_check.py >> logs/health.log 2>&1
+""")
+        bad = check_cron_paths(root)
+        assert len(bad) == 1, bad
+        assert "crontab.template:1" in bad[0], bad
+        assert "scripts/health_check.py" in bad[0], bad
+        # the redirect TARGET is relative too but must not be reported as the
+        # bug class here -- only the executed script argument.
+        assert "logs/health.log" not in bad[0], bad
+
+    # ...and the same line made safe by a `cd` prefix must stay silent, as must
+    # flags, absolute args, `$VAR`, redirects and shell operators.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "deploy/crontab.template", """\
+0 8 * * *  cd /opt/agentic-trader && /usr/bin/python3 scripts/health_check.py >> logs/health.log 2>&1
+0 9 * * *  /usr/bin/python3 /opt/agentic-trader/scripts/health_check.py >> /opt/agentic-trader/logs/h.log 2>&1
+0 7 * * *  /usr/bin/timeout 900 /opt/agentic-trader/deploy/run_slow_loop.sh --quiet $EXTRA 2>&1
+""")
+        assert check_cron_paths(root) == [], check_cron_paths(root)
+
+    # FINDING 1 fixture: the reported text must locate the line WITHOUT
+    # dumping it -- an inline env assignment's value must never be echoed.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "deploy/crontab.template", """\
+0 8 * * * SOME_TOKEN=hunter2supersecret deploy/run_slow_loop.sh >> logs/x.log 2>&1
+""")
+        bad = check_cron_paths(root)
+        assert len(bad) == 1, bad
+        assert "crontab.template:1" in bad[0], bad
+        assert "hunter2supersecret" not in bad[0], bad
+        assert "<redacted>" in bad[0], bad
+
     # missing crontab.template entirely -> a reported failure, not a crash
     with tempfile.TemporaryDirectory() as td:
         root = pathlib.Path(td)
@@ -372,6 +567,33 @@ HOME=/root
         bad = check_scheduled_jobs_armed(root)
         assert len(bad) == 1, bad
         assert "signal_panel" in bad[0], bad
+
+    # FINDING 4a fixture: the arming line EXISTS but is commented out. A
+    # commented line arms nothing, yet the old whole-file substring match
+    # reported it armed. Must FAIL.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        commented_cron = "\n".join(
+            ("# " + l) if "collect_signals.py" in l else l
+            for l in clean_cron.splitlines()
+        )
+        _write(root, "deploy/crontab.template", commented_cron)
+        bad = check_scheduled_jobs_armed(root)
+        assert len(bad) == 1, bad
+        assert "signal_panel" in bad[0], bad
+        assert "commented-out" in bad[0], bad
+
+    # ...and prose merely NAMING the script in a `#` narration must not count
+    # as armed either.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        prose_cron = "\n".join(
+            ("# see scripts/collect_signals.py -- TODO arm this" if "collect_signals.py" in l else l)
+            for l in clean_cron.splitlines()
+        )
+        _write(root, "deploy/crontab.template", prose_cron)
+        bad = check_scheduled_jobs_armed(root)
+        assert len(bad) == 1 and "signal_panel" in bad[0], bad
 
     # every real SPECS key must be accounted for (regression guard: a new key
     # added to health.SPECS without updating this module must be caught)
@@ -485,6 +707,78 @@ ANTHROPIC_API_KEY=leaked-in-a-noncomment-line
         # both the general assignment scan and the crontab-specific mention
         # scan legitimately fire on the same line — that's fine, not a bug.
         assert any("crontab.template:2" in b for b in bad), bad
+        # FINDING 1: neither message may echo the offending value. This output
+        # is filed verbatim into a public GitHub issue.
+        assert not any("leaked-in-a-noncomment-line" in b for b in bad), bad
+
+    # FINDING 1 (crontab branch, real-key shape): the value must never appear
+    # in the finding text.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "deploy/crontab.template", """\
+0 20 * * 0   /opt/agentic-trader/deploy/run_slow_loop.sh >> /opt/x.log 2>&1
+ANTHROPIC_API_KEY=sk-ant-api03-REDACTEDLOOKINGVALUE123
+""")
+        bad = check_no_api_key(root)
+        assert any("crontab.template:2" in b for b in bad), bad
+        assert not any("REDACTEDLOOKINGVALUE123" in b for b in bad), bad
+
+    # -------------------- FINDING 2: prose must not trip -----------------
+    # Markdown discussing the footgun — the exact shapes this repo's docs and
+    # plan files use. The naive `(\\S+)` rule accepted a bare backtick as a
+    # "non-empty value", so every one of these fired.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "docs/plan.md", """\
+- Auth is `CLAUDE_CODE_OAUTH_TOKEN` (subscription). **Never introduce `ANTHROPIC_API_KEY`**
+4. **`check_no_api_key`** — no tracked file may contain the literal `ANTHROPIC_API_KEY=`
+   A stray `ANTHROPIC_API_KEY=` flips billing to per-token API use.
+   Written in prose without backticks: ANTHROPIC_API_KEY= is still harmless.
+""")
+        _write(root, "deploy/guard.sh", """\
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then exit 1; fi
+ANTHROPIC_API_KEY=""
+ANTHROPIC_API_KEY=$OTHER_VAR
+unset ANTHROPIC_API_KEY
+""")
+        assert check_no_api_key(root) == [], check_no_api_key(root)
+
+    # ...but a REAL-looking assignment inside a .md file is STILL caught. The
+    # fix is to the value pattern, not a wholesale .md exclusion.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "docs/leak.md", """\
+Some prose about the footgun, then an actual pasted key:
+
+    ANTHROPIC_API_KEY=sk-ant-api03-REDACTEDLOOKINGVALUE123
+""")
+        bad = check_no_api_key(root)
+        assert len(bad) == 1, bad
+        assert "leak.md:3" in bad[0], bad
+        assert "REDACTEDLOOKINGVALUE123" not in bad[0], bad
+
+    # quoted real key in a shell file: a leading quote is peeled, not a free
+    # pass — the inner text is what must look like a secret.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "deploy/w.sh", 'export ANTHROPIC_API_KEY="sk-ant-api03-REALLOOKING123"\n')
+        bad = check_no_api_key(root)
+        assert len(bad) == 1, bad
+        assert "REALLOOKING123" not in bad[0], bad
+
+    # ACCEPTANCE: this project's OWN plan file contains the prose shape at
+    # issue and is about to be committed (repo policy: commit+push after any
+    # change). It must not trip the check. Scanned DIRECTLY rather than via
+    # check_no_api_key(REPO) so the assertion holds whether or not the file is
+    # git-tracked at the moment the selftest runs.
+    _plan = REPO / "docs/superpowers/plans/2026-07-24-auto-fix-oversight-loop.md"
+    if _plan.exists():
+        _hits = [
+            lineno
+            for lineno, line in enumerate(_plan.read_text(errors="ignore").splitlines(), 1)
+            if (_m := _API_KEY_ASSIGN_RE.search(line)) and _looks_like_credential(_m.group(1))
+        ]
+        assert _hits == [], f"plan-file prose tripped check_no_api_key at lines {_hits}"
 
     # repo_checks.py's own source (docstrings, regex, fixture strings) must
     # NOT self-match — this is the defect this module was built to fix: a
