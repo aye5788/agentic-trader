@@ -46,6 +46,16 @@ trend_ma_days     = 200     # trend view = close / SMA(200) - 1
 rank_method       = "rank_average"
 absolute_gate     = "return_positive"   # eligible only if 12mo total return > 0
 
+# --- Residual (idiosyncratic) momentum tilt — sector variant, adopted 2026-07-24 -----
+# Blends residual momentum into the BOOK rank: rank a name on its OWN strength after
+# stripping out how much it just rode its sector's wave. This is a structural signal
+# CHOICE (distinct from the rank_average internals above, which stay untuned).
+# Backtest (survivorship-free PIT pool, 2021-2026): 0.75-sector beat the plain signal
+# on all three lenses — CAGR 25.9 vs 21.6, Sharpe 1.03 vs 0.90, MaxDD -29.2 vs -31.2.
+# Now forward-proving on live fills. REVERT = set residual_tilt = 0.0 (one line, instant).
+residual_tilt     = 0.75         # 0.0 = off (plain momentum); 0.75 = adopted blend
+residual_factors  = "sector"     # "sector" (11 SPDR ETFs) | "market" (SPY) | "none"
+
 # --- Portfolio construction (see docs/STRATEGY.md §4) -----------------------
 [portfolio]
 book_weight   = 0.70    # single-name book share of capital

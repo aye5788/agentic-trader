@@ -110,6 +110,36 @@ def build_theses(sel, scored, closes, asof, per_slot, tm, start_rank):
     return held, dropped
 
 
+SECTOR_ETFS = ["XLE", "XLF", "XLK", "XLV", "XLI", "XLP",
+               "XLY", "XLU", "XLB", "XLRE", "XLC"]
+
+
+def residual_kwargs(cfg, closes, spy):
+    """Build the BOOK-compute residual kwargs from [signal] config.
+
+    residual_tilt<=0 or residual_factors="none" -> {} (plain momentum, unchanged).
+    "sector" -> {residual_tilt, factors=<11 SPDR ETF closes present in cache>}.
+    "market" -> {residual_tilt, market=spy}. Missing sector data or an unknown
+    mode falls back to {} (plain rank) with a printed note — never crashes the loop.
+    Pure: reads config + panels, no I/O.
+    """
+    sig = cfg.get("signal", {})
+    tilt = float(sig.get("residual_tilt", 0.0) or 0.0)
+    mode = str(sig.get("residual_factors", "none")).lower()
+    if tilt <= 0.0 or mode == "none":
+        return {}
+    if mode == "market":
+        return {"residual_tilt": tilt, "market": spy}
+    if mode == "sector":
+        have = [s for s in SECTOR_ETFS if s in closes.columns]
+        if not have:
+            print("  residual: no sector ETFs in price cache -> plain rank this run")
+            return {}
+        return {"residual_tilt": tilt, "factors": closes[have]}
+    print(f"  residual: unknown residual_factors={mode!r} -> plain rank this run")
+    return {}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true", help="print, don't write the store")
@@ -147,7 +177,13 @@ def main() -> None:
     ceiling = float(cfg["regime"]["vix_ceiling"])
     vix_ok = vix is None or vix <= ceiling          # None = data outage -> fail-open
     regime = trend and vix_ok
-    book_scored = mom.compute(closes[names], asof)
+    rk = residual_kwargs(cfg, closes, spy)
+    if rk:
+        print(f"  signal: residual tilt={rk['residual_tilt']} "
+              f"factors={cfg['signal'].get('residual_factors')} "
+              f"({len(rk['factors'].columns)} ETFs)" if "factors" in rk
+              else f"  signal: residual tilt={rk['residual_tilt']} factors=market(SPY)")
+    book_scored = mom.compute(closes[names], asof, **rk)
     etf_scored = mom.compute(closes[etfs], asof)
 
     # Banded holds need to know what the book ALREADY owns: a held name is kept
