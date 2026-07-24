@@ -56,6 +56,7 @@ def compute(panel: pd.DataFrame, asof: pd.Timestamp,
         return df
     df["ret"] = df["R"] / df["sigma"]
 
+    # equal-weight rank-average of the (optionally residual-blended) momentum view and the trend view
     p_ret = df["ret"].rank(pct=True)
     p_trend = df["trend"].rank(pct=True)
     if residual_tilt and residual_tilt > 0.0 and market is not None:
@@ -106,34 +107,46 @@ def regime_on(spy: pd.Series, asof: pd.Timestamp, ma_days: int = 50) -> bool:
 
 def _selftest() -> None:
     import numpy as np
-    # 260 business days so lookback=252 has a full window.
-    idx = pd.date_range("2024-01-01", periods=260, freq="B")
-    rng = np.random.default_rng(0)
-    mkt = pd.Series(100 * (1 + pd.Series(rng.normal(0.0005, 0.01, 260), index=idx)).cumprod().values, index=idx)
-    panel = pd.DataFrame({"SPY": mkt.values}, index=idx)
-    for i in range(6):
-        panel[f"T{i}"] = 100 * (1 + pd.Series(rng.normal(0.0008, 0.02, 260), index=idx)).cumprod().values
-    # T0 as a pure leveraged market clone (large beta, ~zero idiosyncratic alpha):
-    # guarantees residual momentum has genuine market exposure to strip out, so the
-    # tilt=1 re-rank below is deterministic rather than a coin-flip on the noise draw
-    # (the 6 purely-idiosyncratic T-series above have near-zero true beta to the
-    # market, so residual momentum ~ raw momentum for them regardless of seed).
-    panel["T0"] = mkt.values * 3.0
+    import residual
+    n = 260
+    idx = pd.date_range("2024-01-01", periods=n, freq="B")
+    t = np.arange(n)
+    m = 0.0008 + 0.012 * np.sin(2 * np.pi * t / 15)            # market daily returns (+drift, real variance)
+
+    def _px(rets):
+        return pd.Series(100 * np.cumprod(1 + rets), index=idx)
+
+    # Build names from RETURNS (beta*market + idiosyncratic) then compound to prices,
+    # so beta is genuine (NOT a price-level scalar, which pct_change would cancel).
+    panel = pd.DataFrame({
+        "SPY": _px(m),
+        "BETA_ONLY": _px(1.8 * m + 0.004 * np.sin(2 * np.pi * t / 9 + 1.1)),   # high beta, ZERO-mean idio -> ~0 residual mom
+        "IDIO_WIN":  _px(0.4 * m + (0.0018 + 0.004 * np.sin(2 * np.pi * t / 11))),  # low beta, POSITIVE idio -> strong residual mom
+        "F1": _px(1.0 * m + (0.0006 + 0.003 * np.sin(2 * np.pi * t / 7))),
+        "F2": _px(1.2 * m - (0.0006 + 0.003 * np.sin(2 * np.pi * t / 13))),
+        "F3": _px(0.7 * m + 0.003 * np.sin(2 * np.pi * t / 8 + 0.5)),
+    }, index=idx)
     asof = idx[-1]
 
-    # residual_tilt=0.0 reproduces the classic score exactly.
-    base = compute(panel, asof)                                  # default tilt 0
-    d = compute(panel, asof, residual_tilt=0.0, market=panel["SPY"])
-    assert base["score"].equals(d["score"]), "tilt=0 must equal the classic score"
-    # classic formula check: score == mean(rank(ret), rank(trend))
+    # 1. Backward-compat (LOAD-BEARING): residual_tilt=0.0 reproduces the classic score exactly.
+    base = compute(panel, asof)                                   # default tilt 0
+    d0 = compute(panel, asof, residual_tilt=0.0, market=panel["SPY"])
+    assert base["score"].equals(d0["score"]), "tilt=0 must equal the classic score"
     expect = (base["ret"].rank(pct=True) + base["trend"].rank(pct=True)) / 2.0
     assert np.allclose(base["score"].values, expect.reindex(base.index).values), "score formula drifted"
 
-    # residual_tilt=1.0 changes the ranking (uses residual instead of R/σ).
-    full = compute(panel, asof, residual_tilt=1.0, market=panel["SPY"])
-    assert not full["score"].equals(base["score"]), "tilt=1 should re-rank"
+    # 2. Residual momentum is well-conditioned (real signal, not 0/0 float noise).
+    rm = residual.residual_momentum(panel, asof, panel["SPY"])
+    assert rm["IDIO_WIN"] > 0.3 and rm["BETA_ONLY"] < 0.1, rm.round(3).to_dict()
 
-    print("selftest OK: compute residual_tilt (0=identity, 1=re-ranks)")
+    # 3. Tilting fully to residual meaningfully re-ranks: BETA_ONLY (high beta, ~0
+    #    residual momentum) is demoted by a wide margin when the residual view takes over.
+    full = compute(panel, asof, residual_tilt=1.0, market=panel["SPY"])
+    assert not base["score"].equals(full["score"]), "residual_tilt=1 should re-rank"
+    assert full.loc["BETA_ONLY", "score"] < base.loc["BETA_ONLY", "score"] - 0.05, \
+        (base.loc["BETA_ONLY", "score"], full.loc["BETA_ONLY", "score"])
+
+    print("selftest OK: compute residual_tilt (0=identity, 1=meaningfully re-ranks)")
 
 
 if __name__ == "__main__":
