@@ -27,7 +27,8 @@ def _asof_slice(panel: pd.DataFrame, asof: pd.Timestamp) -> pd.DataFrame:
 
 
 def compute(panel: pd.DataFrame, asof: pd.Timestamp,
-            lookback: int = LOOKBACK) -> pd.DataFrame:
+            lookback: int = LOOKBACK, residual_tilt: float = 0.0,
+            market: "pd.Series | None" = None) -> pd.DataFrame:
     """Return a per-ticker DataFrame [R, sigma, ret, trend, score, eligible,
     rank], indexed by ticker, for the given as-of date. Tickers without enough
     history (need lookback+1 and TREND_MA closes) are dropped. `lookback`
@@ -55,10 +56,17 @@ def compute(panel: pd.DataFrame, asof: pd.Timestamp,
         return df
     df["ret"] = df["R"] / df["sigma"]
 
-    # equal-weight rank-average of the two views (percentile ranks, [0,1])
+    # equal-weight rank-average of the (optionally residual-blended) momentum view and the trend view
     p_ret = df["ret"].rank(pct=True)
     p_trend = df["trend"].rank(pct=True)
-    df["score"] = (p_ret + p_trend) / 2.0
+    if residual_tilt and residual_tilt > 0.0 and market is not None:
+        import residual
+        rm = residual.residual_momentum(panel, asof, market, lookback).reindex(df.index)
+        p_resid = rm.rank(pct=True).fillna(p_ret)     # missing residual -> fall back to R/σ rank
+        p_mom = (1.0 - residual_tilt) * p_ret + residual_tilt * p_resid
+    else:
+        p_mom = p_ret
+    df["score"] = (p_mom + p_trend) / 2.0
 
     df["eligible"] = df["R"] > 0                  # absolute gate
     # rank eligible names by score desc; ineligible get NaN rank
@@ -95,3 +103,53 @@ def regime_on(spy: pd.Series, asof: pd.Timestamp, ma_days: int = 50) -> bool:
     if len(s) < ma_days:
         return False
     return bool(s.iloc[-1] > s.iloc[-ma_days:].mean())
+
+
+def _selftest() -> None:
+    import numpy as np
+    import residual
+    n = 260
+    idx = pd.date_range("2024-01-01", periods=n, freq="B")
+    t = np.arange(n)
+    m = 0.0008 + 0.012 * np.sin(2 * np.pi * t / 15)            # market daily returns (+drift, real variance)
+
+    def _px(rets):
+        return pd.Series(100 * np.cumprod(1 + rets), index=idx)
+
+    # Build names from RETURNS (beta*market + idiosyncratic) then compound to prices,
+    # so beta is genuine (NOT a price-level scalar, which pct_change would cancel).
+    panel = pd.DataFrame({
+        "SPY": _px(m),
+        "BETA_ONLY": _px(1.8 * m + 0.004 * np.sin(2 * np.pi * t / 9 + 1.1)),   # high beta, ZERO-mean idio -> ~0 residual mom
+        "IDIO_WIN":  _px(0.4 * m + (0.0018 + 0.004 * np.sin(2 * np.pi * t / 11))),  # low beta, POSITIVE idio -> strong residual mom
+        "F1": _px(1.0 * m + (0.0006 + 0.003 * np.sin(2 * np.pi * t / 7))),
+        "F2": _px(1.2 * m - (0.0006 + 0.003 * np.sin(2 * np.pi * t / 13))),
+        "F3": _px(0.7 * m + 0.003 * np.sin(2 * np.pi * t / 8 + 0.5)),
+    }, index=idx)
+    asof = idx[-1]
+
+    # 1. Backward-compat (LOAD-BEARING): residual_tilt=0.0 reproduces the classic score exactly.
+    base = compute(panel, asof)                                   # default tilt 0
+    d0 = compute(panel, asof, residual_tilt=0.0, market=panel["SPY"])
+    assert base["score"].equals(d0["score"]), "tilt=0 must equal the classic score"
+    expect = (base["ret"].rank(pct=True) + base["trend"].rank(pct=True)) / 2.0
+    assert np.allclose(base["score"].values, expect.reindex(base.index).values), "score formula drifted"
+
+    # 2. Residual momentum is well-conditioned (real signal, not 0/0 float noise).
+    rm = residual.residual_momentum(panel, asof, panel["SPY"])
+    assert rm["IDIO_WIN"] > 0.3 and rm["BETA_ONLY"] < 0.1, rm.round(3).to_dict()
+
+    # 3. Tilting fully to residual meaningfully re-ranks: BETA_ONLY (high beta, ~0
+    #    residual momentum) is demoted by a wide margin when the residual view takes over.
+    full = compute(panel, asof, residual_tilt=1.0, market=panel["SPY"])
+    assert not base["score"].equals(full["score"]), "residual_tilt=1 should re-rank"
+    assert full.loc["BETA_ONLY", "score"] < base.loc["BETA_ONLY", "score"] - 0.05, \
+        (base.loc["BETA_ONLY", "score"], full.loc["BETA_ONLY", "score"])
+
+    print("selftest OK: compute residual_tilt (0=identity, 1=meaningfully re-ranks)")
+
+
+if __name__ == "__main__":
+    import sys
+    if "--selftest" in sys.argv:
+        _selftest()
