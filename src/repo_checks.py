@@ -29,6 +29,10 @@ import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
+# This module's own resolved path. check_no_api_key excludes it from the scan
+# — see that check's docstring for why, and what the exclusion blinds.
+_SELF_PATH = pathlib.Path(__file__).resolve()
+
 # `import health` resolves against this file's own directory (src/), which
 # Python puts on sys.path automatically when this script is the entry point.
 # Belt-and-braces for the case this module is imported from elsewhere first.
@@ -227,10 +231,25 @@ def check_no_api_key(root: pathlib.Path) -> list[str]:
     Catches: the per-token billing footgun — a stray ANTHROPIC_API_KEY set
     anywhere silently overrides the Claude subscription plan and bills the
     API per token.
+
+    This file (src/repo_checks.py) is excluded from the scan. It necessarily
+    contains the `ANTHROPIC_API_KEY=` literal itself — in this docstring, in
+    the detection regex, and in --selftest's positive/negative fixtures — in
+    order to document and test the very thing it's checking for. Without the
+    exclusion every run flags itself, which would fire this check on a clean
+    repo and, once wired into CI, file a spurious issue every single day.
+    What this exclusion BLINDS: a real ANTHROPIC_API_KEY assignment pasted
+    directly into repo_checks.py's own source would not be caught by this
+    check. Accepted because that file is small, security-focused, has no
+    legitimate reason to ever contain a live key, and any such edit would be
+    an obvious diff in review — unlike the scattered application/deploy/CI
+    files this check exists to cover.
     """
     failures: list[str] = []
 
     for path in _iter_candidate_files(root):
+        if path.resolve() == _SELF_PATH:
+            continue
         try:
             text = path.read_text(errors="ignore")
         except OSError:
@@ -466,6 +485,25 @@ ANTHROPIC_API_KEY=leaked-in-a-noncomment-line
         # both the general assignment scan and the crontab-specific mention
         # scan legitimately fire on the same line — that's fine, not a bug.
         assert any("crontab.template:2" in b for b in bad), bad
+
+    # repo_checks.py's own source (docstrings, regex, fixture strings) must
+    # NOT self-match — this is the defect this module was built to fix: a
+    # bare run against the real, clean repo must come back empty.
+    self_bad = [f for f in check_no_api_key(REPO) if "repo_checks.py" in f]
+    assert self_bad == [], self_bad
+
+    # the exclusion is by resolved PATH to this exact file, not by filename —
+    # a *different* file that happens to be named repo_checks.py must still
+    # be scanned and flagged like any other file.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(
+            root, "src/repo_checks.py",
+            'ANTHROPIC_API_KEY=not-actually-excluded-because-path-differs\n',
+        )
+        bad = check_no_api_key(root)
+        assert len(bad) == 1, bad
+        assert "repo_checks.py:1" in bad[0], bad
 
     # -------------------- checks() aggregator + main() plumbing --------
     with tempfile.TemporaryDirectory() as td:
