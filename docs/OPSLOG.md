@@ -42,9 +42,20 @@ descriptive gap, and **a real phone push delivered**; the healthy path is unchan
 (14 names, 0 gaps, opend_ok True). The gap test stubbed `append_journal` so no
 fabricated "OpenD was down" row entered the research dataset.
 
-⚠️ Residual: a gateway that is *listening but wedged* would still pass preflight and
-could stall inside an SDK call. Not fixed here — the new daily health check catches
-it within 10 days via a stale `signal_panel`, which is a backstop, not a fix.
+**Residual CLOSED same day — the wedge case.** A gateway that is *listening but
+wedged* passes preflight and can stall inside an SDK call. `collect_signals.py` now
+bounds the whole pull with a SIGALRM deadline (`COLLECT_TIMEOUT=300`, `--timeout` to
+override) plus a short separate bound on `ctx.close()` — the close talks to the same
+wedged gateway, so without its own bound it would undo the timeout we just escaped.
+`_Timeout` subclasses `Exception` on purpose, so it lands in the existing handler and
+becomes opend_ok=False + a push rather than a traceback. The cron line gained an
+outer `timeout 900` for the case where a C-level call masks the signal.
+
+Verified against a simulated wedge (socket connects, then the call sleeps 600s):
+returned in **8.2s** with an 8s deadline, `opend_ok=False`, gap
+`_Timeout: moomoo collection exceeded 8s — OpenD wedged?`, and a real push
+delivered. Healthy path unchanged and takes **2.3s**, so the 300s bound has ~130x
+headroom. Both moomoo failure modes are now bounded and audible.
 
 ---
 

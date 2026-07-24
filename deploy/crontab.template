@@ -27,7 +27,11 @@ HOME=/root
 # --- WEEKLY moomoo SIGNAL PANEL (system python3 — moomoo needs 3.10, not .venv) ---
 # Sun 20:15, after the 20:00 rebalance writes the new book. Forward-logs a
 # signal_panel journal event per held name for later meta-labeling. Non-fatal.
-15 20 * * 0  cd /opt/agentic-trader && /usr/bin/python3 scripts/collect_signals.py >> /opt/agentic-trader/logs/signals.log 2>&1
+# `timeout 900` is the OUTER guard. The script bounds itself with SIGALRM
+# (COLLECT_TIMEOUT), which is what produces the phone alert; this is the
+# belt-and-braces for the case where a C-level call masks the signal. A healthy
+# run takes ~2s, so neither bound is anywhere near the happy path.
+15 20 * * 0  cd /opt/agentic-trader && timeout 900 /usr/bin/python3 scripts/collect_signals.py >> /opt/agentic-trader/logs/signals.log 2>&1
 
 # Nightly risk-exit recompute: Mon–Fri 18:00 (after close).
 0 18 * * 1-5 /opt/agentic-trader/deploy/run_slow_loop.sh >> /opt/agentic-trader/logs/slow.log 2>&1
