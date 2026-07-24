@@ -81,7 +81,7 @@ def _load_pit_data():
     return closes, dvol, candidates, etfs, spy, etf_panel, rebals, P
 
 
-def run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cap_params=None, residual_tilt: float = 0.0):
+def run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cap_params=None, residual_tilt: float = 0.0, factors=None):
     """One PIT backtest run. cap_params=None -> baseline (equal slots, no cap);
     a params dict -> concentration.cap_weights applied to each week's weights."""
     book_w, sleeve_w = P["book_weight"], P["sleeve_weight"]
@@ -98,7 +98,7 @@ def run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cap_
         univ_sizes.append(len(univ))
         regime = mom.regime_on(spy, t0, 50)
 
-        book_scored = mom.compute(closes[univ], t0, residual_tilt=residual_tilt, market=spy)
+        book_scored = mom.compute(closes[univ], t0, residual_tilt=residual_tilt, market=spy, factors=factors)
         new_book = mom.select(book_scored, held_book, book_hold, book_band)
         if not regime:
             new_book = [t for t in new_book if t in held_book]
