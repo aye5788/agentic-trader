@@ -1,0 +1,149 @@
+name: validate
+
+# Two jobs of monitoring in one, off-box on GitHub's runners (never the droplet):
+#
+#  1. Repo-state check: runs src/repo_checks.py (static, filesystem-only —
+#     no network, no secrets, no droplet). Catches config/workflow drift that
+#     never throws: a cd-less cron line, a documented-but-never-armed job, a
+#     CI step that swallows a real failure behind `exit 0`, a stray
+#     ANTHROPIC_API_KEY= that would silently flip billing to per-token API use.
+#
+#  2. Droplet dead-man's switch: the droplet pushes to the private ledger
+#     mirror (aye5788/agentic-trader-ledger) on every slow/fast loop AND
+#     nightly at 22:30 ET. If the mirror's most recent commit is older than
+#     72 hours, the box (or its cron) is dead. THIS IS THE ONLY CHECK IN THE
+#     WHOLE SYSTEM THAT SURVIVES THE DROPLET DYING — scripts/health_check.py
+#     runs ON the droplet and therefore cannot report its own death.
+#
+# Requires repo secret LEDGER_TOKEN: a fine-grained PAT with READ (Contents)
+# on aye5788/agentic-trader-ledger. If it is empty or the clone fails, this
+# workflow FAILS the step (::error:: + exit 1) — it must never `exit 0` on
+# that path, because that would make an expired/missing token look like a
+# green run while the dead-man's switch silently stopped watching. (This is
+# exactly the earlier adaptive-tune.yml bug — see that workflow's comments —
+# and src/repo_checks.py's check_workflow_failure_exits will flag a
+# regression here: no `exit 0` may appear within 3 lines of a failure marker.)
+
+on:
+  schedule:
+    - cron: "0 13 * * *"     # 09:00 ET — after the droplet's own 08:00 health_check.py
+  push:
+    branches: [main]
+    paths:
+      - "src/repo_checks.py"
+      - ".github/workflows/validate.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install --quiet pandas numpy pyarrow python-dotenv
+
+      - name: Repo-state check (static, no network/secrets)
+        id: checks
+        continue-on-error: true
+        run: |
+          python3 src/repo_checks.py 2>&1 | tee checks_output.txt
+
+      - name: Droplet dead-man's switch (ledger mirror freshness)
+        id: deadman
+        continue-on-error: true
+        env:
+          LEDGER_TOKEN: ${{ secrets.LEDGER_TOKEN }}
+        run: |
+          {
+            # Strip any stray whitespace/newline a pasted secret may carry — a
+            # trailing \n breaks the clone URL ("credential url cannot be parsed").
+            TOKEN="$(printf '%s' "$LEDGER_TOKEN" | tr -d '[:space:]')"
+            if [ -z "$TOKEN" ]; then
+              echo "::error::LEDGER_TOKEN secret is not set — cannot reach the ledger mirror to check whether the droplet is alive."
+              exit 1
+            fi
+
+            # A PAT that has EXPIRED, been revoked, or lost Contents:read fails
+            # the clone. This must never fall through to a silent success: the
+            # whole point of this step is to notice the droplet (or this check
+            # itself) has gone dark, and a swallowed clone failure would hide
+            # exactly that.
+            if ! git clone --depth 1 \
+                "https://x-access-token:${TOKEN}@github.com/aye5788/agentic-trader-ledger.git" _ledger; then
+              echo "::error::ledger mirror clone did not succeed — LEDGER_TOKEN is expired, revoked, or lacks Contents:read."
+              exit 1
+            fi
+
+            LAST_COMMIT_EPOCH=$(git -C _ledger log -1 --format=%ct)
+            NOW_EPOCH=$(date -u +%s)
+            AGE_HOURS=$(( (NOW_EPOCH - LAST_COMMIT_EPOCH) / 3600 ))
+            echo "ledger mirror last commit: ${AGE_HOURS}h ago"
+
+            if [ "$AGE_HOURS" -gt 72 ]; then
+              echo "::error::ledger mirror has not been pushed to in ${AGE_HOURS}h (threshold 72h) — the droplet's cron looks dead."
+              exit 1
+            fi
+
+            echo "ledger mirror is fresh (${AGE_HOURS}h old, threshold 72h)."
+          } 2>&1 | tee deadman_output.txt
+          # The pipeline's exit status is the compound block's, not `tee`'s —
+          # surface it explicitly so a failure above still fails this step.
+          exit "${PIPESTATUS[0]}"
+
+      - name: Open / update issue on failure
+        if: steps.checks.outcome == 'failure' || steps.deadman.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # labels must exist for --label to succeed (no-op if already there)
+          gh label create bug        --color d73a4a --description "confirmed defect"        2>/dev/null || true
+          gh label create auto-fix   --color 0e8a16 --description "let Claude attempt a PR"  2>/dev/null || true
+
+          TITLE="🔴 Repo/deploy check failed"
+          {
+            echo "Automated repo/deploy check failed on $(date -u '+%Y-%m-%d %H:%M UTC')."
+            echo ""
+            if [ "${{ steps.checks.outcome }}" = "failure" ]; then
+              echo "### Repo-state check (src/repo_checks.py)"
+              echo '```'
+              cat checks_output.txt 2>/dev/null || echo "(no output captured)"
+              echo '```'
+              echo ""
+            fi
+            if [ "${{ steps.deadman.outcome }}" = "failure" ]; then
+              echo "### Droplet dead-man's switch (ledger mirror freshness)"
+              echo '```'
+              cat deadman_output.txt 2>/dev/null || echo "(no output captured)"
+              echo '```'
+              echo ""
+            fi
+            echo "> Many failures here are **ops** (droplet down, cron stopped, a"
+            echo "> credential expired), not code — in that case the fix is on the"
+            echo "> droplet, not a PR. If the repo-state check found a real code/config"
+            echo "> defect, the \`auto-fix\` label triggers Claude to open a PR (which"
+            echo "> you review & merge)."
+          } > issue_body.md
+
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" \
+                       --json number -q '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file issue_body.md
+            echo "commented on existing issue #$EXISTING"
+          else
+            gh issue create --title "$TITLE" --body-file issue_body.md \
+              --label bug --label auto-fix
+          fi
+
+      - name: Fail the run if either check failed
+        if: steps.checks.outcome == 'failure' || steps.deadman.outcome == 'failure'
+        run: exit 1
