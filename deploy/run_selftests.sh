@@ -26,6 +26,7 @@ SELFTESTS=(
     "src/ti_signals.py"
     "src/health.py"
     "scripts/health_check.py"
+    "src/repo_checks.py"
 )
 
 fail=0
