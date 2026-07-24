@@ -237,6 +237,10 @@ docs/STRATEGY.md        THE TRADING STRATEGY, written for the deployed agent —
                         dual momentum: exact signal math, portfolio rules, the
                         fast-loop execution procedure, guardrails, proof gate.
                         Read this before trading. (edge = momentum, options OFF)
+docs/OPERATOR_MANUAL.md THE human-operator manual — step-by-step for every task the
+                        principal (Aaron) does: weekly Schwab re-auth, reviewing/
+                        applying adaptive proposals, phone-alert meanings, the kill
+                        switch, emergency stop. Start here for "what do I do".
 docs/DESIGN.md          Full architecture (6 layers, two-clock model, scope tables)
 docs/architecture.*     The architecture diagram (svg + excalidraw source)
 .env / .env.example     Credentials (git-ignored) / template
