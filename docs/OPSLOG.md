@@ -8,6 +8,46 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-24 — moomoo: OpenD-down HANGS forever; every "OpenD is down" handler was dead
+
+Found while testing the signal panel's failure branch at Aaron's request (he wanted
+it exercised before the weekend rather than discovered live). It is the most
+serious thing found today.
+
+**`OpenQuoteContext(host, port)` against an unreachable OpenD never returns and
+never raises.** The SDK retries on a background thread with no overall deadline.
+Verified by killing test runs at 40s and 180s with the log frozen at "constructing".
+
+**Consequence: every `try/except` we wrote for "OpenD is down" was unreachable.**
+`collect_signals.py` is the worst case — its except-branch is precisely what sets
+`opend_ok=False` and fires the "signal panel gap" phone alert. So with OpenD down,
+the Sunday 20:15 run would have hung at the first call, **never alerted**, and left
+a stuck process behind every week on a ~2 GB box that already swaps. The documented
+alert in OPERATOR_MANUAL §3 could not have fired. `universe_refresh` (quarterly,
+same `quote_ctx`) had the identical exposure.
+
+Note this was invisible to the obvious test: a `--dry` run with OpenD *up* passes
+happily, and the failure only appears when the gateway is actually gone.
+
+**Fix — TCP preflight in `src/adapters/moomoo/client.py`.** `quote_ctx()` now does a
+5s `socket.create_connection` first and raises `OpenDUnavailable` if nothing is
+listening, converting an unbounded hang into an immediate, catchable exception. It
+is in the shared client deliberately, so every caller (collector + universe refresh
++ `research.py`) is covered at once.
+
+**Verified:** dead port raises in **0.01s** (was: infinite) with a diagnostic naming
+opend.service and the vol-desk sharing; the real gateway still connects in 0.02s;
+the full collector against a dead port now exits 0 with `opend_ok=False`, one
+descriptive gap, and **a real phone push delivered**; the healthy path is unchanged
+(14 names, 0 gaps, opend_ok True). The gap test stubbed `append_journal` so no
+fabricated "OpenD was down" row entered the research dataset.
+
+⚠️ Residual: a gateway that is *listening but wedged* would still pass preflight and
+could stall inside an SDK call. Not fixed here — the new daily health check catches
+it within 10 days via a stale `signal_panel`, which is a backstop, not a fix.
+
+---
+
 ## 2026-07-24 — Upkeep reminders: a second ntfy topic + scheduled-job liveness
 
 Aaron asked for phone reminders covering the human-action items in the operator
