@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -40,29 +41,74 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import health  # noqa: E402
 
 
+# -------------------------------------------------------- the publishing rule
+#
+# ONE rule, enforced by every check below, because this module's output is filed
+# VERBATIM into a public GitHub issue (and its notification emails):
+#
+#   A failure message may contain only
+#     (a) a location — file:line;
+#     (b) fixed prose written here in this source file;
+#     (c) an identifier that came from this module's own constants or from
+#         health.SPECS (i.e. from code, not from the file being scanned);
+#     (d) a token that has been through _publishable() below.
+#
+#   It may NEVER interpolate arbitrary content read out of a scanned file.
+#   Cron lines, workflow lines and env assignments can all carry a credential
+#   (`API_TOKEN=abc/def+ghi123 /opt/x.py`, `--key sk-ant/secretvalue`), so
+#   echoing the offending text is how a leak-detector becomes the leak. When a
+#   message would want to quote the offending text, it says so and points at
+#   the line instead: the reader has the file; the public issue does not.
+
+_WITHHELD = "<withheld>"
+
+# Conservative allowlists for the only two things check 1 republishes. Anything
+# outside them is withheld rather than guessed at.
+_CRON_FIELD_RE = re.compile(r"^[0-9*,/A-Za-z-]{1,32}$")   # `*/5`, `1-7`, `1,4,7,10`, `MON`
+_COMMAND_NAME_RE = re.compile(r"^[A-Za-z0-9._/~-]{1,80}$")  # a program path, nothing else
+
+
 # ---------------------------------------------------------------- check 1
 
-# Redirection / shell-operator tokens that are never path arguments to check.
-_REDIRECT_STARTS = (">", "<", "2>", "&>", "1>")
-_SHELL_OPS = {"&&", "||", "|", ";", "&"}
+# Shell control operators — never a path argument.
+_SHELL_OPS = {"&&", "||", "|", "|&", ";", ";;", "&", "(", ")", "{", "}", "!"}
+# A bare redirect operator, which takes the NEXT token as its target:
+# `>` `>>` `>|` `<` `<<` `2>` `2>>` `&>` `&>>` `1>` ...
+_REDIRECT_BARE_RE = re.compile(r"^(?:&|[0-9]*)(?:>>|>\||>|<<<|<<|<)$")
+# Any token that STARTS a redirect but carries its own target (`2>&1`, `>>foo`).
+_REDIRECT_ANY_RE = re.compile(r"^(?:&|[0-9]*)[<>]")
+# `tee` / `/usr/bin/tee`: every following argument is an output FILE, not a
+# script to run — same "not the executed path" class as a redirect target.
+_TEE_RE = re.compile(r"(?:^|/)tee$")
 # A bare token with no `/` still names a script if it carries a script suffix.
 _SCRIPT_SUFFIX_RE = re.compile(r"\.(py|sh|bash|pl|rb|js)$")
 
 
+def _publishable(tok: str, allow: re.Pattern[str]) -> str:
+    """`tok` if it matches the conservative allowlist `allow`, else `<withheld>`.
+
+    The gate for rule (d) above: a token only reaches a public issue if its
+    shape rules out its being a credential.
+    """
+    return tok if allow.match(tok) else _WITHHELD
+
+
 def _cron_line_id(parts: list[str]) -> str:
     """A publishable identifier for a cron line: the 5 schedule fields plus the
-    command's FIRST token only.
+    command's FIRST token only, each passed through _publishable().
 
-    Never the whole line. This module's output is filed verbatim into a public
-    GitHub issue, and a cron line can carry inline env assignments
-    (`FOO=secret /usr/bin/thing`) whose values must not be republished. Even the
-    first token is redacted past the `=` if it is itself such an assignment.
+    Never the whole line, and never a raw token. A cron line can carry inline
+    env assignments (`FOO=secret /usr/bin/thing`) whose values must not be
+    republished, so the first token is redacted past any `=` and then must
+    still look like a plain program path to survive at all.
     """
-    schedule = " ".join(parts[:5])
+    schedule = " ".join(_publishable(f, _CRON_FIELD_RE) for f in parts[:5])
     toks = parts[5].split()
     head = toks[0] if toks else ""
     if "=" in head:
         head = head.split("=", 1)[0] + "=<redacted>"
+    else:
+        head = _publishable(head, _COMMAND_NAME_RE)
     return f"{schedule} {head}"
 
 
@@ -71,23 +117,50 @@ def _relative_path_tokens(command: str) -> list[str]:
 
     Covers the whole command, not just the first token: an absolute interpreter
     with a relative script argument (`/usr/bin/python3 scripts/foo.py`) is the
-    same cwd bug and used to pass. Skipped: flags (`-x`), redirect operators and
-    their targets (`>> logs/x.log`, `2>&1`), shell operators, absolute/`~` paths,
-    and `$VAR` expansions that cannot be resolved statically.
+    same cwd bug and used to pass.
+
+    Skipped, because none of them is a path cron has to resolve: flags (`-x`),
+    shell operators, absolute/`~` paths, `$VAR` expansions that cannot be
+    resolved statically, redirect operators and their targets in every spelling
+    (`>> x.log`, `2>> err.log`, `&>> e.log`, `2>&1`), everything after a `tee`
+    up to the next shell operator, and quoted arguments containing whitespace
+    (`--msg "hello/world there"` is a message, not a path).
+
+    Tokenised with shlex so shell quoting is respected; a line shlex refuses
+    (unbalanced quote) falls back to a plain split rather than raising — this
+    runs unattended and a parse quirk must not become a crash.
+
+    NOTE: the returned tokens are raw file content. They are used to DECIDE, and
+    counted; they are never interpolated into a failure message (publishing rule).
     """
+    try:
+        toks = shlex.split(command)
+    except ValueError:
+        toks = command.split()
+
     bad: list[str] = []
     expect_redirect_target = False
-    for tok in command.split():
+    after_tee = False
+    for tok in toks:
         if expect_redirect_target:
             expect_redirect_target = False
             continue
         if tok in _SHELL_OPS:
+            after_tee = False
             continue
-        if tok.startswith(_REDIRECT_STARTS):
-            # bare `>>` takes the NEXT token as its target; `2>&1` / `>>foo` don't
-            expect_redirect_target = tok in {">", ">>", "<", "2>", "&>", "1>"}
+        if _REDIRECT_BARE_RE.match(tok):
+            expect_redirect_target = True
+            continue
+        if _REDIRECT_ANY_RE.match(tok):
+            continue
+        if after_tee:
+            continue
+        if _TEE_RE.search(tok):
+            after_tee = True
             continue
         if tok.startswith(("-", "/", "~", "$")):
+            continue
+        if any(c.isspace() for c in tok):
             continue
         if "/" in tok or _SCRIPT_SUFFIX_RE.search(tok):
             bad.append(tok)
@@ -106,8 +179,11 @@ def check_cron_paths(root: pathlib.Path) -> list[str]:
     (`/usr/bin/python3 scripts/health_check.py`), which an inspection of only
     the first token reports clean.
 
-    Failure text carries file:line plus schedule + command name only; the rest
-    of the line is withheld because this output is published (see _cron_line_id).
+    Failure text carries file:line plus schedule + command name only. Neither
+    branch echoes any other part of the line — not the command, not the
+    offending path arguments — because those are arbitrary command text that
+    can carry a credential and this output is published (see the publishing
+    rule above, and _cron_line_id).
     """
     path = root / "deploy" / "crontab.template"
     try:
@@ -140,9 +216,11 @@ def check_cron_paths(root: pathlib.Path) -> list[str]:
         relative = _relative_path_tokens(command)
         if relative:
             failures.append(
-                f"{where}: absolute command but RELATIVE path argument(s) "
-                f"{relative!r} — cron's cwd is /root, so these silently resolve "
-                "to nothing; use an absolute path or prefix `cd /opt/agentic-trader`"
+                f"{where}: absolute command but {len(relative)} RELATIVE path "
+                "argument(s) — cron's cwd is /root, so these silently resolve "
+                "to nothing; use an absolute path or prefix `cd /opt/agentic-trader` "
+                "(argument text withheld — this output is published; open the "
+                "file at that line to see which)"
             )
     return failures
 
@@ -190,6 +268,11 @@ def check_scheduled_jobs_armed(root: pathlib.Path) -> list[str]:
     stripped before matching precisely so that this check cannot be satisfied
     by prose *about* a job (the substring appearing in a `#` narration, or in a
     commented-out line, used to count as armed).
+
+    Publishing rule: the only values interpolated below are `key`/`label` from
+    health.SPECS and `expected` from CRON_SUBSTRINGS — both code constants in
+    this repo, not content read out of the scanned file. Nothing from
+    crontab.template itself is echoed.
     """
     path = root / "deploy" / "crontab.template"
     try:
@@ -260,6 +343,11 @@ def check_workflow_failure_exits(root: pathlib.Path) -> list[str]:
     `exit 0` mentioned only in the comment text) must not fire this check.
     A trailing inline comment on an otherwise-real code line does not make
     that line comment-only; it is still scanned.
+
+    Publishing rule: the finding gives both line numbers and no line TEXT. A
+    workflow line is arbitrary file content — a `run:` step can carry a token
+    (`curl -H "Authorization: Bearer ..." || echo FAILED`) — and this output
+    goes into a public issue.
     """
     wf_dir = root / ".github" / "workflows"
     if not wf_dir.is_dir():
@@ -287,50 +375,65 @@ def check_workflow_failure_exits(root: pathlib.Path) -> list[str]:
                 seen.add(key)
                 failures.append(
                     f"{rel}:{i + j + 1}: `exit 0` appears within 3 lines of a "
-                    f"failure marker (line {i + 1}: {line.strip()!r}) — a real "
-                    "failure here could exit green"
+                    f"failure marker (marker on line {i + 1}; line text withheld "
+                    "— this output is published) — a real failure here could "
+                    "exit green"
                 )
     return failures
 
 
 # ---------------------------------------------------------------- check 4
 
-_API_KEY_ASSIGN_RE = re.compile(r"ANTHROPIC_API_KEY\s*=\s*(\S+)")
+# NOTE the absence of `\s*` AFTER the `=` — that is the whole prose/code
+# discriminator. A real shell/env/YAML assignment never puts a space between
+# `=` and its value (`FOO= bar` sets FOO empty and runs `bar`), whereas prose
+# about the footgun essentially always does, or ends the clause there:
+#
+#   ANTHROPIC_API_KEY=sk-ant-...            <- assignment, value starts at once
+#   "Never set ANTHROPIC_API_KEY= anywhere" <- prose; with `\s*` this captured
+#                                              the next WORD ("anywhere") and fired
+_API_KEY_ASSIGN_RE = re.compile(r"ANTHROPIC_API_KEY\s*=(\S+)")
 _SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__"}
 
-# What a value must look like once markdown/shell wrapping is peeled off, to be
-# treated as plausibly a real credential: a bare opaque token, >= 9 chars, made
-# only of the characters that appear in API keys.
-_CREDENTIAL_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+/=\-]{7,}$")
+# What a bare literal value must look like to be plausibly a real credential:
+# an opaque token of >= 9 chars ([A-Za-z0-9] + at least 8 more), made only of
+# the characters that appear in API keys. Length is load-bearing — it is what
+# keeps an elided fragment in prose ("...=sk-ant-...", 6 chars once trailing
+# dots are stripped) from firing.
+_CREDENTIAL_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+/=\-]{8,}$")
 
 
 def _looks_like_credential(raw: str) -> bool:
-    """True iff the text assigned to ANTHROPIC_API_KEY plausibly IS a live key.
+    """True iff the text assigned to ANTHROPIC_API_KEY means the variable is
+    really being SET — either to a literal key or to an expansion of one.
 
-    The point is the FALSE-POSITIVE class, not stylistic tidiness: the naive
-    "any non-empty value" rule accepted a bare backtick, so ordinary markdown
-    prose of the shape  the literal `ANTHROPIC_API_KEY=`  matched and fired.
-    This repo's docs discuss that footgun constantly (docs/superpowers/plans/,
-    CLAUDE.md, DEPLOY.md), so with this check wired into a daily job that files
-    a public issue, a sentence in a design doc would file an issue every day
-    forever — and a checker that cries wolf daily is a checker nobody reads.
+    Per CLAUDE.md the footgun is the variable being set AT ALL ("if
+    ANTHROPIC_API_KEY is set anywhere on the box, it silently overrides the
+    subscription and bills per-token"), so a deploy wrapper doing
+    `export ANTHROPIC_API_KEY=$KEY` — the realistic shape — counts, and so does
+    `ANTHROPIC_API_KEY="${{ secrets.X }}"` in a workflow. This function does NOT
+    try to judge whether the value is a *valid* key; it only separates a real
+    assignment from prose about one.
 
-    Fixed at the root class rather than by excluding paths or file types: .md
-    files are still scanned in full, so a REAL key committed in markdown is
-    still caught. Rejected here are only values that cannot be a key —
+    That separation is now mostly done by the regex above (no whitespace after
+    the `=`). What is left here is the residue that survives it:
 
-      * prose/markdown wrapping that leaves nothing behind:
-        `ANTHROPIC_API_KEY=` , "ANTHROPIC_API_KEY=" , trailing sentence
-        punctuation, or end-of-line (no value at all);
-      * shell-safe forms this repo uses on purpose: ${ANTHROPIC_API_KEY:-},
-        $OTHER, "" / '' (and `unset ANTHROPIC_API_KEY`, which has no `=` and
-        never reached the regex);
-      * fragments too short or too punctuated to be a credential ("sk-ant-...").
+      * value that is only markdown/shell wrapping and empties out —
+        `ANTHROPIC_API_KEY=` in backticks, "ANTHROPIC_API_KEY=", a bare quote
+        pair (`=""`), trailing sentence punctuation -> NOT a set;
+      * `unset ANTHROPIC_API_KEY` and the guard form `${ANTHROPIC_API_KEY:-}`
+        never reach here at all — neither has an `=` directly after the NAME;
+      * an elided prose fragment ("=sk-ant-...") -> too short, NOT a set;
+      * anything containing `$` or `{` -> IS a set, via expansion.
 
-    Note a leading quote is peeled, NOT treated as an automatic pass: a real
-    shell assignment quotes its value (ANTHROPIC_API_KEY="sk-ant-real"), and
-    that must stay caught. It is the peeled INNER text that has to look like a
-    secret.
+    A leading quote is peeled, not treated as a pass: a real shell assignment
+    quotes its value (ANTHROPIC_API_KEY="sk-ant-real"), and that must stay
+    caught. It is the peeled INNER text that decides.
+
+    KNOWN GAP, stated plainly: a literal value shorter than 9 characters
+    (`ANTHROPIC_API_KEY=x`) is not flagged. It cannot be a real key, and the
+    length floor is what buys silence on prose; the realistic footgun shapes
+    (a real key, `$VAR`, `${{ secrets.X }}`) are all covered.
     """
     v = raw.strip()
     # peel markdown code fences / shell quoting from both ends, then any
@@ -341,7 +444,7 @@ def _looks_like_credential(raw: str) -> bool:
     if not v:
         return False            # `ANTHROPIC_API_KEY=` in prose, or an empty placeholder
     if "$" in v or "{" in v:
-        return False            # ${VAR:-} / $VAR expansion, not a literal secret
+        return True             # $VAR / ${...} / "${{ secrets.X }}" — set by expansion
     return bool(_CREDENTIAL_VALUE_RE.match(v))
 
 
@@ -366,18 +469,30 @@ def _iter_candidate_files(root: pathlib.Path) -> list[pathlib.Path]:
 
 
 def check_no_api_key(root: pathlib.Path) -> list[str]:
-    """No tracked file may set `ANTHROPIC_API_KEY=` to a value that plausibly
-    IS a credential (see _looks_like_credential — prose and `${VAR:-}` forms do
-    not count), and deploy/crontab.template may only mention the name inside a
-    `#` comment.
+    """No tracked file may assign `ANTHROPIC_API_KEY=<something>`, and
+    deploy/crontab.template may only mention the name inside a `#` comment.
 
     Findings report file:line ONLY, never the matched value: this output is
     filed verbatim into a public GitHub issue, so echoing the offending text
     would leak the key it just found.
 
-    Catches: the per-token billing footgun — a stray ANTHROPIC_API_KEY set
-    anywhere silently overrides the Claude subscription plan and bills the
-    API per token.
+    WHY: the per-token billing footgun. Per CLAUDE.md, ANTHROPIC_API_KEY set
+    anywhere on the box silently overrides the Claude subscription plan and
+    bills the API per token — so the thing being detected is the ASSIGNMENT,
+    whether the value is a literal key, `$SOME_VAR`, or `${{ secrets.X }}`.
+
+    Scope, honestly — what this does NOT cover:
+      * files, not the box. This reads git-tracked files. An export typed into
+        a live shell, a systemd unit outside the repo, or a value in the
+        git-ignored `.env` is invisible to it. deploy/run_fast_loop.sh's
+        runtime guard is what covers the box.
+      * the guard and teardown forms are deliberately silent: `${ANTHROPIC_API_KEY:-}`
+        and `unset ANTHROPIC_API_KEY` are correct usage and have no `=` after
+        the name.
+      * prose about the footgun is deliberately silent (this repo's docs are
+        full of it) — see _API_KEY_ASSIGN_RE and _looks_like_credential for
+        exactly where that line is drawn, and its one known gap (a literal
+        value under 9 chars).
 
     This file (src/repo_checks.py) is excluded from the scan. It necessarily
     contains the `ANTHROPIC_API_KEY=` literal itself — in this docstring, in
@@ -407,11 +522,11 @@ def check_no_api_key(root: pathlib.Path) -> list[str]:
             if not m:
                 continue
             if not _looks_like_credential(m.group(1)):
-                continue  # prose, ${VAR:-}, or `.env.example`'s empty placeholder
+                continue  # prose, or `.env.example`'s empty placeholder
             failures.append(
-                f"{rel}:{lineno}: literal `ANTHROPIC_API_KEY=` assigned a "
-                "credential-shaped value (withheld) — this silently switches "
-                "billing to per-token API use"
+                f"{rel}:{lineno}: `ANTHROPIC_API_KEY=` is assigned a value "
+                "(withheld) — setting this variable at all silently switches "
+                "billing from the subscription to per-token API use"
             )
 
     crontab = root / "deploy" / "crontab.template"
@@ -508,8 +623,11 @@ HOME=/root
         bad = check_cron_paths(root)
         assert len(bad) == 1, bad
         assert "crontab.template:1" in bad[0], bad
-        assert "scripts/health_check.py" in bad[0], bad
-        # the redirect TARGET is relative too but must not be reported as the
+        # ...but the offending token is COUNTED, never quoted (publishing rule
+        # / N1): the message locates the line and says how many, no text.
+        assert "1 RELATIVE path argument" in bad[0], bad
+        assert "scripts/health_check.py" not in bad[0], bad
+        # the redirect TARGET is relative too but must not be counted as the
         # bug class here -- only the executed script argument.
         assert "logs/health.log" not in bad[0], bad
 
@@ -536,6 +654,67 @@ HOME=/root
         assert "crontab.template:1" in bad[0], bad
         assert "hunter2supersecret" not in bad[0], bad
         assert "<redacted>" in bad[0], bad
+
+    # N1 fixture: the SIBLING branch (absolute command, relative argument) used
+    # to interpolate the offending tokens verbatim -- and those tokens are
+    # arbitrary command text. Both probe shapes below carry a secret through
+    # THAT branch; neither may reach the published output.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "deploy/crontab.template", """\
+0 8 * * * /usr/bin/env API_TOKEN=abc/def+ghi123 x.py >> /opt/logs/a.log 2>&1
+0 9 * * * /opt/x.sh --key sk-ant/secretvalue >> /opt/logs/b.log 2>&1
+""")
+        bad = check_cron_paths(root)
+        assert len(bad) == 2, bad
+        assert "crontab.template:1" in bad[0] and "crontab.template:2" in bad[1], bad
+        joined = " ".join(bad)
+        assert "abc/def+ghi123" not in joined, bad
+        assert "sk-ant/secretvalue" not in joined, bad
+        assert "withheld" in bad[0] and "withheld" in bad[1], bad
+
+    # ...and a schedule field or command name that is not obviously safe is
+    # itself withheld rather than republished.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "deploy/crontab.template", "0 8 * * * sk-ant$/secret/x.sh\n")
+        bad = check_cron_paths(root)
+        assert len(bad) == 1, bad
+        assert "sk-ant" not in bad[0], bad
+        assert _WITHHELD in bad[0], bad
+
+    # N5 fixture: redirect spellings the operator set used to miss, `tee`
+    # targets after a pipe, and a quoted argument containing a `/`. None of
+    # these is a path cron has to resolve, so none may fire -- each was a
+    # future daily false issue.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "deploy/crontab.template", """\
+0 1 * * * /opt/a.sh 2>> logs/err.log
+0 2 * * * /opt/b.sh &>> logs/e.log
+0 3 * * * /opt/c.sh 1>> logs/c.log 2>> logs/c.err
+0 4 * * * /opt/d.sh | tee logs/t.log
+0 5 * * * /opt/e.sh --msg "hello/world there"
+0 6 * * * /opt/f.sh >|logs/g.log 2>&1
+""")
+        assert check_cron_paths(root) == [], check_cron_paths(root)
+
+    # ...while the real bug class still fires through the same tokenizer: a
+    # relative script AFTER a quoted argument, and after a pipe.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "deploy/crontab.template", """\
+0 1 * * * /opt/a.sh --msg "hello there" scripts/run.py 2>> logs/err.log
+0 2 * * * /opt/b.sh | tee logs/t.log ; /usr/bin/python3 scripts/other.py
+""")
+        bad = check_cron_paths(root)
+        assert len(bad) == 2, bad
+
+    # an unbalanced quote must fall back to a plain split, not raise
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "deploy/crontab.template", '0 1 * * * /opt/a.sh --msg "unclosed\n')
+        assert check_cron_paths(root) == [], check_cron_paths(root)
 
     # missing crontab.template entirely -> a reported failure, not a crash
     with tempfile.TemporaryDirectory() as td:
@@ -723,25 +902,47 @@ ANTHROPIC_API_KEY=sk-ant-api03-REDACTEDLOOKINGVALUE123
         assert any("crontab.template:2" in b for b in bad), bad
         assert not any("REDACTEDLOOKINGVALUE123" in b for b in bad), bad
 
-    # -------------------- FINDING 2: prose must not trip -----------------
+    # -------------------- MUST NOT FIRE: prose + safe shell forms ---------
     # Markdown discussing the footgun — the exact shapes this repo's docs and
-    # plan files use. The naive `(\\S+)` rule accepted a bare backtick as a
-    # "non-empty value", so every one of these fired.
+    # plan files use — plus the guard/teardown forms deploy scripts use on
+    # purpose. Two distinct bugs lived here: a bare backtick counted as a
+    # "non-empty value" (FINDING 2), and `=\\s*(\\S+)` jumped the space in
+    # "ANTHROPIC_API_KEY= anywhere" to capture the next WORD (N3).
     with tempfile.TemporaryDirectory() as td:
         root = pathlib.Path(td)
         _write(root, "docs/plan.md", """\
 - Auth is `CLAUDE_CODE_OAUTH_TOKEN` (subscription). **Never introduce `ANTHROPIC_API_KEY`**
 4. **`check_no_api_key`** — no tracked file may contain the literal `ANTHROPIC_API_KEY=`
    A stray `ANTHROPIC_API_KEY=` flips billing to per-token API use.
+   Never set ANTHROPIC_API_KEY= anywhere on the box.
    Written in prose without backticks: ANTHROPIC_API_KEY= is still harmless.
+   The key looks like ANTHROPIC_API_KEY=sk-ant-... in a wrapper.
 """)
         _write(root, "deploy/guard.sh", """\
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then exit 1; fi
 ANTHROPIC_API_KEY=""
-ANTHROPIC_API_KEY=$OTHER_VAR
 unset ANTHROPIC_API_KEY
 """)
         assert check_no_api_key(root) == [], check_no_api_key(root)
+
+    # -------------------- N2: MUST FIRE — set by EXPANSION ----------------
+    # The realistic footgun shape. CLAUDE.md's rule is that the variable being
+    # SET AT ALL flips billing, so a deploy wrapper exporting another variable's
+    # value, or a workflow wiring in a repo secret, is exactly the thing to
+    # catch. The opacity heuristic ("reject anything containing $ or {") made
+    # both of these SILENT.
+    for _fixture in (
+        "export ANTHROPIC_API_KEY=$SOME_SECRET_VAR\n",
+        'ANTHROPIC_API_KEY="${{ secrets.ANTHROPIC_API_KEY }}"\n',
+        "ANTHROPIC_API_KEY=${SOME_OTHER_VAR}\n",
+    ):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            _write(root, "deploy/wrapper.sh", _fixture)
+            bad = check_no_api_key(root)
+            assert len(bad) == 1, (_fixture, bad)
+            assert "wrapper.sh:1" in bad[0], (_fixture, bad)
+            assert "SOME_SECRET_VAR" not in bad[0], (_fixture, bad)
 
     # ...but a REAL-looking assignment inside a .md file is STILL caught. The
     # fix is to the value pattern, not a wholesale .md exclusion.
