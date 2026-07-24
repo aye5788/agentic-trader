@@ -22,12 +22,20 @@ is what makes them safe on the shared ops topic (see src/notify.py:ops_topic).
 
     python scripts/health_check.py            # check + push if needed
     python scripts/health_check.py --dry      # print what it WOULD push
+    python scripts/health_check.py --open-issue  # also file/comment a deduped
+                                               # GitHub issue for newly-alerting
+                                               # conditions (via the box's
+                                               # already-authenticated `gh`;
+                                               # never breaks the push if `gh`
+                                               # fails). Combine with --dry to
+                                               # preview without filing.
     python scripts/health_check.py --selftest # logic tests, no I/O
 """
 import argparse
 import datetime as dt
 import json
 import pathlib
+import subprocess
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -37,6 +45,31 @@ import health                                    # noqa: E402
 from notify import push, ops_topic               # noqa: E402
 
 STATE = REPO / "research_store" / "health_state.json"
+
+# The issue title is the dedupe key: an open issue with this exact title gets
+# a comment instead of a new issue, so a still-broken condition doesn't spam a
+# fresh issue every day. Keep it stable.
+ISSUE_TITLE = "\U0001F534 Scheduled job unhealthy"  # "🔴 Scheduled job unhealthy"
+
+# Created idempotently before filing — a fresh repo (or a fresh mirror) may not
+# have these labels yet, and `gh issue create --label` needs them to exist.
+ISSUE_LABELS = [
+    ("bug", "d73a4a", "Something isn't working"),
+    ("auto-fix", "0e8a16",
+     "Filed by the automated oversight loop for an agent to propose a fix"),
+]
+
+# Printed verbatim in every filed issue. The issue body is PUBLIC (this repo's
+# issue tracker), so this line is what tells a reader — human or agent — that
+# the fix belongs in ops/plumbing (scripts/, deploy/, config), never in a live
+# trading decision. Pair with compose()'s "never positions/prices/P&L" rule:
+# the same "ops, not the book" boundary applies to both channels.
+OPS_VS_CODE_NOTE = (
+    "This is an ops/scheduling alert (a job stopped leaving evidence it ran) — "
+    "not a trading decision. A fix belongs in the code/config that runs the "
+    "job (scripts/, deploy/, config/), never in a live position, order, or "
+    "the book itself."
+)
 
 # "never ran" and "stopped running" have different causes and different fixes.
 # A job that has NEVER left an artifact is usually not scheduled at all — that was
@@ -102,10 +135,116 @@ def compose(to_alert) -> tuple[str, str]:
     return title, "\n".join(lines)
 
 
+def issue_body(to_alert) -> str:
+    """Build the GitHub issue body. Pure string building — no `gh` call here,
+    so this is fully testable without invoking the CLI.
+
+    PUBLIC-SAFETY CONTRACT: this is filed verbatim into a public GitHub issue.
+    Same rule as compose(): job names, statuses, ages, remedy strings — and
+    NOTHING else. No dollar figures, no positions, no P&L, no secrets, no file
+    contents beyond what health.Check already exposes.
+    """
+    lines = ["Daily health check found the following unhealthy scheduled job(s):", ""]
+    for c in to_alert:
+        lines.append(f"- **{c.label}** (`{c.key}`) — status: `{c.status}` — {c.detail}")
+        remedy = NEVER_REMEDY if c.status == "never" else REMEDY.get(c.key)
+        if remedy:
+            lines.append(f"  - Remedy: {remedy}")
+    lines.append("")
+    lines.append(OPS_VS_CODE_NOTE)
+    return "\n".join(lines)
+
+
+def _gh(args: list[str]) -> tuple[bool, str, str]:
+    """Run a `gh` subcommand under REPO with a timeout. NEVER raises: any
+    failure (gh missing, not authenticated, network down, rate limited,
+    timeout) degrades to (False, "", diagnostic) so the issue-filing bonus can
+    never take down the check or the phone push, which is the primary channel.
+    """
+    try:
+        out = subprocess.run(["gh"] + args, capture_output=True, text=True,
+                              timeout=30, cwd=REPO)
+        return out.returncode == 0, out.stdout, out.stderr
+    except Exception as e:  # gh not installed, timeout, etc.
+        return False, "", f"{type(e).__name__}: {e}"
+
+
+def _ensure_labels() -> None:
+    """Create `bug` / `auto-fix` idempotently. Best-effort: a label that
+    already exists returns a 422 from the API, which we swallow; any other
+    failure just prints a diagnostic (the labels may already exist from a
+    prior run, or `gh issue create --label` may fail below — either way we
+    continue rather than blocking the alert)."""
+    for name, color, desc in ISSUE_LABELS:
+        ok, _, err = _gh(["api", "repos/{owner}/{repo}/labels", "-X", "POST",
+                           "-f", f"name={name}", "-f", f"color={color}",
+                           "-f", f"description={desc}"])
+        if not ok and "already_exists" not in err and "already exists" not in err:
+            print(f"gh: could not ensure label {name!r} (continuing): {err.strip()[:200]}")
+
+
+def _find_open_issue(title: str) -> int | None:
+    """Number of an OPEN issue with this exact title, or None. Lists rather
+    than server-side searches on title so we don't depend on GitHub search
+    query syntax behaving a particular way across `gh` versions."""
+    ok, out, err = _gh(["issue", "list", "--state", "open",
+                         "--json", "number,title", "--limit", "100"])
+    if not ok:
+        print(f"gh: could not list issues for dedupe (continuing): {err.strip()[:200]}")
+        return None
+    try:
+        items = json.loads(out or "[]")
+    except ValueError:
+        return None
+    for item in items:
+        if item.get("title") == title:
+            return item.get("number")
+    return None
+
+
+def file_issue(to_alert, *, dry: bool) -> None:
+    """File-or-comment the deduped issue for newly-alerting conditions.
+
+    Wrapped so any `gh` failure prints a diagnostic and returns — filing is a
+    bonus channel, never allowed to break the check or the phone push (the
+    primary channel), which have already run by the time this is called.
+    """
+    if not to_alert:
+        return
+    body = issue_body(to_alert)
+    if dry:
+        print(f"--- would file/comment issue (dry) ---\n{ISSUE_TITLE}\n{body}\n"
+              f"{'-' * 30}")
+        return
+    try:
+        _ensure_labels()
+        number = _find_open_issue(ISSUE_TITLE)
+        if number is not None:
+            ok, _, err = _gh(["issue", "comment", str(number), "--body", body])
+            if ok:
+                print(f"gh: commented on existing issue #{number}")
+            else:
+                print(f"gh: could not comment on issue #{number} (continuing): "
+                      f"{err.strip()[:200]}")
+        else:
+            ok, out, err = _gh(["issue", "create", "--title", ISSUE_TITLE,
+                                 "--body", body, "--label", "bug",
+                                 "--label", "auto-fix"])
+            if ok:
+                print(f"gh: filed issue {out.strip()}")
+            else:
+                print(f"gh: could not create issue (continuing): {err.strip()[:200]}")
+    except Exception as e:  # belt-and-braces: filing must never break the run
+        print(f"gh: issue filing crashed unexpectedly (continuing): {e}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true", help="print, don't push")
     ap.add_argument("--offline", action="store_true", help="skip the GitHub Actions probe")
+    ap.add_argument("--open-issue", action="store_true",
+                     help="also file/comment a deduped GitHub issue for newly-alerting "
+                          "conditions (via `gh`; never breaks the push on failure)")
     ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
 
@@ -132,6 +271,8 @@ def main() -> None:
         print(f"--- {header} ---\n{title}\n{body}\n{'-' * (len(header) + 8)}")
         if not args.dry:
             push(title, body, tags="wrench", topic=ops_topic())
+        if args.open_issue:
+            file_issue(to_alert, dry=args.dry)
     elif flagged:
         # Silent by design (fire-once) — but don't let the log claim all is well.
         print(f"no NEW conditions; {len(flagged)} still unresolved and already "
@@ -202,6 +343,18 @@ def _selftest() -> None:
     # single-item title names the job
     title, _ = compose([bad])
     assert title.endswith("Panel"), title
+
+    # --- issue body composition (pure — no gh invoked) ---
+    body = issue_body([bad, due])
+    assert "Panel" in body and "signal_panel" in body, "must name the bad condition"
+    assert "Schwab token" in body and "schwab_token" in body, "must name the due condition"
+    assert "crontab -l" in body, "must carry the never-ran remedy"
+    assert "schwab_auth.py" in body, "must carry the schwab remedy"
+    assert OPS_VS_CODE_NOTE in body, "must carry the ops-vs-code note verbatim"
+    assert "$" not in body, "issue body (PUBLIC) must never carry a dollar figure"
+
+    empty_body = issue_body([])
+    assert "$" not in empty_body
 
     print("health_check selftest: PASS")
 
