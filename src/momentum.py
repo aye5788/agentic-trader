@@ -28,7 +28,8 @@ def _asof_slice(panel: pd.DataFrame, asof: pd.Timestamp) -> pd.DataFrame:
 
 def compute(panel: pd.DataFrame, asof: pd.Timestamp,
             lookback: int = LOOKBACK, residual_tilt: float = 0.0,
-            market: "pd.Series | None" = None) -> pd.DataFrame:
+            market: "pd.Series | None" = None,
+            factors: "pd.DataFrame | None" = None) -> pd.DataFrame:
     """Return a per-ticker DataFrame [R, sigma, ret, trend, score, eligible,
     rank], indexed by ticker, for the given as-of date. Tickers without enough
     history (need lookback+1 and TREND_MA closes) are dropped. `lookback`
@@ -59,9 +60,12 @@ def compute(panel: pd.DataFrame, asof: pd.Timestamp,
     # equal-weight rank-average of the (optionally residual-blended) momentum view and the trend view
     p_ret = df["ret"].rank(pct=True)
     p_trend = df["trend"].rank(pct=True)
-    if residual_tilt and residual_tilt > 0.0 and market is not None:
+    if residual_tilt and residual_tilt > 0.0 and (factors is not None or market is not None):
         import residual
-        rm = residual.residual_momentum(panel, asof, market, lookback).reindex(df.index)
+        if factors is not None:
+            rm = residual.residual_momentum_sector(panel, asof, factors, lookback).reindex(df.index)
+        else:
+            rm = residual.residual_momentum(panel, asof, market, lookback).reindex(df.index)
         p_resid = rm.rank(pct=True).fillna(p_ret)     # missing residual -> fall back to R/σ rank
         p_mom = (1.0 - residual_tilt) * p_ret + residual_tilt * p_resid
     else:
@@ -145,6 +149,34 @@ def _selftest() -> None:
     assert not base["score"].equals(full["score"]), "residual_tilt=1 should re-rank"
     assert full.loc["BETA_ONLY", "score"] < base.loc["BETA_ONLY", "score"] - 0.05, \
         (base.loc["BETA_ONLY", "score"], full.loc["BETA_ONLY", "score"])
+
+    # --- sector (multi-factor) path ---
+    import residual as _res
+    ns = 260
+    sidx = pd.date_range("2024-01-01", periods=ns, freq="B")
+    st = np.arange(ns)
+    def _p(r): return pd.Series(100 * np.cumprod(1 + r), index=sidx)
+    S1 = 0.0009 + 0.012 * np.sin(2 * np.pi * st / 15)
+    S2 = 0.0006 + 0.010 * np.sin(2 * np.pi * st / 11 + 0.7)
+    factors = pd.DataFrame({"XLK": _p(S1), "XLF": _p(S2)}, index=sidx)
+    dps = 0.0018 + 0.004 * np.sin(2 * np.pi * st / 7)
+    spanel = pd.DataFrame({
+        "SPANNED": _p(0.8 * S1 + 0.5 * S2 + 0.004 * np.sin(2 * np.pi * st / 8 + 0.4)),  # ~0 sector-residual
+        "IDIO":    _p(0.4 * S1 + dps),                                                  # strong sector-residual
+        "G1": _p(1.0 * S1 + 0.002 * np.sin(2 * np.pi * st / 6)),
+        "G2": _p(0.7 * S2 - 0.0015 * np.sin(2 * np.pi * st / 9)),
+        "G3": _p(0.5 * S1 + 0.5 * S2 + 0.002 * np.sin(2 * np.pi * st / 13)),  # zero-mean idio (NOT a constant — a constant gives ~0 residual var -> blowup)
+    }, index=sidx)
+    sasof = sidx[-1]
+    # tilt=0 is still identity on this panel
+    assert compute(spanel, sasof)["score"].equals(
+        compute(spanel, sasof, residual_tilt=0.0, factors=factors)["score"]), "tilt0 identity (sector)"
+    # the sector residual is well-conditioned (ties to Task 1 math): IDIO >> SPANNED
+    rms = _res.residual_momentum_sector(spanel, sasof, factors)
+    assert rms["IDIO"] > rms["SPANNED"], rms.round(3).to_dict()
+    # the factors path produces finite scores and re-ranks vs baseline
+    fs = compute(spanel, sasof, residual_tilt=1.0, factors=factors)
+    assert fs["score"].notna().all() and not compute(spanel, sasof)["score"].equals(fs["score"]), "sector path re-ranks"
 
     print("selftest OK: compute residual_tilt (0=identity, 1=meaningfully re-ranks)")
 
