@@ -61,13 +61,12 @@ def realized_history(journal: list) -> list:
     """Full-life realized-P&L series from `outcome` events (not RH's rolling
     window). Each item: {symbol, at, pnl_pct, status, decision_id}.
 
-    SCOPE (as of 2026-07-22): only the stop/take-profit exit path records
-    `outcome` events (prompts/exit.md step 7c). Weekly-rotation full closes in
-    the fast loop currently emit `execution` events but NOT `outcome` events, so
-    this series does NOT yet cover rotation exits — the dominant close path.
-    Wiring rotation-close outcomes (they must attach to the ARCHIVED thesis, not
-    the current book, or record_outcome raises) is the tracked follow-up. Treat
-    this as stop/target-close coverage until then, not a complete P&L ledger."""
+    SCOPE (as of 2026-07-24): covers BOTH close paths — stop/take-profit exits
+    (prompts/exit.md) AND weekly-rotation full closes (fast loop). Rotation closes
+    attach their outcome to the ARCHIVED thesis via record_rotation_outcome()
+    (research_store), keyed by decision_id, since the rotated-out name is no
+    longer in the current book. Partial (scale-out) exits are still excluded —
+    only full closes record an outcome (known first-cut limitation)."""
     out = []
     for e in journal:
         if e.get("event") != "outcome":

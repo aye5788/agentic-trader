@@ -96,5 +96,24 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    Then run `.venv/bin/python scripts/reconcile_ledger.py`. It appends any RH
    fill missing from the journal and PHONE-ALARMS + exits non-zero if the
    journal is still incomplete. Do not suppress its exit code.
+9b. **Record rotation-close outcomes (the learning label).** For each symbol you
+    sold to a FULL close this run (position now zero — a rotation OUT of the book;
+    the stop/take-profit path is handled separately by `prompts/exit.md`), compute
+    and journal its outcome. In one short `.venv/bin/python` snippet:
+      - entry_price = that symbol's average cost from the **step-4** positions
+        snapshot — the PRE-sell cost. Step 8 overwrote `positions.json` to
+        post-sell state and drops fully-closed names, so use the value you saw
+        BEFORE selling, not a re-read.
+      - exit_price  = the sell's `average_price` from step 8's `get_equity_orders`.
+      - exit_date   = today (YYYY-MM-DD); exit_reason = `"rebalanced"` (or
+        `"regime_off"` if the whole book was closed because regime flipped off).
+      `from research_store import record_rotation_outcome` (add `src` to sys.path),
+      then `record_rotation_outcome(symbol, entry_price=<pre-sell cost>,
+      exit_price=<sell avg>, exit_date="<YYYY-MM-DD>", now_iso="<now iso>")`. It
+      finds the symbol's last-held archived thesis, computes the outcome, and
+      attaches it to that thesis by `decision_id` + appends an `outcome` event.
+      Idempotent (safe to re-run). Partial (trim) sells: skip — only FULL closes
+      get an outcome (same first-cut rule as exit.md 7c). Do NOT hand-edit
+      `journal.jsonl`; this helper is the only writer.
 10. **Report** concisely: account value, orders placed, any blocked/failed, and
     the resulting book. That is your entire output.

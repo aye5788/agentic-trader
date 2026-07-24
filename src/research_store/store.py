@@ -52,6 +52,32 @@ def load_current() -> dict | None:
         return json.load(f)
 
 
+def load_archived(as_of: str) -> dict | None:
+    """Return the archived product dict for an `as_of` stamp, or None if absent.
+
+    Used to attach a rotation-close outcome to the ARCHIVED thesis (the name is
+    no longer in the current book, so `load_current` can't see it)."""
+    if not as_of:
+        return None
+    p = ARCHIVE / f"{as_of}.json"
+    if not p.exists():
+        return None
+    with p.open() as f:
+        return json.load(f)
+
+
+def save_archived(as_of: str, product_dict: dict) -> Path:
+    """Atomically overwrite one dated archive file (e.g. to attach an outcome)."""
+    return _atomic_write(ARCHIVE / f"{as_of}.json", product_dict) or (ARCHIVE / f"{as_of}.json")
+
+
+def archive_stamps() -> list:
+    """Sorted `as_of` stamps of every archived belief (filenames sans .json)."""
+    if not ARCHIVE.exists():
+        return []
+    return sorted(p.stem for p in ARCHIVE.glob("*.json"))
+
+
 def append_journal(entry: dict) -> None:
     """Append one event to the journal (one JSON object per line)."""
     STORE_DIR.mkdir(parents=True, exist_ok=True)
