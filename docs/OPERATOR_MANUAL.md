@@ -37,7 +37,15 @@ risk-review overlay is also forced to alert-only automatically.
 ## 1. WEEKLY — refresh the Schwab login  ⏰ your #1 recurring job
 
 Schwab's token **expires every 7 days**. If you skip it, the price feed dies and
-the book goes stale. You get a **phone reminder every Monday 9am**.
+the book goes stale.
+
+**The reminder is now smart, not calendar-based.** A daily 08:00 check reads the
+token's *actual* age and phones you when you're inside 3 days of expiry — so it
+stays silent on weeks you've already re-authed, and it escalates to "EXPIRED" if
+you run out. (It replaced a blind Monday nag that fired regardless and never
+followed up.) You'll get **one** push per expiry cycle; the dashboard's
+"Scheduled jobs" card shows days-remaining continuously if you want to check
+deliberately.
 
 **Do this (in a real SSH terminal, not through chat — the prompt needs to block):**
 ```
@@ -102,9 +110,19 @@ or delete `config/strategy.adaptive.toml`.
 
 ## 3. When your phone buzzes (ntfy alerts) — what each means
 
+**Two topics, on purpose.** Trade alerts (fills, stops, P&L) go to your main ntfy
+topic, which lives only on the droplet. **Upkeep reminders** go to a second topic
+(`NTFY_TOPIC_OPS`) and carry job names and ages *only* — never a position, price
+or dollar figure. That second topic is the one stored as a GitHub secret so the
+off-box tuner can reach you: if it ever leaked, the damage is fake reminders, not
+read access to your book. Subscribe to both in the ntfy app.
+
 | Alert | Meaning | What to do |
 | --- | --- | --- |
-| **Schwab re-auth reminder** (Mon 9am) | 7-day token due | Do §1. |
+| **"Schwab token — N days left"** | inside 3 days of expiry | Do §1. Silent if you're current. |
+| **"stop-loss proposal waiting"** | the weekly tuner recommends a *change* | Do §2. Silent on "keep current setting" weeks. |
+| **"weekly tuner FAILED"** | the off-box tuner errored | Usually the `LEDGER_TOKEN` PAT expired → §4. Nothing unsafe; it just stops learning. |
+| **"<job> — NEVER RAN / STALE"** | a scheduled job stopped leaving evidence | "NEVER RAN" = probably not scheduled, check `crontab -l`. "STALE" = it ran before and stopped; check that job's log. |
 | **cron failure** (ERR-trap) | a scheduled job errored | Check the log it names in `logs/`; usually a stale Schwab token → do §1. |
 | **"feed down — stops unwatched"** | the intraday monitor can't get quotes | Schwab feed is down → do §1. Until fixed, your stops aren't auto-watched; eyeball positions if you care. |
 | **"ledger backup FAILED"** | off-box backup push failed | Usually transient (network). If it repeats, check the box has push access to `agentic-trader-ledger`. |
@@ -112,6 +130,14 @@ or delete `config/strategy.adaptive.toml`.
 
 (No alert at all is normal — the system is quiet when healthy. Settlement/buying-power
 skips are by design and don't alert.)
+
+**Each condition alerts once.** It fires when it first goes bad and then stays
+quiet, even if it stays bad; fixing it clears the flag silently, so the next
+occurrence is audible again. That keeps the channel rare enough to be worth
+reading. The trade-off is that a missed buzz is a missed message — which is why
+the dashboard's **"Scheduled jobs"** card exists: it shows what is *true right
+now*, so anything unresolved stays visible long after its notification is gone.
+Push = something changed. Dashboard = current state.
 
 ---
 
@@ -132,6 +158,23 @@ when it logs out. This lives in that project's setup — re-run its OpenD login
 /usr/bin/python3 -c "import sys; sys.path.insert(0,'src'); from adapters.moomoo.client import quote_ctx; c=quote_ctx(); print(c.get_market_snapshot(['US.AAPL'])[0]); c.close()"
 ```
 (prints `RET_OK` = 0 when the data channel is up).
+
+**Subscribe your phone to the upkeep topic** (one-time). The reminder channel is a
+second ntfy topic, separate from your trade alerts. Read its value on the box —
+it's a secret, so retrieve it yourself rather than having it pasted into a chat:
+```
+grep NTFY_TOPIC_OPS /opt/agentic-trader/.env
+```
+Then in the ntfy app: **+ → Subscribe to topic →** paste that value. You'll now
+have two subscriptions: trades (existing) and upkeep (new).
+
+**Store the upkeep topic as a GitHub secret** (one-time). This is how the off-box
+weekly tuner reaches your phone — it runs on GitHub's runners and cannot see your
+`.env`. github.com/aye5788/agentic-trader → Settings → Secrets and variables →
+Actions → **New repository secret**, name `NTFY_TOPIC_OPS`, value = the same
+string. ⚠️ Never store `NTFY_TOPIC` (your trade-alert topic) in GitHub — that's
+the whole point of having two: a leak of the upkeep topic costs you fake
+reminders, not visibility into your positions.
 
 **Renew the GitHub Actions token** (when the `LEDGER_TOKEN` PAT expires — GitHub
 emails you): github.com → Settings → Developer settings → Fine-grained tokens →

@@ -177,7 +177,19 @@ prompts/newsletter.md   Weekly investor letter ("The Claude Ledger") — headles
 deploy/                 run_slow_loop.sh (Python), run_fast_loop.sh (Claude, with
                         ANTHROPIC_API_KEY guard), run_newsletter.sh,
                         crontab.template, alert.sh (ERR-trap → ntfy phone push on
-                        any cron failure), reauth_reminder.sh. See docs/DEPLOY.md.
+                        any cron failure). See docs/DEPLOY.md.
+src/health.py           SCHEDULED-JOB LIVENESS — did each moving part actually run?
+                        Every job leaves an artifact (book/log/journal event/commit);
+                        a job that stopped running = an artifact that stopped moving.
+                        evaluate() pure + selftested, gather() thin I/O. Built after
+                        the signal panel was found to have NEVER run (2026-07-24) —
+                        a job that never runs can't fire its own alerts.
+scripts/health_check.py THE UPKEEP REMINDER (daily 08:00). Runs health.checks() and
+                        pushes anything unhealthy to the OPS ntfy topic. FIRE-ONCE
+                        per condition (clears silently on heal); the dashboard
+                        "Scheduled jobs" card carries standing status. Owns the
+                        Schwab re-auth reminder — reads real token age, so it's
+                        silent when you're current (replaced the blind Monday nag).
 src/momentum.py         THE SIGNAL — single source of truth for the ranking math
                         (docs/STRATEGY.md §3). compute(panel, asof, lookback=252)
                         -> per-ticker R/sigma/trend/score/eligible/rank; select()

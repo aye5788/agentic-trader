@@ -24,6 +24,8 @@ SELFTESTS=(
     "scripts/universe_refresh.py"
     "src/concentration.py"
     "src/ti_signals.py"
+    "src/health.py"
+    "scripts/health_check.py"
 )
 
 fail=0

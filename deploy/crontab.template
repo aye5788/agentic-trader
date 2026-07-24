@@ -52,10 +52,15 @@ HOME=/root
 # --- NIGHTLY LEDGER BACKUP (catch-all in case a run's inline backup missed) ---
 30 22 * * *  cd /opt/agentic-trader && deploy/backup_ledger.sh >> logs/backup.log 2>&1
 
-# --- SCHWAB WEEKLY RE-AUTH REMINDER (manual — token expires every 7 days) ---
-# Schwab's refresh token can't be renewed unattended; you must re-run the paste
-# flow weekly or the price feed dies. Logs + pushes to the phone (ntfy).
-0 9 * * 1    /opt/agentic-trader/deploy/reauth_reminder.sh
+# --- DAILY UPKEEP CHECK (the reminder channel) ---
+# 08:00 daily. Pure-Python, no Claude, places nothing. Checks that every scheduled
+# job left a fresh artifact and that the Schwab token isn't about to expire, then
+# pushes to the OPS ntfy topic (job names + ages only — never positions or P&L).
+# Fire-once per condition; the dashboard carries standing status.
+# REPLACED deploy/reauth_reminder.sh, which nagged every Monday whether or not you
+# had already re-authed and never escalated if you missed it. This one reads the
+# real token age, so it is silent when you're current and speaks up when you're not.
+0 8 * * *    cd /opt/agentic-trader && .venv/bin/python scripts/health_check.py >> logs/health.log 2>&1
 
 # --- QUARTERLY UNIVERSE REFRESH (Piece 1) — first Sunday of Jan/Apr/Jul/Oct, 19:00 ET ---
 # DOW left as * to avoid cron's day-of-month OR day-of-week gotcha; the wrapper's

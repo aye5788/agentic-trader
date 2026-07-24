@@ -19,8 +19,16 @@ except Exception:
     pass
 
 
-def push(title: str, message: str, tags: str = "rotating_light") -> None:
-    topic = os.environ.get("NTFY_TOPIC")
+def push(title: str, message: str, tags: str = "rotating_light",
+         topic: str | None = None) -> None:
+    """Send a phone push. `topic` picks the channel; default = NTFY_TOPIC.
+
+    Pass topic=ops_topic() for UPKEEP REMINDERS (re-auth due, proposal waiting,
+    a job went stale). Those carry no positions, prices or P&L, so that topic is
+    safe to hand to third parties — it is the one shared with GitHub Actions.
+    NTFY_TOPIC stays on the box because trade alerts carry the live book.
+    """
+    topic = topic or os.environ.get("NTFY_TOPIC")
     if not topic:
         return
     try:
@@ -32,3 +40,9 @@ def push(title: str, message: str, tags: str = "rotating_light") -> None:
         urllib.request.urlopen(req, timeout=10).read()
     except Exception as e:
         print(f"  ntfy alert failed ({type(e).__name__}): {e}")
+
+
+def ops_topic() -> str | None:
+    """The upkeep-reminder channel. Falls back to NTFY_TOPIC if unset, so a box
+    that never configured it still gets its reminders (just on the main topic)."""
+    return os.environ.get("NTFY_TOPIC_OPS") or os.environ.get("NTFY_TOPIC")

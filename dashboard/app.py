@@ -15,6 +15,7 @@ from flask import Flask, Response, request
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
+import health                                         # noqa: E402
 import marks                                          # noqa: E402
 import strategy as strat                              # noqa: E402
 from research_store import read_current               # noqa: E402
@@ -79,6 +80,24 @@ def _pending_universe_proposal():
     if d.get("decision", {}).get("decision") == "HOLD":
         return d
     return None
+
+
+def _health_rows() -> list[dict]:
+    """Scheduled-job liveness for the header strip.
+
+    use_network=False deliberately: the GitHub Actions probe shells out to `gh`,
+    and a page render must never block on a network call. The daily
+    health_check.py run does the networked version and is what actually alerts —
+    here the adaptive-tune row simply reads as unknown rather than stalling the
+    dashboard. Never raises: a broken health check must not take the page down.
+    """
+    try:
+        rows = health.checks(use_network=False)
+    except Exception as e:                            # noqa: BLE001 — page > check
+        return [{"key": "health", "label": "Health check", "status": "stale",
+                 "detail": f"could not evaluate: {type(e).__name__}"}]
+    return [{"key": c.key, "label": c.label, "status": c.status,
+             "detail": c.detail, "healthy": c.healthy} for c in rows]
 
 
 def build_data() -> dict:
@@ -159,6 +178,7 @@ def build_data() -> dict:
                        "max_order": round(g["max_order_pct"] * acct_value, 2),
                        "cooldown": list(cooldown.keys())},
         "realized": _read_json(RS / "rh" / "realized.json", None),
+        "health": _health_rows(),
         "pending": _pending_universe_proposal(),
         "activity": recent[-14:][::-1],
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),

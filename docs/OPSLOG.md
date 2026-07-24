@@ -8,6 +8,83 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-24 — Upkeep reminders: a second ntfy topic + scheduled-job liveness
+
+Aaron asked for phone reminders covering the human-action items in the operator
+manual, and — separately — questioned whether ntfy was the right channel at all.
+Both answered below.
+
+**Channel: keep ntfy, add a SECOND topic.** The security review found the honest
+answer was narrower than it first looked. Upkeep reminders ("re-auth due", "a job
+stopped running", "a proposal is waiting") contain **no positions, prices or P&L**,
+so the disclosure question mostly does not apply to them; what applies is "can
+someone guess the address and send me fakes", and the existing topic already
+measures 27 chars / 3 character classes / ~157 bits — not guessable. So no new
+infrastructure: no self-hosted relay, no new service on a memory-tight box.
+
+What WAS missing is that the off-box tuner needs a credential to reach the phone,
+and handing GitHub the trade-alert topic would have given a CI secret **read**
+access to the live book. Fixed with `NTFY_TOPIC_OPS`: a second topic carrying only
+job names and ages, and the only one stored as a GitHub secret. A leak there costs
+fake reminders, not visibility into positions. `notify.push()` gained a `topic=`
+param (default unchanged, existing callers untouched) + `notify.ops_topic()`.
+⚠️ The trade-alert topic still transits a third-party relay in readable form —
+pre-existing, deliberately NOT bundled into this change, still open.
+
+**New: `src/health.py` + `scripts/health_check.py` (daily 08:00).** Motivated
+directly by the signal-panel finding below: a cron job that never runs cannot fire
+its own alerts, so absence-of-complaint is not evidence of health. Every scheduled
+job leaves an artifact (book, log, journal event, mirror commit), so a job that
+stopped running shows up as an artifact that stopped moving. `evaluate()` is pure
+and selftested; `gather()` is thin I/O. Thresholds are deliberately loose — a
+cron-exact "missed a scheduled run" test has to model weekends, holidays and DST,
+and a monitor that cries wolf gets muted, which is worse than one that notices a
+day late. The Actions probe shells out to the already-authenticated `gh` CLI, so
+it adds **no new PAT**.
+
+**Alerting contract (Aaron's call): fire-once per condition.** Alerts once when a
+condition appears, then silent however long it persists; healing clears the flag
+with no "resolved" ping, so a recurrence is audible again. The obvious hole — miss
+the buzz, miss the problem — is covered by pairing rather than nagging: the new
+dashboard **"Scheduled jobs"** card renders the same checks continuously, so an
+unresolved item stays visible after its one notification. Push = something
+changed; dashboard = what is true now.
+
+**Two bugs caught while building, both worth recording:**
+- A check that was *not performed* was reporting as "NEVER RAN". The dashboard
+  skips the network probe to avoid blocking a page render, so it confidently
+  claimed the tuner had never run when it had run that morning. Added an explicit
+  `unknown` status + `SKIPPED` sentinel; `alertable` (not `healthy`) now gates
+  alerts, so an unperformed check can never page you.
+- "Never ran" and "stopped running" were sharing remedy text, so a job that was
+  simply never scheduled told you to go re-login to OpenD. They now diverge:
+  "never" points at `crontab -l`, which is the actual 2026-07-24 root cause.
+
+**Schwab reminder rewritten, `deploy/reauth_reminder.sh` DELETED.** The old one
+nagged every Monday 09:00 whether or not you had already re-authed, and never
+followed up if you missed it. The daily check reads real token age: silent when
+current, fires inside 3 days, escalates to EXPIRED. Because flags clear on heal,
+the weekly cadence now *emerges* from the token cycle instead of being hardcoded.
+
+**adaptive-tune.yml:** pushes only when the proposal's own `moved` flag is true
+(most weeks say "keep current setting" — a weekly buzz you always ignore is worse
+than none), plus an `if: failure()` alert. Also fixed the clone-failure branch,
+which did `exit 0` and made an **expired LEDGER_TOKEN look like a green run**.
+
+**Verification.** `deploy/run_selftests.sh` green with both new suites wired in.
+Live: `src/health.py` correctly flags the signal panel as never-run; a real push
+delivered to the ops topic; a second run stayed silent (fire-once) and logged
+`no NEW conditions; 1 still unresolved` rather than falsely claiming all clear;
+both `moved` branches of the workflow gate exercised locally; dashboard restarted
+and serving 9 health rows.
+
+**Aaron must do two one-time steps** (OPERATOR_MANUAL §4): subscribe the phone to
+the new topic (`grep NTFY_TOPIC_OPS .env`), and save that same value as the
+`NTFY_TOPIC_OPS` repo secret on GitHub. Until the secret exists, the tuner's
+alerts no-op silently; everything on-box already works.
+
+---
+
 ## 2026-07-24 — Schedule audit: signal panel was NEVER armed; ledger backup half-armed
 
 Aaron asked to verify that the mechanisms we built actually *recur*. Audited every

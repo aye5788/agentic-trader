@@ -8,6 +8,18 @@ name: adaptive-tune
 #
 # Requires repo secret LEDGER_TOKEN: a fine-grained PAT with READ (Contents) on
 # aye5788/agentic-trader-ledger. No write scope needed — nothing is committed back.
+#
+# Phone alerts (repo secret NTFY_TOPIC_OPS — the UPKEEP topic, never NTFY_TOPIC):
+#   * a proposal that actually recommends a move   -> you decide whether to apply
+#   * the tuner could not run (token/mirror/error) -> it needs fixing
+# A proposal that says "keep the current setting" is SILENT. Most weeks say that,
+# and a weekly buzz you always ignore is worse than no buzz at all.
+#
+# ⚠️ Why alerts live here rather than on the droplet: this runs off-box, and the
+# job has `contents: read`, so the proposal never reaches the droplet — nothing
+# on the box can see the result to alert on it. The box independently checks that
+# this workflow RAN (src/health.py -> adaptive_tune), which covers the case where
+# it stops firing entirely and therefore cannot alert about itself.
 
 on:
   schedule:
@@ -38,11 +50,15 @@ jobs:
           # trailing \n breaks the clone URL ("credential url cannot be parsed").
           TOKEN="$(printf '%s' "$LEDGER_TOKEN" | tr -d '[:space:]')"
           if [ -z "$TOKEN" ]; then
-            echo "LEDGER_TOKEN secret not set — skipping (see workflow header)."; exit 0
+            echo "::error::LEDGER_TOKEN secret is not set — cannot reach the ledger mirror."
+            exit 1
           fi
+          # A PAT that has EXPIRED fails here. This used to `exit 0`, which made an
+          # expired token look like a green, successful run while the tuner silently
+          # did nothing — the failure mode this whole alert exists to kill.
           git clone --depth 1 \
             "https://x-access-token:${TOKEN}@github.com/aye5788/agentic-trader-ledger.git" _ledger \
-            || { echo "ledger mirror clone failed (token/access?) — skipping."; exit 0; }
+            || { echo "::error::ledger mirror clone FAILED — LEDGER_TOKEN is expired, revoked, or lacks Contents:read."; exit 1; }
           mkdir -p research_store/prices research_store
           cp _ledger/prices/closes.parquet research_store/prices/ 2>/dev/null || true
           cp _ledger/prices/highs.parquet  research_store/prices/ 2>/dev/null || true
@@ -52,10 +68,10 @@ jobs:
       - name: Run the tuner
         run: |
           if [ ! -f research_store/prices/highs.parquet ]; then
-            echo "## Adaptive tune — skipped" >> "$GITHUB_STEP_SUMMARY"
-            echo "No OHLC cache in the mirror yet. On the droplet run \`fetch_prices.py --force\`; the nightly backup then ships highs/lows to the mirror." >> "$GITHUB_STEP_SUMMARY"
-            echo "no OHLC in mirror — nothing to tune this run."
-            exit 0
+            echo "## Adaptive tune — FAILED" >> "$GITHUB_STEP_SUMMARY"
+            echo "No OHLC cache in the mirror. On the droplet run \`fetch_prices.py --force\`; the nightly backup then ships highs/lows to the mirror." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::no OHLC in the ledger mirror — the tuner has nothing to tune."
+            exit 1
           fi
           python scripts/tune_stop.py
 
@@ -73,6 +89,27 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           python scripts/promote_proposal.py
 
+      - name: Phone you ONLY if it recommends a move
+        env:
+          NTFY_TOPIC_OPS: ${{ secrets.NTFY_TOPIC_OPS }}
+        run: |
+          P=research_store/adaptive/proposals/stop_atr_mult.json
+          [ -n "$NTFY_TOPIC_OPS" ] || { echo "NTFY_TOPIC_OPS not set — no push."; exit 0; }
+          [ -f "$P" ] || exit 0
+          # `moved` is the tuner's own verdict: false = "incumbent is still best".
+          MOVED=$(python -c "import json;print(json.load(open('$P')).get('moved'))")
+          if [ "$MOVED" != "True" ]; then
+            echo "proposal recommends no change — staying silent by design."; exit 0
+          fi
+          INC=$(python -c "import json;print(json.load(open('$P'))['incumbent'])")
+          REC=$(python -c "import json;print(json.load(open('$P'))['recommended'])")
+          MSG=$(printf 'The weekly tuner suggests moving your stop distance %s -> %s.\n\nReview it: GitHub -> Actions -> adaptive-tune -> latest run summary.\nApply only if you agree (OPERATOR_MANUAL section 2):\n  .venv/bin/python scripts/promote_proposal.py --set %s\n\nNothing changes until you run that.' "$INC" "$REC" "$REC")
+          curl -fsS -m 10 \
+            -H "Title: Agentic upkeep: stop-loss proposal waiting" \
+            -H "Priority: default" -H "Tags: chart_with_upwards_trend" \
+            -d "$MSG" \
+            "https://ntfy.sh/${NTFY_TOPIC_OPS}" >/dev/null || echo "push failed (non-fatal)"
+
       - name: Upload the proposal artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -80,3 +117,17 @@ jobs:
           name: stop_atr_mult-proposal
           path: research_store/adaptive/proposals/stop_atr_mult.json
           if-no-files-found: ignore
+
+      - name: Phone you if the tuner broke
+        if: failure()
+        env:
+          NTFY_TOPIC_OPS: ${{ secrets.NTFY_TOPIC_OPS }}
+        run: |
+          [ -n "$NTFY_TOPIC_OPS" ] || exit 0
+          URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          MSG=$(printf 'The adaptive tuner errored - no proposal this week.\n\nMost likely: the LEDGER_TOKEN PAT expired (GitHub emails you before it does).\nRenew it: OPERATOR_MANUAL section 4 -> "Renew the GitHub Actions token".\n\nRun log: %s\n\nYour stops keep using the current setting - nothing is unsafe, it just stops learning.' "$URL")
+          curl -fsS -m 10 \
+            -H "Title: Agentic upkeep: weekly tuner FAILED" \
+            -H "Priority: high" -H "Tags: warning" \
+            -d "$MSG" \
+            "https://ntfy.sh/${NTFY_TOPIC_OPS}" >/dev/null || true

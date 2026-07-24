@@ -137,6 +137,9 @@
       <section class="card"><div class="hd"><h2>Regime floor</h2><span class="meta">mechanical</span></div>
         <div class="rows" id="regimeRows"></div>
       </section>
+      <section class="card"><div class="hd"><h2>Scheduled jobs</h2><span class="meta" id="healthMeta"></span></div>
+        <div class="rows" id="healthRows"></div>
+      </section>
       <section class="card"><div class="hd"><h2>Recent activity</h2><span class="meta">journal</span></div>
         <div class="feed" id="feed"></div>
       </section>
@@ -246,6 +249,20 @@ document.getElementById("guardRows").innerHTML=
    <div class="row"><span class="k">Kill-switch</span><span class="v">${DATA.flags.kill_switch?'ENGAGED':'clear'}</span></div>
    <div class="row"><span class="k">Cooldown (stopped-out)</span><span class="v">${(g.cooldown&&g.cooldown.length)?g.cooldown.join(', '):'none'}</span></div>
    <div class="row"><span class="k">Realized P&amp;L (30d)</span><span class="v">${DATA.realized?`<span style="color:var(--${(DATA.realized.total||0)>=0?'pos':'neg'})">$${fmt(DATA.realized.total)}</span> · ${DATA.realized.days?DATA.realized.days.reduce((a,x)=>a+(x.trades||0),0):0} closes`:'— (no exits yet)'}</span></div>`;
+
+// scheduled-job liveness. This is the standing counterpart to the one-shot phone
+// alert: a push tells you something CHANGED, this tells you what is TRUE now, so
+// an unresolved item stays visible long after its single notification is gone.
+const hrows=DATA.health||[];
+const hbad=hrows.filter(h=>h.status!=="ok"&&h.status!=="unknown").length;
+document.getElementById("healthMeta").textContent=
+  hrows.length? (hbad? `${hbad} need${hbad===1?'s':''} attention` : "all healthy") : "—";
+document.getElementById("healthRows").innerHTML=
+  hrows.length? hrows.map(h=>{
+    const col = h.status==="ok" ? "pos" : (h.status==="expired" ? "neg" : (h.status==="unknown" ? "dim" : "warn"));
+    const word = {ok:"OK", stale:"STALE", never:"NEVER RAN", due:"DUE", expired:"EXPIRED", unknown:"—"}[h.status]||h.status;
+    return prow(h.label, `${word}<span style="color:var(--dim);font-weight:400"> · ${h.detail}</span>`, col);
+  }).join("") : prow("no health data","");
 
 // regime
 const r=DATA.regime||{};
