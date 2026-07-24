@@ -1,4 +1,15 @@
-# agentic-trader — droplet crontab template.  install:  crontab deploy/crontab.template
+# agentic-trader — droplet crontab template.
+#
+# ⚠️ FIRST INSTALL ONLY:  crontab deploy/crontab.template
+# On the ALREADY-DEPLOYED box, do NOT run that — the live crontab carries box-only
+# jobs this file does not (moomoo-vol-desk 9:30/9:35, moomoo-data-collector 16:30)
+# and a wholesale install WIPES them. Arm a new job by APPENDING the single line,
+# then `diff` the before/after. See docs/DEPLOY.md Phase 4.
+#
+# ⚠️ EDITING THIS FILE ARMS NOTHING. It documents intent; `crontab -l` is the
+# source of truth. "Schedule X" is not done until the line shows in `crontab -l`.
+# (Missed twice: 2026-07-20 universe refresh, 2026-07-24 signal panel.)
+#
 # Times are in the droplet's local TZ — set the box to US/Eastern or convert.
 # ⚠️ Do NOT put ANTHROPIC_API_KEY here or anywhere — it forces per-token billing.
 

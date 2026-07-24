@@ -134,7 +134,20 @@ earnings, positions, quotes via MCP tools. See `CLAUDE.md` hard rules.
 
 A lean, forward-logged **moomoo signal panel** is logged weekly to the ledger's
 `signal_panel` journal event (book-scoped, per held name) for later meta-labeling,
-written by `scripts/collect_signals.py` (runs Sunday 20:15, after the rebalance).
-Fields: `capflow_bignet_20d`, `short_pct`, `days_to_cover`, `short_pct_chg`,
-`pc_vol_ratio`, `pc_oi_ratio`, `iv_rank`, `pct_52w_high`, `volume_ratio`. This is
-*forward-collection*, not a backtested dial (per §5a).
+written by `scripts/collect_signals.py`. Fields: `capflow_bignet_20d`, `short_pct`,
+`days_to_cover`, `short_pct_chg`, `pc_vol_ratio`, `pc_oi_ratio`, `iv_rank`,
+`pct_52w_high`, `volume_ratio`. This is *forward-collection*, not a backtested
+dial (per §5a).
+
+**ARMED 2026-07-24** — `15 20 * * 0` (Sun 20:15 ET, after the 20:00 rebalance),
+appended to the live crontab. Note the trap that delayed this: the line was added
+to `deploy/crontab.template` on 2026-07-23, but **the template is not the live
+crontab** — arming is a separate append step on the box (see `docs/DEPLOY.md`
+Phase 4). Between those dates this section claimed the collector was running when
+it had never fired. First scheduled fire: **Sun 2026-07-26 20:15 ET**.
+
+**Known null: `capflow_bignet_20d` is ETF-only-null.** The 2026-07-24 live dry-run
+(14 held names) filled all 9 fields for every name *except* capital flow on the 4
+ETFs (XLE, IWM, SPY, EEM) — moomoo's capital-flow endpoint does not serve ETFs.
+The distiller is null-safe and this does **not** register in `gaps`; treat a null
+capflow on an ETF as expected, not a collection failure.

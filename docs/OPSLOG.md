@@ -8,6 +8,67 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-24 — Schedule audit: signal panel was NEVER armed; ledger backup half-armed
+
+Aaron asked to verify that the mechanisms we built actually *recur*. Audited every
+scheduled surface (GitHub Actions, live crontab, systemd timers, sibling repos).
+Two real gaps, one benign non-gap.
+
+**Non-gap — `adaptive-tune` (GitHub Actions) is fine.** `0 8 * * 1` is committed on
+`main`, `gh workflow list --all` shows it `active`; the only reason the run history
+shows nothing but `workflow_dispatch` is that the cron was added Thu 2026-07-23 and
+had not yet reached a Monday. First scheduled fire **Mon 2026-07-27 08:00 UTC**;
+its inputs (mirror `closes/highs/lows.parquet`) are staged. It is also the *only*
+Actions mechanism by design — everything else is droplet cron. ⚠️ Standing caveat:
+GitHub auto-disables scheduled workflows after 60 days with no repo commits.
+
+**Gap 1 (fixed) — the moomoo signal panel had never run, once.** Built 2026-07-23;
+`deploy/crontab.template` got the line, `DATA_SOURCES.md` was updated to say it
+"runs Sunday 20:15" — but the line was never appended to the **live** crontab.
+Evidence it had never fired: no `logs/signals.log`, no `research_store/signals/`,
+and **0** `signal_panel` events across all 68 journal lines. Nothing else invoked
+it either (`grep -rn collect_signals` hits only the script, the template, and docs
+— never the loops, systemd, `/etc/cron.d`, or the sibling repos). So the forward-log
+that is supposed to prospectively validate the moomoo edges was recording nothing,
+and would have stayed silent — the OpenD-gap phone alert only fires *inside* a run
+that never happened.
+
+**Root cause = the template/live-crontab trap, already documented and re-hit.** The
+2026-07-20 entry below records that the live crontab must be armed by *appending*,
+never `crontab deploy/crontab.template` (which would wipe the box-only moomoo-desk
+jobs). The signal-panel plan's Task 4 is titled "Schedule + document" but its steps
+only modify the *template* — there was no arm-on-the-box step, and its checkboxes
+are still unticked. Contrast Piece 1, which was armed by an explicit append and
+flagged "NOT ARMED" in the interim; the panel got no such caveat, so the docs
+asserted a live schedule that did not exist.
+
+**Gap 2 (fixed) — nightly ledger backup was only half-armed.** `8657f37` added both
+the `30 22 * * *` template line **and** the best-effort `backup_ledger.sh` calls in
+`run_slow_loop.sh`/`run_fast_loop.sh` — belt-and-braces, the cron being the daily
+guarantee. Only the piggybacks were live, and neither loop runs Saturday, so
+Saturdays had no off-box backup. Not yet observed (mirror history starts 2026-07-22,
+no Saturday had elapsed); first exposure would have been **Sat 2026-07-25**.
+
+**Actions taken.**
+- Live dry-run gate first: `/usr/bin/python3 scripts/collect_signals.py --dry` →
+  14 held names, `opend_ok: true`, `gaps: []`, all 9 fields populated except
+  `capflow_bignet_20d` on the 4 ETFs (moomoo capital-flow does not serve ETFs;
+  null-safe, not an error — now documented in `DATA_SOURCES.md`).
+- Appended both lines to the live crontab (backup → edit → install → `diff`
+  confirmed **only** the two additions; the 3 box-only jobs survived):
+  `15 20 * * 0` signal panel, `30 22 * * *` ledger backup. Smoke-tested the backup
+  line as scheduled → `backup_ledger: no changes`, exit 0.
+- Docs: corrected the false "runs Sunday 20:15" claim in `DATA_SOURCES.md` (now
+  stamped ARMED 2026-07-24 + the ETF-null caveat); replaced the dangerous
+  `crontab deploy/crontab.template` instruction in `DEPLOY.md` Phase 4 with the
+  append-and-diff procedure and an explicit "editing the template arms nothing"
+  rule; refreshed the stale "5 jobs" health check to the actual 10 + 3 box-only.
+
+**First live fires to check:** signal panel **Sun 2026-07-26 20:15 ET** (expect a
+`signal_panel` journal event + `logs/signals.log`); ledger backup **tonight 22:30**.
+
+---
+
 ## 2026-07-23 — Docs audit: moomoo/FRED/finnhub + runtimes brought current
 
 Closed real doc gaps that had been causing repeated rediscovery: `CLAUDE.md` and

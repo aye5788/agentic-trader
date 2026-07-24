@@ -65,8 +65,29 @@ reminder every Monday.
 ```bash
 deploy/run_slow_loop.sh          # writes the target book — inspect research_store/current.json
 .venv/bin/python scripts/fast_loop.py   # prints the plan; live_approved=false → places nothing
-crontab deploy/crontab.template  # edit the token + paths first
 ```
+
+**Scheduling — ⚠️ do NOT run `crontab deploy/crontab.template` on the live box.**
+That is the *first-install* command only. The live crontab has since diverged: it
+carries box-only jobs the template does **not** contain (the `moomoo-vol-desk`
+09:30/09:35 options runs, the `moomoo-data-collector` 16:30 update), and a
+wholesale install would silently wipe them.
+
+On an already-deployed box, arm a new job by **appending the single line**, and
+verify nothing was lost:
+
+```bash
+crontab -l > /tmp/crontab.backup            # always back up first
+crontab -l > /tmp/crontab.new
+# ...append the new line to /tmp/crontab.new with an editor...
+crontab /tmp/crontab.new
+diff /tmp/crontab.backup <(crontab -l)      # MUST show only your addition
+```
+
+The corollary that has bitten us twice: **editing `deploy/crontab.template` arms
+nothing.** The template is documentation of intent; the box is the source of
+truth. Any plan step that says "schedule X" is not done until the line is in
+`crontab -l`. (2026-07-20 universe refresh, 2026-07-24 signal panel.)
 
 ## Going live — the deliberate switch
 
@@ -129,7 +150,11 @@ each day — one point per trading day from first run.
 **Health check — is each piece alive?**
 ```bash
 systemctl status agentic-monitor agentic-dashboard cloudflared   # all: active (running)
-crontab -l                                    # 5 jobs: slow (Sun 20:00, M-F 18:00), fast (M-F 10:00), letter (Sun 21:00), reauth (Mon 9:00)
+crontab -l                                    # 10 agentic-trader lines (+3 box-only, see below)
+# slow (Sun 20:00, M-F 18:00) · signal panel (Sun 20:15) · fast (M-F 10:00)
+# risk review (M-F 12:00 + 15:45) · letter (Sun 21:00) · reauth (Mon 9:00)
+# ledger backup (daily 22:30) · universe refresh (quarterly, 1st Sun 19:00)
+# box-only, NOT this project: moomoo-vol-desk 9:30/9:35, data-collector 16:30
 timedatectl                                   # MUST be America/New_York or cron fires at wrong times
 cat research_store/monitor/state.json         # {"book_asof": <date>, "fired": {}} = monitor polled OK
 tail logs/slow.log logs/fast.log              # last loop runs
