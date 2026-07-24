@@ -136,6 +136,15 @@ _TRIGGER_RE = re.compile(r"::error::|FAILED|failed")
 _EXIT0_RE = re.compile(r"\bexit\s+0\b")
 
 
+def _is_comment_only_line(line: str) -> bool:
+    """True iff the line is PURE prose: nothing but a `#` comment once
+    stripped. A real code line that merely carries a trailing inline comment
+    (e.g. `  exit 0  # fine here`) does NOT count — its stripped form starts
+    with the code, not `#`, so it is still a live code path and must still be
+    scanned."""
+    return line.strip().startswith("#")
+
+
 def check_workflow_failure_exits(root: pathlib.Path) -> list[str]:
     """No workflow may `exit 0` within 3 lines of a failure marker
     (`::error::`, `FAILED`/`failed`).
@@ -145,6 +154,13 @@ def check_workflow_failure_exits(root: pathlib.Path) -> list[str]:
     containing one of those markers. Catches: the expired-token-shows-green
     bug, where a failed step in a bash `run:` block fell through to `exit 0`
     and CI reported success.
+
+    Comment-only lines (stripped content starts with `#`) are prose, not an
+    executable code path, and are ignored for BOTH the trigger and the
+    `exit 0` match — a `#` line narrating a historical bug (marker and/or
+    `exit 0` mentioned only in the comment text) must not fire this check.
+    A trailing inline comment on an otherwise-real code line does not make
+    that line comment-only; it is still scanned.
     """
     wf_dir = root / ".github" / "workflows"
     if not wf_dir.is_dir():
@@ -156,10 +172,14 @@ def check_workflow_failure_exits(root: pathlib.Path) -> list[str]:
         lines = wf_path.read_text().splitlines()
         rel = str(wf_path.relative_to(root))
         for i, line in enumerate(lines):
+            if _is_comment_only_line(line):
+                continue
             if not _TRIGGER_RE.search(line):
                 continue
             window = lines[i:i + 4]  # this line, plus up to 3 lines after
             for j, wline in enumerate(window):
+                if _is_comment_only_line(wline):
+                    continue
                 if not _EXIT0_RE.search(wline):
                     continue
                 key = (rel, i + j)
@@ -374,6 +394,43 @@ jobs:
     with tempfile.TemporaryDirectory() as td:
         root = pathlib.Path(td)
         assert check_workflow_failure_exits(root) == []
+
+    # both the failure-marker AND the `exit 0` appear ONLY in `#` comment
+    # lines narrating a historical, already-fixed bug -> must PASS. This is
+    # the adaptive-tune.yml shape: prose about a past bug, real code path
+    # elsewhere uses `exit 1`.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, ".github/workflows/commented.yml", """\
+jobs:
+  build:
+    steps:
+      - run: |
+          # Historically this step let a FAILED clone fall through to
+          # `exit 0` and CI reported green. Fixed below: real failures exit 1.
+          if ! git clone "$REPO"; then
+            echo "::error::clone failed"
+            exit 1
+          fi
+""")
+        assert check_workflow_failure_exits(root) == [], check_workflow_failure_exits(root)
+
+    # a trailing inline comment on a real code line must NOT be treated as
+    # comment-only -- the `exit 0` here is a live code path and must still
+    # be flagged.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, ".github/workflows/inline.yml", """\
+jobs:
+  build:
+    steps:
+      - run: |
+          echo "::error::something FAILED"
+          exit 0  # fine here
+""")
+        bad = check_workflow_failure_exits(root)
+        assert len(bad) == 1, bad
+        assert "inline.yml:6" in bad[0], bad
 
     # -------------------- check 4: check_no_api_key ---------------------
     with tempfile.TemporaryDirectory() as td:
