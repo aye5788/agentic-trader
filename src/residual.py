@@ -26,7 +26,7 @@ def residual_mom_from_returns(rets: pd.DataFrame, mkt: pd.Series) -> pd.Series:
     if len(mkt) < 2:
         return pd.Series(index=rets.columns, dtype=float)
     rets = rets.reindex(mkt.index)
-    mvar = mkt.var()
+    mvar = mkt.var(ddof=0)
     if not mvar or mvar == 0:
         return pd.Series(index=rets.columns, dtype=float)
     dm = mkt - mkt.mean()
