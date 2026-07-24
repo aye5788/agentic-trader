@@ -50,15 +50,17 @@ New pure module `src/residual.py`. For each ticker, as of a date, over the
 
 ```
 β_i   = cov(r_i, r_mkt) / var(r_mkt)          # market beta over the window
-α_i   = mean(r_i) − β_i · mean(r_mkt)
+α_i   = mean(r_i) − β_i · mean(r_mkt)          # AVG idiosyncratic (non-market) return
 resid_t = r_i,t − (α_i + β_i · r_mkt,t)        # daily idiosyncratic return
-residual_mom_i = Σ(resid_t) / std(resid_t)     # cumulative residual ÷ residual vol
+residual_mom_i = α_i / std(resid_t)            # idiosyncratic momentum, risk-adjusted
 ```
 
-This is the **direct analog of the existing `ret = R/σ`** (formation return ÷ daily
-vol), just computed on the residual instead of the raw return. Pure, no I/O, no
-clock (dates/panels passed in). Vectorized across all tickers per date with numpy
-(betas from a single cov/var pass). Look-ahead is enforced the same way
+**Use α, not Σresid.** OLS residuals sum to ~0 by construction (with an intercept),
+so a "cumulative residual" would be zero for every name — a real trap. The
+intercept **α is the average idiosyncratic return**, which is exactly the residual
+*momentum* we want; standardizing by residual vol gives the risk-adjusted analog of
+the existing `ret = R/σ`. Pure, no I/O, no clock (dates/panels passed in).
+Vectorized across all tickers per date. Look-ahead is enforced the same way
 `momentum.compute` does it (window ends at `asof`).
 
 ### 3.2 How the blend plugs in (`src/momentum.py`)
