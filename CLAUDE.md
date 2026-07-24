@@ -24,9 +24,17 @@ in `docs/DESIGN.md`.
      providers here. No trading surface is used. (moomoo's API *can* trade, but
      this repo uses only its **data quote channel**; `unlock_trade` is never
      scripted here — see `docs/DATA_SOURCES.md`.)
-3. **This is LIVE money.** The Agentic account holds real funds (currently ~$20,
-   demonstration scale). Real orders move real money. Prefer the
-   review → place pattern; respect any human-approval / guardrail config.
+3. **This is LIVE money.** The Agentic account holds real funds. Real orders move
+   real money. Prefer the review → place pattern; respect any human-approval /
+   guardrail config.
+   ⛔ **Never anchor on the account balance.** Do not treat it as small, do not
+   write "at this scale…" / "only a demo account…", and never use the size of the
+   book to discount a security, correctness, or risk concern. Judge every risk on
+   its *mechanism and consequence* — what can go wrong, how far it reaches, whether
+   it is reversible — not on the stake. (This file previously stated a fixed
+   figure; it was stale, and agents were anchoring on it to dismiss real risks.)
+   If a task genuinely needs the balance, read it live from the snapshot via
+   `src/marks.py` — never from memory or from any number written in the docs.
 4. **Secrets never leave the box.** `.env` and `secrets/` are git-ignored — never
    commit them, never print their contents, never paste a key/token into chat.
 

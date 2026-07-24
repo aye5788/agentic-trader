@@ -174,7 +174,10 @@ maps **with greeks**, IV, rates), `option_expiration_chain`, `movers`
 
 - Trades only in the dedicated **"Agentic" account** (`agentic_allowed=true`);
   every other Robinhood account is read-only to the agent.
-- Currently funded with **$20** (demonstration scale).
+- Funded with **real money**. The balance is deliberately NOT recorded here — a
+  figure written into docs goes stale and then gets used to rationalise away risks
+  ("it's only a demo account"). Read it live via `src/marks.py` if you need it, and
+  never let it size a risk judgement. See `CLAUDE.md` hard rule 3.
 - Robinhood enforces: per-trade push notifications, live activity/P&L feed,
   one-tap disconnect. Options are Level 2 there (long only), so equities +
   fractional/dollar-notional orders are the practical surface.
@@ -297,7 +300,8 @@ on a timer, with nobody watching**. Three things make that work:
   *rate limits* (throughput per window) are real but a pacing problem: space the
   loops out, don't hammer.
 - **Liability**: RH disclaims all responsibility for agent decisions/losses —
-  "you assume all risk." Fine at $20 demo scale; the right mindset before more.
+  "you assume all risk." Assume that liability in full at every balance; do not
+  discount it because the book looks small at any given moment.
 - **Secrets**: `.env` and `secrets/` are git-ignored; never committed.
 
 ## Open decisions
@@ -313,7 +317,7 @@ on a timer, with nobody watching**. Three things make that work:
    is the edge (relative rank + absolute trend). PEAD was the first pass and was
    dropped; earnings data demotes to defensive event-awareness. See STRATEGY.md.
 5. ~~**Trust before proof**~~ — RESOLVED: **backtest-first** (validate the signal
-   vs. history before the $20; seeds outcome-tracking).
+   vs. history before funding; seeds outcome-tracking).
 6. **Verify depth** — single-pass research vs. full bull/bear/judge adversarial
    layer. *(still open)*
 7. ~~**Same-day catalyst entries**~~ — RESOLVED: **nightly-only for v1** (momentum
@@ -379,8 +383,10 @@ on a timer, with nobody watching**. Three things make that work:
       write to the Research Store. Writes a full 14-name book, verified round-trip.
 - [x] **Fast loop** (`scripts/fast_loop.py`) — deterministic diff (targets vs.
       holdings → dollar-notional buy/sell plan, tested); enforces the one-Agentic-
-      account guardrail. Verified live read-only against RH ($20 cash → 14-order
-      $20 plan). **Placement (review→place) held at the proof gate** — needs
+      account guardrail. Verified live read-only against RH (a one-off 2026-07
+      bring-up check: whatever cash was present → a full 14-order plan; the
+      figures were a point-in-time observation, not a standing account size).
+      **Placement (review→place) held at the proof gate** — needs
       explicit human approval before any live order.
 - [ ] Wire the RH read (get_equity_positions/get_portfolio → snapshot) + the
       review→place placement step into the deployed agent's fast-loop run

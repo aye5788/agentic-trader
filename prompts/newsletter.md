@@ -43,7 +43,7 @@ around it rather than guessing. You are the narrator, not the calculator.
      `{{REGIME_COLOR}}` — same green/red rule for ON/OFF.
    - **Deposits/withdrawals:** if `net_deposits_this_week` is non-zero, state it
      plainly in ONE sentence in the letter body and keep it separate from
-     performance — e.g. "You added $20 this week, so the account stands at
+     performance — e.g. "You added $<amount> this week, so the account stands at
      $X; performance net of that contribution was {{WEEK_PNL}}." A contribution
      is not a gain and must never be narrated (or coloured) as one. This is a
      capital fact, not plumbing — it belongs in the letter, not the OPSLOG.
