@@ -649,11 +649,20 @@ def check_workflow_swallowed_failures(root: pathlib.Path) -> list[str]:
         discarded status is replaced by a value the caller cannot tell apart
         from a legitimate answer.
       * a capture whose variable IS then empty-tested (`[ -n "$V" ]`) within
-        the next few lines: the author has written the degraded branch, so the
-        failure is handled, not swallowed. This is the shape at
-        validate.yml's `EXISTING=$(gh issue list ... || true)` — where a real
-        `gh` outage falls through to a `gh issue create` that fails loudly
-        anyway, so nothing goes quiet.
+        the next few lines. BE CLEAR ABOUT WHAT THIS CARVE-OUT IS: an empty
+        test is NOT error handling. It cannot tell "the command failed" apart
+        from "the command succeeded and there was legitimately nothing to
+        return" — which is precisely the mechanism named two paragraphs up.
+        This IS a swallow, and we accept the miss anyway: without the carve-out
+        the check fires on a very common and usually-harmless idiom, and an
+        alarm that cries wolf gets ignored, which costs more than the misses.
+        It is a deliberate false-NEGATIVE trade to keep the signal quiet.
+        DO NOT read this carve-out as an endorsement: if you are writing new
+        code, do not use the empty test as your failure branch. Set an explicit
+        success flag and branch on THAT — see the `LIST_OK` pattern in
+        .github/workflows/validate.yml, which is what this repo's own review
+        required after the `EXISTING=$(gh issue list ... || true)` shape filed
+        a duplicate issue during a `gh` outage while looking perfectly clean.
       * `shell: python` / `pwsh` / … blocks — not shell pipelines.
       * non-`.yml` workflow files (`.yaml`), matching check 3's scope.
 

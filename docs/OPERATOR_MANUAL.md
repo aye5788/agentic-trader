@@ -229,8 +229,13 @@ decides whether it's worth a fix:
 - **You always review and merge — nothing merges itself.** Read the PR body
   (it's written so you don't need to read the code), and either merge it,
   ask a follow-up (comment `@claude ...` on the PR — it will respond), or
-  close it. Branch protection on `main` (part of the setup below) makes this
-  a hard rule, not just a polite convention.
+  close it. Branch protection on `main` (already enabled, see setup below) is
+  what backs this up mechanically: **the agent cannot merge its own pull
+  request**, because merging needs one approving review from someone other
+  than the author. Be precise about what that rule does and does not do — it
+  blocks the *agent's* path to `main`; it does **not** stop you (or the
+  droplet's own scripts) pushing to `main` directly, which is deliberate, so
+  ordinary maintenance is not locked out.
 
 **One-time setup — until you do this, the loop is INERT.** Issues still get
 filed exactly as described above either way; the only thing missing without
@@ -247,10 +252,25 @@ this setup is the pull request:
      `CLAUDE_CODE_OAUTH_TOKEN` → paste the value.
    - ⚠️ Never store an `ANTHROPIC_API_KEY` here or anywhere — that silently
      switches billing from your subscription to per-token API use.
-3. **Turn on branch protection for `main`** — github.com → this repo →
-   **Settings → Branches** → add a rule for `main` requiring a pull request
-   before merging (no direct pushes). This is what guarantees a proposed fix
-   can never land without you looking at it first.
+3. **Branch protection on `main` — ALREADY ENABLED** (done for you). What is
+   actually set, so you can check it at github.com → this repo →
+   **Settings → Branches**:
+   - a pull request is required before merging, **and** it needs
+     **1 approving review**. The review requirement is the part that matters:
+     a PR-only rule would still let the agent open a PR and merge it itself.
+     With this, an agent's PR sits until *you* approve it.
+   - **"Do not allow bypassing" is deliberately OFF** (`enforce_admins:false`),
+     so you as owner — and the droplet's own scripts — can still push to
+     `main` directly. This is not a loophole in the agent's path: the agent
+     runs as GitHub Actions, not as you.
+   So: nothing the agent proposes can land without you. It does *not* mean
+   `main` is frozen.
+4. **Arm the daily upkeep check to file issues — ALREADY DONE** (done for you).
+   The droplet's 08:00 job runs with `--open-issue`, which is what turns an
+   unhealthy scheduled job into a GitHub issue the loop above can act on. To
+   confirm on the box: `crontab -l | grep health_check` should show
+   `scripts/health_check.py --open-issue`. Without that flag the check still
+   texts you, but files nothing and so never draws a PR.
 
 ---
 
