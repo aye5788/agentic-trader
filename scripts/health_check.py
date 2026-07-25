@@ -34,6 +34,7 @@ is what makes them safe on the shared ops topic (see src/notify.py:ops_topic).
 import argparse
 import datetime as dt
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -100,8 +101,13 @@ def load_state() -> dict:
 
 
 def save_state(st: dict) -> None:
+    """Atomic write: a kill mid-write must never leave a truncated JSON file,
+    because `load_state`'s `except ValueError` treats corrupt JSON as "no
+    state" and silently resets EVERY flag, re-alerting everything at once."""
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(st, indent=2, sort_keys=True))
+    tmp = STATE.with_name(f"{STATE.name}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(st, indent=2, sort_keys=True))
+    os.replace(tmp, STATE)
 
 
 def diff(rows, flagged: dict) -> tuple[list, list]:
@@ -160,10 +166,18 @@ def _gh(args: list[str]) -> tuple[bool, str, str]:
     failure (gh missing, not authenticated, network down, rate limited,
     timeout) degrades to (False, "", diagnostic) so the issue-filing bonus can
     never take down the check or the phone push, which is the primary channel.
+
+    encoding="utf-8", errors="replace": the box's cron locale may not be UTF-8
+    (PEP 538 coercion can be off), and issue bodies/titles carry emoji. Without
+    this, decoding `gh issue list`'s JSON can raise, dedupe silently returns
+    None, and every run files a FRESH duplicate issue instead of commenting on
+    the existing one. stdin=DEVNULL: an interactive `gh` prompt (e.g. first-run
+    config) must never block waiting on input for the full timeout.
     """
     try:
         out = subprocess.run(["gh"] + args, capture_output=True, text=True,
-                              timeout=30, cwd=REPO)
+                              timeout=30, cwd=REPO, encoding="utf-8",
+                              errors="replace", stdin=subprocess.DEVNULL)
         return out.returncode == 0, out.stdout, out.stderr
     except Exception as e:  # gh not installed, timeout, etc.
         return False, "", f"{type(e).__name__}: {e}"
@@ -174,20 +188,45 @@ def _ensure_labels() -> None:
     already exists returns a 422 from the API, which we swallow; any other
     failure just prints a diagnostic (the labels may already exist from a
     prior run, or `gh issue create --label` may fail below — either way we
-    continue rather than blocking the alert)."""
+    continue rather than blocking the alert).
+
+    `gh api` writes the JSON error body (which contains `already_exists`) to
+    STDOUT, not stderr — stderr only carries the generic "Validation Failed
+    (HTTP 422)" line. Checking `err` alone means this prints a spurious
+    "could not ensure label" diagnostic on every single run in steady state,
+    once the labels already exist.
+    """
     for name, color, desc in ISSUE_LABELS:
-        ok, _, err = _gh(["api", "repos/{owner}/{repo}/labels", "-X", "POST",
-                           "-f", f"name={name}", "-f", f"color={color}",
-                           "-f", f"description={desc}"])
-        if not ok and "already_exists" not in err and "already exists" not in err:
-            print(f"gh: could not ensure label {name!r} (continuing): {err.strip()[:200]}")
+        ok, out, err = _gh(["api", "repos/{owner}/{repo}/labels", "-X", "POST",
+                             "-f", f"name={name}", "-f", f"color={color}",
+                             "-f", f"description={desc}"])
+        already_exists = "already_exists" in out or "already exists" in out \
+            or "already_exists" in err or "already exists" in err
+        if not ok and not already_exists:
+            print(f"gh: could not ensure label {name!r} (continuing): "
+                  f"{(out + err).strip()[:200]}")
+
+
+def _match_issue(items: list[dict], title: str) -> int | None:
+    """Pure: given a parsed `gh issue list --json number,title` result and a
+    target title, return the matching OPEN issue's number, or None. Exact
+    match only — a near-miss title must NOT match, since dedupe existing to
+    avoid a different issue silently soaking up our comments."""
+    for item in items:
+        if item.get("title") == title:
+            return item.get("number")
+    return None
 
 
 def _find_open_issue(title: str) -> int | None:
     """Number of an OPEN issue with this exact title, or None. Lists rather
     than server-side searches on title so we don't depend on GitHub search
-    query syntax behaving a particular way across `gh` versions."""
-    ok, out, err = _gh(["issue", "list", "--state", "open",
+    query syntax behaving a particular way across `gh` versions.
+
+    Filtered to the `auto-fix` label (present on this box's gh v2.4.0, and on
+    any modern `gh`): cheap, shrinks the `--limit 100` pagination surface, and
+    rules out an unrelated same-titled issue colliding with our dedupe."""
+    ok, out, err = _gh(["issue", "list", "--state", "open", "--label", "auto-fix",
                          "--json", "number,title", "--limit", "100"])
     if not ok:
         print(f"gh: could not list issues for dedupe (continuing): {err.strip()[:200]}")
@@ -196,46 +235,52 @@ def _find_open_issue(title: str) -> int | None:
         items = json.loads(out or "[]")
     except ValueError:
         return None
-    for item in items:
-        if item.get("title") == title:
-            return item.get("number")
-    return None
+    return _match_issue(items, title)
 
 
-def file_issue(to_alert, *, dry: bool) -> None:
-    """File-or-comment the deduped issue for newly-alerting conditions.
+def file_issue(to_alert, *, dry: bool) -> bool:
+    """File-or-comment the deduped issue for newly-alerting (or previously
+    filing-failed) conditions. Returns True iff the issue was actually created
+    or commented — callers persist that as `"filed": true` so a failed run
+    gets retried later WITHOUT re-pushing (the phone push already fired at
+    fire-once time and must never repeat).
 
     Wrapped so any `gh` failure prints a diagnostic and returns — filing is a
     bonus channel, never allowed to break the check or the phone push (the
     primary channel), which have already run by the time this is called.
     """
     if not to_alert:
-        return
+        return False
     body = issue_body(to_alert)
     if dry:
         print(f"--- would file/comment issue (dry) ---\n{ISSUE_TITLE}\n{body}\n"
               f"{'-' * 30}")
-        return
+        return False
     try:
-        _ensure_labels()
         number = _find_open_issue(ISSUE_TITLE)
         if number is not None:
             ok, _, err = _gh(["issue", "comment", str(number), "--body", body])
             if ok:
                 print(f"gh: commented on existing issue #{number}")
-            else:
-                print(f"gh: could not comment on issue #{number} (continuing): "
-                      f"{err.strip()[:200]}")
-        else:
-            ok, out, err = _gh(["issue", "create", "--title", ISSUE_TITLE,
-                                 "--body", body, "--label", "bug",
-                                 "--label", "auto-fix"])
-            if ok:
-                print(f"gh: filed issue {out.strip()}")
-            else:
-                print(f"gh: could not create issue (continuing): {err.strip()[:200]}")
+                return True
+            print(f"gh: could not comment on issue #{number} (continuing): "
+                  f"{err.strip()[:200]}")
+            return False
+        # Labels are only needed on the create path (`gh issue create --label`
+        # requires them to exist); skip the two extra API calls on the far
+        # more common comment path above.
+        _ensure_labels()
+        ok, out, err = _gh(["issue", "create", "--title", ISSUE_TITLE,
+                             "--body", body, "--label", "bug",
+                             "--label", "auto-fix"])
+        if ok:
+            print(f"gh: filed issue {out.strip()}")
+            return True
+        print(f"gh: could not create issue (continuing): {err.strip()[:200]}")
+        return False
     except Exception as e:  # belt-and-braces: filing must never break the run
         print(f"gh: issue filing crashed unexpectedly (continuing): {e}")
+        return False
 
 
 def main() -> None:
@@ -262,8 +307,11 @@ def main() -> None:
     for key in healed:
         flagged.pop(key, None)
         print(f"healed: {key}")
+    new_keys = set()
     for c in to_alert:
-        flagged[c.key] = {"at": now, "status": c.status, "detail": c.detail}
+        flagged[c.key] = {"at": now, "status": c.status, "detail": c.detail,
+                           "filed": False}
+        new_keys.add(c.key)
 
     if to_alert:
         title, body = compose(to_alert)
@@ -271,8 +319,6 @@ def main() -> None:
         print(f"--- {header} ---\n{title}\n{body}\n{'-' * (len(header) + 8)}")
         if not args.dry:
             push(title, body, tags="wrench", topic=ops_topic())
-        if args.open_issue:
-            file_issue(to_alert, dry=args.dry)
     elif flagged:
         # Silent by design (fire-once) — but don't let the log claim all is well.
         print(f"no NEW conditions; {len(flagged)} still unresolved and already "
@@ -280,10 +326,34 @@ def main() -> None:
     else:
         print(f"all clear ({sum(1 for c in rows if c.healthy)}/{len(rows)} healthy)")
 
+    # Persist BEFORE filing (the bonus channel), not after: filing can burn
+    # ~120s of subprocess time (up to 4 `gh` calls x 30s timeout), and this box
+    # is memory-tight and swaps. If the process dies mid-filing, the fire-once
+    # flag must already be on disk — otherwise the next run both re-pushes AND
+    # re-files the same condition. The phone push above is untouched by this
+    # reordering: it still fires first and is never blocked by filing.
     if not args.dry:
         st["flagged"] = flagged
         st["last_run"] = now
         save_state(st)
+
+    if args.open_issue:
+        # File newly-alerting conditions, plus any previously-flagged
+        # condition whose filing failed last time out (retried here WITHOUT
+        # re-pushing — the phone push already fired for it and fire-once must
+        # not repeat it). Conditions from an older state file with no "filed"
+        # key are assumed already filed (no retroactive retry storm).
+        rows_by_key = {c.key: c for c in rows}
+        retry = [rows_by_key[k] for k, e in flagged.items()
+                 if k not in new_keys and not e.get("filed", True) and k in rows_by_key]
+        to_file = to_alert + retry
+        if to_file:
+            filed_ok = file_issue(to_file, dry=args.dry)
+            if not args.dry and filed_ok:
+                for c in to_file:
+                    flagged[c.key]["filed"] = True
+                st["flagged"] = flagged
+                save_state(st)
 
 
 # ---------------------------------------------------------------- selftest
@@ -355,6 +425,15 @@ def _selftest() -> None:
 
     empty_body = issue_body([])
     assert "$" not in empty_body
+
+    # --- _match_issue (pure dedupe-lookup logic, no subprocess) ---
+    items = [{"number": 7, "title": ISSUE_TITLE}, {"number": 9, "title": "unrelated"}]
+    assert _match_issue(items, ISSUE_TITLE) == 7, "exact match must be found"
+    assert _match_issue(items, "no such title") is None, "no match must return None"
+    assert _match_issue([], ISSUE_TITLE) is None, "empty list must return None"
+    near_miss = [{"number": 3, "title": ISSUE_TITLE + " "}]  # trailing-space drift
+    assert _match_issue(near_miss, ISSUE_TITLE) is None, \
+        "a near-miss title must NOT match (avoids soaking up a different issue)"
 
     print("health_check selftest: PASS")
 
