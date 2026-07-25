@@ -145,6 +145,34 @@ second layer, but the app-level password is the load-bearing gate — do not rem
 The equity curve fills from `scripts/log_equity.py`, which `run_fast_loop.sh` runs
 each day — one point per trading day from first run.
 
+## GitHub Actions (off-box automation)
+
+Three workflows run entirely on GitHub's runners, never the droplet — the box
+only ever *feeds* them (the ledger mirror push) or is *checked on* by them:
+
+| Workflow | Trigger | What it does | Secrets |
+| -------- | ------- | ------------ | ------- |
+| `adaptive-tune.yml` | Mondays 08:00 UTC + manual | Off-box weekly learner for `stop_atr_mult` — reads price + ledger data from the mirror, surfaces a bounded PROPOSAL. Never trades, never writes config. See `docs/OPERATOR_MANUAL.md` §2. | `LEDGER_TOKEN`; optional `NTFY_TOPIC_OPS` |
+| `validate.yml` | Daily `0 13 * * *` (09:00 ET, after the droplet's own 08:00 check) + push touching `src/repo_checks.py`/itself + manual | TWO independent jobs. `deadman`: droplet dead-man's switch — fails if the ledger mirror hasn't been pushed to in 72h (the one check that survives the droplet dying; `scripts/health_check.py` runs *on* the droplet and can't report its own death). `checks`: runs `src/repo_checks.py`, the static filesystem-only config/CI validator. Each job files/updates its own deduped `bug`+`auto-fix` GitHub issue; `deadman` also phones `NTFY_TOPIC_OPS`. | `LEDGER_TOKEN` (same PAT as adaptive-tune.yml); optional `NTFY_TOPIC_OPS` |
+| `claude.yml` | An issue gets both `bug` and `auto-fix` labels (fires once, whichever lands second); or a `@claude` mention on an issue/PR | The agent half of the oversight loop the two above feed. Reads the issue, decides operational-vs-code-defect, and — only for a genuine code bug — implements the minimal fix, runs a **mandatory adversarial self-review** (a second pass whose job is to falsify its own fix), re-verifies with real command output, and opens a pull request against `main` written for a non-coder (never pushes to `main` itself). Operational findings get a plain-language comment and no PR. See `docs/OPERATOR_MANUAL.md` §5 for what the PR looks like. | `CLAUDE_CODE_OAUTH_TOKEN` — **without it the workflow is INERT**: issues still get filed by the two workflows above exactly as before, they just draw no PR |
+
+**One-time setup for `validate.yml` + `claude.yml`** (`adaptive-tune.yml`'s
+`LEDGER_TOKEN` should already exist from its own setup):
+
+1. `LEDGER_TOKEN` — reuse the same fine-grained PAT `adaptive-tune.yml` uses
+   (read-only Contents on the private `agentic-trader-ledger` mirror); no new
+   secret needed for `validate.yml`'s dead-man's switch.
+2. `CLAUDE_CODE_OAUTH_TOKEN` — install the Claude GitHub App on this repo,
+   run `claude setup-token`, and save the printed token as this repo secret.
+   Never set `ANTHROPIC_API_KEY` anywhere — it silently switches billing from
+   the subscription to per-token API use (`src/repo_checks.py`'s
+   `check_no_api_key` flags a real assignment of it).
+3. Branch protection on `main` (require a pull request, no direct pushes) —
+   the hard guarantee that nothing `claude.yml` proposes can land unreviewed.
+
+Full plain-language walkthrough of what an issue/PR from this loop looks like:
+`docs/OPERATOR_MANUAL.md` §5, "When the system files an issue."
+
 ## Operations & troubleshooting (for a future debugger)
 
 **Health check — is each piece alive?**

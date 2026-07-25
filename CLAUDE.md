@@ -190,6 +190,28 @@ scripts/health_check.py THE UPKEEP REMINDER (daily 08:00). Runs health.checks() 
                         "Scheduled jobs" card carries standing status. Owns the
                         Schwab re-auth reminder — reads real token age, so it's
                         silent when you're current (replaced the blind Monday nag).
+                        `--open-issue` also routes findings into the oversight
+                        loop below (deduped `bug`+`auto-fix` GitHub issue).
+src/repo_checks.py      Static repo-state validator — FIVE filesystem-only checks
+                        (cron paths, scheduled-jobs-armed, workflow exit-0,
+                        workflow swallowed-failures, no-api-key) that catch
+                        config/CI drift no exception ever throws. Pure, no
+                        network/secrets. Run: `python3 src/repo_checks.py`.
+.github/workflows/validate.yml  Off-box (GitHub Actions) oversight detector —
+                        TWO independent jobs: `deadman` (droplet dead-man's
+                        switch via ledger-mirror freshness, 72h — the ONE
+                        check that survives the droplet dying) and `checks`
+                        (runs src/repo_checks.py). Each files/updates its own
+                        deduped `bug`+`auto-fix` GitHub issue; `deadman` also
+                        phones NTFY_TOPIC_OPS on droplet death.
+.github/workflows/claude.yml  The agent half of the oversight loop — fires on
+                        a GitHub issue carrying BOTH `bug` and `auto-fix`
+                        labels, runs a 6-stage protocol (triage ops-vs-code,
+                        minimal fix, MANDATORY adversarial self-review,
+                        re-verify, open a PR written for a non-coder) and
+                        opens a PR against `main` (never pushes to it). Also
+                        an `interactive` job for @claude mentions. INERT until
+                        CLAUDE_CODE_OAUTH_TOKEN exists as a repo secret.
 src/momentum.py         THE SIGNAL — single source of truth for the ranking math
                         (docs/STRATEGY.md §3). compute(panel, asof, lookback=252)
                         -> per-ticker R/sigma/trend/score/eligible/rank; select()

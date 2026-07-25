@@ -64,7 +64,11 @@ HOME=/root
 # REPLACED deploy/reauth_reminder.sh, which nagged every Monday whether or not you
 # had already re-authed and never escalated if you missed it. This one reads the
 # real token age, so it is silent when you're current and speaks up when you're not.
-0 8 * * *    cd /opt/agentic-trader && .venv/bin/python scripts/health_check.py >> logs/health.log 2>&1
+# --open-issue: also files/comments a deduped `bug`+`auto-fix` GitHub issue
+# ("🔴 Scheduled job unhealthy") for the same fire-once conditions, feeding the
+# claude.yml oversight loop. Never breaks the push if `gh` fails — see
+# scripts/health_check.py.
+0 8 * * *    cd /opt/agentic-trader && .venv/bin/python scripts/health_check.py --open-issue >> logs/health.log 2>&1
 
 # --- QUARTERLY UNIVERSE REFRESH (Piece 1) — first Sunday of Jan/Apr/Jul/Oct, 19:00 ET ---
 # DOW left as * to avoid cron's day-of-month OR day-of-week gotcha; the wrapper's

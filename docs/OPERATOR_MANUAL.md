@@ -184,7 +184,77 @@ Contents = Read). Then re-save it as the **`LEDGER_TOKEN`** repo secret on
 
 ---
 
-## 5. Checking that everything's healthy
+## 5. When the system files an issue
+
+The system watches itself, off-box, and when something looks wrong it files a
+GitHub issue — you don't have to be in a chat session for a problem to surface.
+You'll see this on github.com/aye5788/agentic-trader → **Issues**.
+
+**The two issue titles you'll see, and what each means:**
+
+| Issue title | Filed by | Means |
+| --- | --- | --- |
+| **"🔴 Repo-state check failed"** | `validate.yml` (`checks` job, runs daily 09:00 ET) | A static read of the repo found a config/CI defect that would otherwise fail silently — e.g. a cron line that would quietly do nothing, a job documented as scheduled but never armed, a workflow step that could report "green" on a real failure, or a stray key accidentally checked in. |
+| **"🔴 Droplet dead-man's switch tripped"** | `validate.yml` (`deadman` job, same daily run) | The check can no longer confirm the droplet is alive (it watches how recently the ledger backup was pushed). This is the **one** alarm that still works even if the box itself is completely dead — every other alert in this manual runs *on* the droplet and can't report its own death. |
+
+You may also see **"🔴 Scheduled job unhealthy"** — that's the existing daily
+08:00 upkeep check (§3 above) now also filing an issue for the same conditions
+it already pushes to your phone, instead of only pushing.
+
+**What happens next — Claude may open a pull request.** A second automation
+(`claude.yml`) watches for these issues and, when one appears, reads it and
+decides whether it's worth a fix:
+
+- **Most of the time there's nothing to fix in code.** A stale Schwab token,
+  the moomoo OpenD gateway logged out, a cron line never actually added to the
+  box, an expired GitHub token, the droplet being down — these are all things
+  *you* fix on the droplet (this manual tells you how), not bugs in the code.
+  When that's the case, Claude just leaves a plain-language **comment** on the
+  issue explaining what's wrong and what to do, and opens **no pull request**.
+  That is the normal, healthy outcome, not a failure of the system.
+- **When it genuinely is a code defect**, Claude opens a **pull request** —
+  a proposed change for you to look at and decide on, never something that
+  applies itself. The PR is written **for you, not a programmer**:
+  - a plain-language explanation of what broke and why it matters,
+  - a plain-language explanation of what the fix does,
+  - what its own adversarial self-review found (it deliberately tries to
+    poke holes in its own fix before showing it to you — read this section;
+    it's the most important one),
+  - the actual commands it ran and their actual output (never a bare claim
+    that something "passed"),
+  - an explicit **"what this does NOT fix"** — anything still broken or
+    anything it couldn't verify from here,
+  - and one final line telling you plainly whether it thinks this is
+    **"safe to merge"** or **"needs your judgement."**
+- **You always review and merge — nothing merges itself.** Read the PR body
+  (it's written so you don't need to read the code), and either merge it,
+  ask a follow-up (comment `@claude ...` on the PR — it will respond), or
+  close it. Branch protection on `main` (part of the setup below) makes this
+  a hard rule, not just a polite convention.
+
+**One-time setup — until you do this, the loop is INERT.** Issues still get
+filed exactly as described above either way; the only thing missing without
+this setup is the pull request:
+
+1. **Install the Claude GitHub App** on this repo — either run
+   `/install-github-app` inside Claude Code, or visit
+   github.com/apps/claude and install it on `aye5788/agentic-trader`.
+2. **Create a subscription-billed token** (not a per-token API key):
+   - anywhere you have Claude Code: run `claude setup-token` and copy the
+     token it prints;
+   - on github.com → this repo → **Settings → Secrets and variables →
+     Actions → New repository secret** → name it exactly
+     `CLAUDE_CODE_OAUTH_TOKEN` → paste the value.
+   - ⚠️ Never store an `ANTHROPIC_API_KEY` here or anywhere — that silently
+     switches billing from your subscription to per-token API use.
+3. **Turn on branch protection for `main`** — github.com → this repo →
+   **Settings → Branches** → add a rule for `main` requiring a pull request
+   before merging (no direct pushes). This is what guarantees a proposed fix
+   can never land without you looking at it first.
+
+---
+
+## 6. Checking that everything's healthy
 
 - **Schwab token:** `.venv/bin/python scripts/schwab_status.py`
 - **Dashboard** (portfolio, equity curve): **dash.ethobs.uk** (login = `DASH_USER`/
@@ -194,7 +264,7 @@ Contents = Read). Then re-save it as the **`LEDGER_TOKEN`** repo secret on
 
 ---
 
-## 6. Emergency: something's wrong, stop everything
+## 7. Emergency: something's wrong, stop everything
 
 1. **Freeze trading:** `touch /opt/agentic-trader/research_store/HALT`
 2. If you want it disarmed longer-term: set `[proof] live_approved = false` in
