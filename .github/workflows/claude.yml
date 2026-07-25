@@ -97,7 +97,16 @@ permissions:
 # those two collapse to one live run per issue/PR, newest wins.
 concurrency:
   group: claude-${{ github.event.issue.number || github.event.client_payload.issue_number || github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+  # QUEUE, don't cancel. Proven the hard way on issue #1 (2026-07-25): creating an
+  # issue with BOTH labels in one call emits two `labeled` events at the SAME
+  # instant. Both jobs pass the fire-once `if:` (each sees both labels present),
+  # both land in this group, and with cancel-in-progress they cancel EACH OTHER —
+  # the run reported `cancelled` and, had the agent not already finished its work,
+  # nothing would have run at all. A cancelled run also does not trip `if: failure()`,
+  # so the failure channel added for I2 would stay silent too: the exact
+  # "fails and nobody learns" shape this whole loop exists to eliminate.
+  # Queuing costs one redundant run; cancelling costs the entire response.
+  cancel-in-progress: false
 
 jobs:
   auto-fix:
