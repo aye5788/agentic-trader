@@ -382,6 +382,353 @@ def check_workflow_failure_exits(root: pathlib.Path) -> list[str]:
     return failures
 
 
+# --------------------------------------------------------------- check 3b
+#
+# Check 3's siblings: the two OTHER ways a `run:` step swallows a real failure
+# and still reports green. Check 3 knows exactly one spelling (`exit 0` near a
+# failure marker) and was blind to both of these — it scanned this repo's own
+# validate.yml and passed it clean while the repo-state step could not fail.
+#
+# A SEPARATE function rather than more branches inside check 3 because it needs
+# a different unit of parse. Check 3 is a line-window scan; a step's pipefail
+# protection can live on a sibling `shell:` key OUTSIDE the run block, so this
+# one has to know where each step starts and ends.
+#
+# (a) PIPEFAIL. GitHub's DEFAULT shell for `run:` on Linux is `bash -e {0}`.
+#     `-o pipefail` is added ONLY when `shell: bash` is written explicitly (or
+#     via `defaults.run.shell`). Without it a pipeline's status is its LAST
+#     command's, so a failing producer piped into anything exits 0:
+#         bash -e            -c 'false | tee /dev/null'; echo $?   -> 0
+#         bash -eo pipefail  -c 'false | tee /dev/null'; echo $?   -> 1
+#     Any ONE of three things counts as protection and clears the block:
+#     a pipefail-enabling `shell:`, `set -o pipefail` inside the block, or an
+#     explicit `${PIPESTATUS[...]}` guard.
+#
+# (b) `|| true` / `|| :` on a line that CAPTURES a command's result
+#     (`VAR=$(gh api ... || true)`). There the non-zero status is discarded and
+#     the caller is handed an empty string indistinguishable from a legitimate
+#     empty answer — an API outage reads as "no result found".
+
+# `- ` opening a YAML sequence item whose content is a mapping key.
+_STEP_DASH_RE = re.compile(r"^(\s*)-(\s+)(?=\S)")
+_RUN_KEY_RE = re.compile(r"^(\s*)run:(.*)$")
+_SHELL_VALUE_RE = re.compile(r"^(\s*)shell:\s*(.+?)\s*$")
+_DEFAULTS_RE = re.compile(r"^(\s*)defaults:\s*$")
+# `VAR=`, `export VAR=`, `local VAR=` — the capture shape rule (b) targets.
+_CAPTURE_RE = re.compile(
+    r"^\s*(?:export\s+|local\s+|declare\s+(?:-\w+\s+)?)?([A-Za-z_][A-Za-z0-9_]*)="
+)
+# `|| true` / `|| :` as a whole command word (not `|| truncate`, not `|| :=`).
+_OR_TRUE_RE = re.compile(r"\|\|\s*(?:true|:)(?![\w./:=-])")
+_PIPEFAIL_SET_RE = re.compile(r"\bset\b[^#\n]*\bpipefail\b")
+_PIPESTATUS_RE = re.compile(r"\bPIPESTATUS\b")
+# Shell keywords that CONSUME a pipeline's status themselves — the step's exit
+# status is the construct's, not the pipe's, so pipefail cannot mask a step.
+_CONSUMES_STATUS_RE = re.compile(r"^\s*(?:if|elif|while|until|case|return)\b")
+# Non-POSIX `shell:` values: the block is not a shell pipeline at all.
+_NON_SH_SHELLS = ("python", "pwsh", "powershell", "cmd", "node", "ruby", "perl")
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,60}$")
+
+# How far after a `VAR=$(... || true)` we look for the author's own
+# empty-vs-error handling before deciding the swallow is unhandled.
+_EMPTY_GUARD_WINDOW = 6
+
+
+def _shell_has_pipefail(value: str | None) -> bool:
+    """True iff this `shell:` value gives the block `-o pipefail`.
+
+    `shell: bash` is the documented pipefail-enabling form (GitHub runs
+    `bash --noprofile --norc -eo pipefail {0}`). A custom command line counts
+    only if it spells `pipefail` out. Bare `sh` does NOT (`sh -e {0}`).
+    """
+    if value is None:
+        return False
+    v = value.strip().strip("'\"")
+    return v == "bash" or "pipefail" in v
+
+
+def _shell_is_non_posix(value: str | None) -> bool:
+    if value is None:
+        return False
+    v = value.strip().strip("'\"").split()[0] if value.strip() else ""
+    return v in _NON_SH_SHELLS
+
+
+def _normalize_dash(line: str) -> str:
+    """`      - run: |` -> `        run: |` so key lookups need one shape."""
+    m = _STEP_DASH_RE.match(line)
+    if not m:
+        return line
+    return " " * (len(m.group(1)) + 1 + len(m.group(2))) + line[m.end():]
+
+
+def _indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _defaults_shell_protects(norm: list[str]) -> bool:
+    """True iff any `defaults:` block in the file sets a pipefail shell.
+
+    Deliberately coarse — workflow-level and job-level `defaults` are treated
+    alike, and one such block is taken to cover the file. Erring toward
+    "protected" here only ever costs a MISS; the opposite error would file an
+    issue against a workflow that is in fact fine.
+    """
+    for i, line in enumerate(norm):
+        m = _DEFAULTS_RE.match(line)
+        if not m:
+            continue
+        base = len(m.group(1))
+        for j in range(i + 1, len(norm)):
+            if norm[j].strip() and _indent_of(norm[j]) <= base:
+                break
+            sm = _SHELL_VALUE_RE.match(norm[j])
+            if sm and _shell_has_pipefail(sm.group(2)):
+                return True
+    return False
+
+
+def _logical_lines(block: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Join backslash-continued shell lines, keyed to the FIRST physical line.
+
+    `EXISTING=$(gh issue list ... \\` + `  --json number || true)` is one
+    command; scanned as two lines neither the capture nor the `|| true` is on
+    the same line as the other, and the whole rule silently never fires.
+    """
+    out: list[tuple[int, str]] = []
+    pending_idx: int | None = None
+    parts: list[str] = []
+    for idx, text in block:
+        stripped = text.rstrip()
+        cont = stripped.endswith("\\") and not stripped.endswith("\\\\")
+        parts.append(stripped[:-1] if cont else stripped)
+        if pending_idx is None:
+            pending_idx = idx
+        if not cont:
+            out.append((pending_idx, " ".join(p.strip() for p in parts)))
+            pending_idx, parts = None, []
+    if pending_idx is not None:
+        out.append((pending_idx, " ".join(p.strip() for p in parts)))
+    return out
+
+
+def _scan_shell_line(s: str) -> tuple[str, int | None]:
+    """-> (line with any trailing `#` comment removed, index of the first
+    top-level pipe operator or None).
+
+    Quote-, comment- and nesting-aware, in one pass. A `|` does NOT count when
+    it is quoted (`grep -E 'a|b'`), when it is really `||`, or when it sits
+    inside `$( )`, `${ }` or backticks — inside a substitution the pipeline
+    produces a VALUE, and the classic swallow is a top-level pipeline whose
+    status IS the step's status. Nesting state is per-line and never carried
+    across lines, so an unbalanced `$(` can only cause a MISS.
+    """
+    depth = 0
+    backtick = False
+    quote: str | None = None
+    pipe_at: int | None = None
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if quote:
+            if quote == '"' and c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == "\\":
+            i += 2
+            continue
+        if c in ("'", '"'):
+            quote = c
+            i += 1
+            continue
+        if c == "#" and (i == 0 or s[i - 1].isspace()):
+            s = s[:i]
+            break
+        if c == "`":
+            backtick = not backtick
+            i += 1
+            continue
+        if c == "$" and i + 1 < n and s[i + 1] in "({":
+            depth += 1
+            i += 2
+            continue
+        if c in ")}" and depth > 0:
+            depth -= 1
+            i += 1
+            continue
+        if c == "|":
+            if i + 1 < n and s[i + 1] == "|":
+                i += 2          # `||` is OR, not a pipe
+                continue
+            if depth == 0 and not backtick and pipe_at is None:
+                pipe_at = i
+            i += 1
+            continue
+        i += 1
+    return s, pipe_at
+
+
+def _iter_run_blocks(
+    lines: list[str],
+) -> list[tuple[list[tuple[int, str]], str | None]]:
+    """-> [(block lines as (0-based index, text), that step's `shell:` value)].
+
+    Indentation-based on purpose: this module must stay stdlib-only (no PyYAML
+    on the runner, no import that could fail the validator itself).
+    """
+    norm = [_normalize_dash(l) for l in lines]
+    dashes = [
+        (i, len(m.group(1)) + 1 + len(m.group(2)))
+        for i, l in enumerate(lines)
+        if (m := _STEP_DASH_RE.match(l))
+    ]
+
+    blocks: list[tuple[list[tuple[int, str]], str | None]] = []
+    for i, nline in enumerate(norm):
+        m = _RUN_KEY_RE.match(nline)
+        if not m:
+            continue
+        key_indent = len(m.group(1))
+        rest = m.group(2).strip()
+
+        starts = [d for d, col in dashes if col == key_indent and d <= i]
+        step_start = starts[-1] if starts else 0
+        ends = [d for d, col in dashes if col <= key_indent and d > i]
+        step_end = ends[0] if ends else len(lines)
+        for j in range(i + 1, step_end):
+            if norm[j].strip() and _indent_of(norm[j]) < key_indent:
+                step_end = j
+                break
+
+        shell: str | None = None
+        for j in range(step_start, step_end):
+            sm = _SHELL_VALUE_RE.match(norm[j])
+            if sm and len(sm.group(1)) == key_indent:
+                shell = sm.group(2)
+                break
+
+        if rest.startswith("|") or rest.startswith(">"):
+            body: list[tuple[int, str]] = []
+            for j in range(i + 1, len(lines)):
+                if not lines[j].strip():
+                    continue
+                if _indent_of(lines[j]) <= key_indent:
+                    break
+                body.append((j, lines[j]))
+        elif rest:
+            body = [(i, rest)]
+        else:
+            continue
+        blocks.append((body, shell))
+    return blocks
+
+
+def check_workflow_swallowed_failures(root: pathlib.Path) -> list[str]:
+    """No `run:` step may swallow a real failure via an unguarded pipeline or
+    via `|| true` on a captured command result. See the block comment above
+    for the mechanism and the reproduction.
+
+    WHAT THIS DELIBERATELY DOES NOT CATCH (the alarm has to stay believable —
+    it files a public issue, and a false positive teaches the human to ignore
+    the channel):
+
+      * a pipeline inside `$( )` / `${ }` / backticks. There the pipe produces
+        a value, and the idiom `X="$(printf %s "$Y" | tr -d '[:space:]')"` is
+        everywhere and harmless. Real but rarer swallows there are missed.
+      * a pipeline whose status is consumed by `if` / `while` / `case` / …
+        — the step's status is the construct's, not the pipe's.
+      * BARE `cmd ... || true` (no capture). `gh label create ... || true` is
+        the deliberate idempotent-best-effort idiom; flagging it would fire on
+        healthy workflows for a construct whose whole point is "I know this can
+        fail and I do not care". Only the CAPTURE form is flagged, where the
+        discarded status is replaced by a value the caller cannot tell apart
+        from a legitimate answer.
+      * a capture whose variable IS then empty-tested (`[ -n "$V" ]`) within
+        the next few lines: the author has written the degraded branch, so the
+        failure is handled, not swallowed. This is the shape at
+        validate.yml's `EXISTING=$(gh issue list ... || true)` — where a real
+        `gh` outage falls through to a `gh issue create` that fails loudly
+        anyway, so nothing goes quiet.
+      * `shell: python` / `pwsh` / … blocks — not shell pipelines.
+      * non-`.yml` workflow files (`.yaml`), matching check 3's scope.
+
+    Publishing rule: file:line, fixed prose, and — only for rule (b) — the
+    captured variable NAME after _publishable(). Never the line text: a `run:`
+    line can carry a token, and this output is filed into a public issue.
+    """
+    wf_dir = root / ".github" / "workflows"
+    if not wf_dir.is_dir():
+        return []
+
+    failures: list[str] = []
+    for wf_path in sorted(wf_dir.glob("*.yml")):
+        lines = wf_path.read_text().splitlines()
+        rel = str(wf_path.relative_to(root))
+        norm = [_normalize_dash(l) for l in lines]
+        defaults_ok = _defaults_shell_protects(norm)
+
+        for body, shell in _iter_run_blocks(lines):
+            if _shell_is_non_posix(shell):
+                continue
+            logical = [
+                (idx, text) for idx, text in _logical_lines(body)
+                if not _is_comment_only_line(text)
+            ]
+            scanned = [(idx, _scan_shell_line(text)) for idx, text in logical]
+            code = "\n".join(t for _, (t, _) in scanned)
+
+            # ---- (a) unguarded pipeline
+            protected = (
+                defaults_ok
+                or _shell_has_pipefail(shell)
+                or bool(_PIPEFAIL_SET_RE.search(code))
+                or bool(_PIPESTATUS_RE.search(code))
+            )
+            if not protected:
+                for idx, (text, pipe_at) in scanned:
+                    if pipe_at is None or _CONSUMES_STATUS_RE.match(text):
+                        continue
+                    failures.append(
+                        f"{rel}:{idx + 1}: a `run:` step pipes a command's "
+                        "output with no pipefail in scope (no pipefail-enabling "
+                        "`shell:`, no `set -o pipefail`, no ${PIPESTATUS} "
+                        "guard) — the step's exit status is the LAST command in "
+                        "the pipe, so a failure before the `|` reports GREEN "
+                        "(line text withheld — this output is published)"
+                    )
+                    break   # one finding per block; the fix is per-block
+
+            # ---- (b) `|| true` on a captured command result
+            for k, (idx, (text, _)) in enumerate(scanned):
+                cm = _CAPTURE_RE.match(text)
+                if not cm:
+                    continue
+                eq = text.index("=", cm.end(1))
+                if not _OR_TRUE_RE.search(text[eq:]):
+                    continue
+                var = cm.group(1)
+                guard = re.compile(r"-[zn]\s+\"?\$\{?" + re.escape(var) + r"\b")
+                window = "\n".join(
+                    t for _, (t, _) in scanned[k + 1:k + 1 + _EMPTY_GUARD_WINDOW]
+                )
+                if guard.search(window):
+                    continue
+                failures.append(
+                    f"{rel}:{idx + 1}: `|| true` discards the exit status of a "
+                    "command whose output is captured into "
+                    f"`{_publishable(var, _IDENT_RE)}` — a real failure becomes "
+                    "an empty value the caller cannot tell apart from a "
+                    "legitimate empty result, and nothing downstream tests it "
+                    "(line text withheld — this output is published)"
+                )
+    return failures
+
+
 # ---------------------------------------------------------------- check 4
 
 # NOTE the absence of `\s*` AFTER the `=` — that is the whole prose/code
@@ -556,6 +903,7 @@ CHECKS = (
     check_cron_paths,
     check_scheduled_jobs_armed,
     check_workflow_failure_exits,
+    check_workflow_swallowed_failures,
     check_no_api_key,
 )
 
@@ -851,6 +1199,291 @@ jobs:
         bad = check_workflow_failure_exits(root)
         assert len(bad) == 1, bad
         assert "inline.yml:6" in bad[0], bad
+
+    # ------------- check 3b: check_workflow_swallowed_failures ----------
+    #
+    # BOTH directions for each rule. The bug that motivated this check was a
+    # FALSE NEGATIVE — check 3 scanned validate.yml and passed it clean — so
+    # every fixture below that is meant to be clean is paired with one that
+    # must fire, and vice versa.
+
+    def _wf(body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            _write(root, ".github/workflows/w.yml", body)
+            return check_workflow_swallowed_failures(root)
+
+    # (a) unprotected `| tee`, no `shell:` key -> FLAGGED. This is verbatim
+    # the real validate.yml step that check 3 passed clean.
+    bad = _wf("""\
+jobs:
+  build:
+    steps:
+      - name: Repo-state check
+        run: |
+          python3 src/repo_checks.py 2>&1 | tee checks_output.txt
+""")
+    assert len(bad) == 1, bad
+    assert "w.yml:6" in bad[0] and "pipefail" in bad[0], bad
+    assert "repo_checks.py" not in bad[0], bad          # publishing rule
+
+    # ...same block, `shell: bash` -> GitHub adds `-o pipefail` -> clean.
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - name: Repo-state check
+        shell: bash
+        run: |
+          python3 src/repo_checks.py 2>&1 | tee checks_output.txt
+""") == []
+
+    # ...same block, `set -o pipefail` inside -> clean.
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - name: Repo-state check
+        run: |
+          set -euo pipefail
+          python3 src/repo_checks.py 2>&1 | tee checks_output.txt
+""") == []
+
+    # ...same block, explicit ${PIPESTATUS[0]} guard -> clean. (The real
+    # deadman step in validate.yml.)
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - name: Deadman
+        run: |
+          {
+            echo "checking"
+            exit 1
+          } 2>&1 | tee deadman_output.txt
+          exit "${PIPESTATUS[0]}"
+""") == []
+
+    # ...and via `defaults.run.shell` rather than a per-step key -> clean.
+    assert _wf("""\
+jobs:
+  build:
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Repo-state check
+        run: |
+          python3 src/repo_checks.py 2>&1 | tee checks_output.txt
+""") == []
+
+    # a pipe on an INLINE `run:` (no block scalar) is the same bug -> FLAGGED
+    bad = _wf("""\
+jobs:
+  build:
+    steps:
+      - run: python3 x.py | tee out.txt
+""")
+    assert len(bad) == 1 and "w.yml:4" in bad[0], bad
+
+    # `shell: sh` is NOT pipefail-enabling (`sh -e {0}`) -> still FLAGGED
+    bad = _wf("""\
+jobs:
+  build:
+    steps:
+      - shell: sh
+        run: |
+          python3 x.py | tee out.txt
+""")
+    assert len(bad) == 1, bad
+
+    # `shell: python` is not a shell pipeline at all -> clean
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - shell: python
+        run: |
+          print("a | b")
+""") == []
+
+    # pipe INSIDE a command substitution -> deliberately not flagged (the
+    # real adaptive-tune.yml idiom; the pipe makes a value, not a status).
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - run: |
+          TOKEN="$(printf '%s' "$LEDGER_TOKEN" | tr -d '[:space:]')"
+          echo "ok"
+""") == []
+
+    # a `|` inside quotes is not a pipe -> clean
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - run: |
+          grep -E 'alpha|beta' notes.txt
+""") == []
+
+    # a pipeline whose status is consumed by `if` -> deliberately not flagged
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - run: |
+          if python3 x.py | grep -q OK; then
+            echo "fine"
+          fi
+""") == []
+
+    # `| tee` mentioned only in `#` prose -> clean (check 3's lesson)
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - name: Repo-state check
+        shell: bash
+        run: |
+          # Historically this was `python3 x.py | tee out.txt` with no
+          # pipefail, and a failing check reported green.
+          python3 x.py
+""") == []
+
+    # (b) `|| true` swallowing a CAPTURED command result -> FLAGGED
+    bad = _wf("""\
+jobs:
+  build:
+    steps:
+      - run: |
+          set -e
+          REMAINING=$(gh api /rate_limit --jq .rate.remaining || true)
+          echo "budget $REMAINING"
+""")
+    assert len(bad) == 1, bad
+    assert "w.yml:6" in bad[0] and "REMAINING" in bad[0], bad
+    assert "rate_limit" not in bad[0], bad              # publishing rule
+
+    # ...the same swallow spread over a backslash CONTINUATION still fires,
+    # reported against the first physical line. Without _logical_lines() the
+    # capture and the `|| true` land on different lines and the rule is dead.
+    bad = _wf("""\
+jobs:
+  build:
+    steps:
+      - run: |
+          set -e
+          EXISTING=$(gh issue list --state open \\
+                       --json number -q '.[0].number' || true)
+          gh issue comment "$EXISTING" --body-file issue_body.md
+""")
+    assert len(bad) == 1, bad
+    assert "w.yml:6" in bad[0] and "EXISTING" in bad[0], bad
+
+    # ...but NOT when the author writes the degraded branch: an empty-vs-set
+    # test on the captured variable means the failure is handled, not
+    # swallowed. This is the real validate.yml shape, and a real `gh` outage
+    # there falls through to a `gh issue create` that fails loudly anyway.
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - run: |
+          set -e
+          EXISTING=$(gh issue list --state open \\
+                       --json number -q '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file issue_body.md
+          else
+            gh issue create --title "$TITLE" --body-file issue_body.md
+          fi
+""") == []
+
+    # DELIBERATE NON-FINDING: bare best-effort `|| true` with no capture.
+    # `gh label create` is idempotent and its failure is the intent, not a
+    # masked defect; `cp ... 2>/dev/null || true` on an optional cache file
+    # is the same. Flagging these would fire on two healthy workflows in this
+    # repo every day — see the check's docstring.
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - run: |
+          set -e
+          gh label create bug --color d73a4a || true
+          cp _ledger/prices/closes.parquet research_store/prices/ 2>/dev/null || true
+          curl -fsS -m 10 -d "$MSG" "https://ntfy.sh/$T" >/dev/null || true
+""") == []
+
+    # `|| :` is `|| true` spelled shorter -> FLAGGED on a capture
+    bad = _wf("""\
+jobs:
+  build:
+    steps:
+      - run: |
+          COUNT=$(wc -l < data.txt || :)
+          echo "$COUNT"
+""")
+    assert len(bad) == 1 and "COUNT" in bad[0], bad
+
+    # `|| true` inside a `#` comment must not fire
+    assert _wf("""\
+jobs:
+  build:
+    steps:
+      - run: |
+          # this used to read V=$(gh api x || true) and swallowed outages
+          V=$(gh api x)
+""") == []
+
+    # no .github/workflows dir at all -> clean, not a crash
+    with tempfile.TemporaryDirectory() as td:
+        assert check_workflow_swallowed_failures(pathlib.Path(td)) == []
+
+    # END-TO-END on this repo's real validate.yml shape: the pre-fix file has
+    # exactly ONE finding (the repo-state step), and adding `shell: bash` to
+    # that one step clears the whole file — nothing else in it fires.
+    _validate_shape = """\
+jobs:
+  validate:
+    steps:
+      - name: Repo-state check
+        id: checks
+        continue-on-error: true
+%s        run: |
+          python3 src/repo_checks.py 2>&1 | tee checks_output.txt
+
+      - name: Deadman
+        id: deadman
+        continue-on-error: true
+        run: |
+          {
+            echo "::error::LEDGER_TOKEN is not set"
+            exit 1
+          } 2>&1 | tee deadman_output.txt
+          exit "${PIPESTATUS[0]}"
+
+      - name: Open / update issue on failure
+        run: |
+          set -e
+          gh label create bug --color d73a4a 2>/dev/null || true
+          TITLE="check failed"
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" \\
+                       --json number -q '.[0].number' || true)
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file issue_body.md
+          else
+            gh issue create --title "$TITLE" --body-file issue_body.md
+          fi
+
+      - name: Fail the run
+        run: exit 1
+"""
+    bad = _wf(_validate_shape % "")
+    assert len(bad) == 1, bad
+    assert "w.yml:8" in bad[0], bad
+    assert _wf(_validate_shape % "        shell: bash\n") == []
 
     # -------------------- check 4: check_no_api_key ---------------------
     with tempfile.TemporaryDirectory() as td:
