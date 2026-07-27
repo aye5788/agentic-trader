@@ -86,11 +86,49 @@ stale batch and told Aaron:
 That is the 07-08 event reported as the week of 07-20. Nothing of the sort
 happened that week — every `risk_review` 07-20→07-24 carries `rejected: []`. And
 because defect #2 blocked the OPSLOG write, the "details are in the ops log"
-pointer was broken too. Issues 002 and 003 were generated after 07-08 and are
-likely to carry the same contamination; not audited.
+pointer was broken too.
+
+**Back-audit of every issue** (replaying each letter's real window against only
+the events that existed when it ran):
+
+| Issue | Selected (buggy) | Actually in window | Leak | Table | Prose |
+| ----- | ---------------- | ------------------ | ---- | ----- | ----- |
+| 001 | 2 ev / 15 legs | 2 ev / 15 legs | none | correct | correct |
+| 002 | 3 ev / 16 legs | **1 ev / 1 leg** | 2 ev / 15 legs | **CONTAMINATED** | contaminated |
+| 003 | 14 ev / 52 legs | 12 ev / 37 legs | 2 ev / 15 legs | correct | contaminated |
+| 004 | 5 ev / 33 legs | 3 ev / 18 legs | 2 ev / 15 legs | correct | contaminated |
+
+Issue 001 is clean — the 07-08 build fell legitimately inside its opening 7-day
+window. Every issue after it republished that same build.
+
+**Issue 002 is the worst and the only one whose fills TABLE is wrong**: exactly
+one real fill leg occurred that week (the SPY trim @ $752.92), but the table
+lists 15 rows — the entire 07-08 build, re-reported a second time after issue
+001 had already covered it. Its prose likewise opens "This was the week the book
+actually got built," describing the previous issue's news.
+
+Issues 003 and 004 have correct tables — their agents rendered only entries
+carrying `status: "filled"`, and the leaked 07-08 legs carry no `status`. But
+both narratives absorbed the stale broker-profile block and reported it as
+current ("A broker profile check held back most of a planned rebuild this week",
+003; "13 of 14 never placed", 004).
+
+**Scope of the ts-less class:** 24 of 73 journal events carry no `ts` — under the
+old predicate ALL of them were force-included in every letter forever. Only the 2
+`execution` events are letter-facing, though: `letter_facts` consumes `execution`,
+`exit_signal`, and `risk_review` only, and every `exit_signal`/`risk_review` has a
+`ts`. The other 22 (`product`, `signal_panel`, one undatable `outcome`) never
+reached the letter. So the blast radius above is complete, not a sample.
+
+**Latent, not fixed:** `research_store.append_journal()` writes whatever dict it
+is handed and does NOT stamp `ts` — each caller must remember. `_in_window` now
+degrades safely (falls back to `as_of`; excludes the undatable), so a forgotten
+`ts` can no longer leak forever. But stamping `ts` at that single chokepoint
+would kill the class outright. Not done here: it touches the ledger write path,
+which is non-regenerable data and deserves its own deliberate change.
 
 Letters already sent cannot be recalled — recorded here so the record is
-straight. Issue 005 is clean.
+straight. Issue 005 regenerates clean (0 fills, 0 notes, no un-statused legs).
 
 **Still open for Aaron:** an agent cannot grant itself Bash permissions (the
 classifier blocks it, correctly), so `gh run cancel` still needs a rule added by
