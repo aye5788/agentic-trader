@@ -16,7 +16,8 @@
       "Bash(.venv/bin/python scripts/record_fills.py)",
       "Bash(python3 scripts/record_fills.py)",
       "Read",
-      "Write"
+      "Write",
+      "Edit(docs/OPSLOG.md)"
     ]
   }
 }

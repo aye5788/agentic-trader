@@ -76,7 +76,11 @@ SPECS = {
     "slow_loop":     ("Slow loop (rebalance)",   3,  "research_store/current.json"),
     "fast_loop":     ("Fast loop (execution)",   4,  "logs/fast.log"),
     "risk_review":   ("Risk review",             4,  "logs/risk_review.log"),
-    "monitor":       ("Intraday monitor",        2,  "research_store/monitor/state.json"),
+    # 4d, not 2d: this artifact only advances during RTH, so Friday's close ->
+    # Monday's 08:00 check is ~2.7d of legitimate dead air (3.7d when Monday is
+    # a market holiday). 2d alarmed every Monday. Matches the other weekday-only
+    # jobs above. Cost: a monitor that dies mid-week is caught ~4d later.
+    "monitor":       ("Intraday monitor",        4,  "research_store/monitor/state.json"),
     "ledger_backup": ("Ledger backup",           3,  "logs/backup.log"),
     "signal_panel":  ("moomoo signal panel",    10,  "signal_panel journal event"),
     "newsletter":    ("Investor letter",        10,  "research_store/newsletters/"),
@@ -268,10 +272,29 @@ def _selftest() -> None:
     assert r["signal_panel"].alertable, "a genuinely-never-run job must alert"
 
     # boundary: exactly at the limit is still ok, a hair past is stale
-    r = {c.key: c for c in evaluate(now, {"monitor": now - 2 * day})}
+    mon_max = SPECS["monitor"][1]
+    r = {c.key: c for c in evaluate(now, {"monitor": now - mon_max * day})}
     assert r["monitor"].status == "ok", "exactly at threshold must not alarm"
-    r = {c.key: c for c in evaluate(now, {"monitor": now - 2 * day - dt.timedelta(hours=1)})}
+    r = {c.key: c for c in evaluate(now, {"monitor": now - mon_max * day - dt.timedelta(hours=1)})}
     assert r["monitor"].status == "stale"
+
+    # The monitor's artifact only advances during RTH, so the ordinary
+    # Friday-close -> Monday-08:00 gap is ~2.7d of dead air with nothing wrong.
+    # A 2d window made that alarm EVERY Monday; on 2026-07-27 it fired a false
+    # "stale" push and filed an auto-fix issue against a phantom bug.
+    fri_close = dt.datetime(2026, 7, 24, 19, 59, tzinfo=dt.timezone.utc)   # 15:59 ET
+    mon_check = dt.datetime(2026, 7, 27, 12, 0, tzinfo=dt.timezone.utc)    # 08:00 ET
+    r = {c.key: c for c in evaluate(mon_check, {"monitor": fri_close})}
+    assert r["monitor"].status == "ok", f"weekend gap must not alarm: {r['monitor']}"
+
+    # a Monday market holiday stretches the same gap a further day (Fri close ->
+    # Tue 08:00 = 3.7d); still nothing wrong, still must be quiet.
+    r = {c.key: c for c in evaluate(mon_check + day, {"monitor": fri_close})}
+    assert r["monitor"].status == "ok", f"long-weekend gap must not alarm: {r['monitor']}"
+
+    # ...but a monitor that genuinely stopped must still be caught.
+    r = {c.key: c for c in evaluate(mon_check, {"monitor": fri_close - 3 * day})}
+    assert r["monitor"].status == "stale", "a truly dead monitor must still alarm"
 
     # schwab: fresh / due / expired
     def schwab(issued_days_ago):

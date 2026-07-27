@@ -8,6 +8,55 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-27 — Health check cried wolf every Monday; newsletter couldn't write this log
+
+Two defects found during a routine "is everything running?" audit. Everything
+*was* running — Friday 07-24 was the last trading session and all nine checks
+were green through Sunday. Both findings are in the oversight plumbing itself.
+
+**1. The intraday-monitor liveness check false-fired every Monday — and dragged
+the auto-fix agent in with it.** `SPECS["monitor"]` allowed 2 days, but its
+artifact (`research_store/monitor/state.json`) only advances during RTH. Friday's
+close → Monday's 08:00 health run is ~2.7d of legitimate dead air (3.7d when
+Monday is a market holiday). Every other weekday-only job already used 3–4d;
+the monitor was the only one whose window was shorter than a weekend.
+
+This was not theoretical. At 08:00 today it fired for real — the first Monday
+since the health cron was armed on 07-24. It pushed to the OPS topic, and
+because cron runs `health_check.py --open-issue`, it filed GitHub issue **#2**
+(`bug`+`auto-fix`) and triggered two `claude.yml` runs to fix a bug that did not
+exist. Confirmed against `research_store/health_state.json`, which shows
+`monitor` flagged at `2026-07-27T12:00:03Z` with `"filed": true`.
+
+Fix: threshold 2d → 4d, matching the other weekday-only jobs. The selftest now
+encodes the *requirement* rather than the constant — a Friday-close → Monday-08:00
+gap and a long-weekend (Tuesday) gap must both stay quiet, while a genuinely dead
+monitor must still alarm. The old test asserted the 2d boundary and so passed
+happily while the bug shipped.
+
+**Accepted cost:** a monitor that dies mid-week is now caught up to ~4d later
+instead of ~2d. That is the same latency every other weekday job already carries.
+If that is too slow for the component that watches stops, the better fix is a
+weekday-aware age (count only Mon–Fri) rather than a bigger constant — deferred,
+not done.
+
+**2. The newsletter run could not write to this file.** Step 3b of
+`prompts/newsletter.md` prepends a dated entry to `docs/OPSLOG.md` — an `Edit`.
+`.claude/settings.json` allowed `Read` and `Write` but never `Edit`, so the
+headless Sunday run was denied and reported the step blocked. Newest entry
+before today was 07-24, confirming nothing landed.
+
+Nothing was actually lost this week: the entry it wanted to write described the
+RH `second_trade` investor-profile block, already logged under 2026-07-08, and
+the journal shows no recurrence (every `risk_review` 07-20→07-24 carries
+`rejected: []`). But any genuinely new ops entry would have failed the same
+silent way. Fix: added a scoped `Edit(docs/OPSLOG.md)` allow rule.
+
+**Still open for Aaron:** issue #2 is a false alarm and should be closed; the two
+`claude.yml` runs it spawned need cancelling (`gh run cancel 30264103550
+30264103142`). Also worth a glance — `issue_004.html`'s trade table may have been
+built on the same stale "13 of 14 blocked" read the letter flagged itself.
+
 ## 2026-07-24 — moomoo: OpenD-down HANGS forever; every "OpenD is down" handler was dead
 
 Found while testing the signal panel's failure branch at Aaron's request (he wanted
