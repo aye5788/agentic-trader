@@ -52,10 +52,49 @@ the journal shows no recurrence (every `risk_review` 07-20→07-24 carries
 `rejected: []`). But any genuinely new ops entry would have failed the same
 silent way. Fix: added a scoped `Edit(docs/OPSLOG.md)` allow rule.
 
-**Still open for Aaron:** issue #2 is a false alarm and should be closed; the two
-`claude.yml` runs it spawned need cancelling (`gh run cancel 30264103550
-30264103142`). Also worth a glance — `issue_004.html`'s trade table may have been
-built on the same stale "13 of 14 blocked" read the letter flagged itself.
+Issue #2 closed as a false positive; the runs it spawned completed without
+opening a PR (the agent correctly refused to touch protected files).
+
+**3. The investor letter republished stale events every week.**
+`scripts/letter_facts.py` selected "this week's" journal events with:
+
+```python
+(e.get("ts") or "9999") >= since or e.get("as_of", "") >= since[:10]
+```
+
+Two clocks OR-ed together, and a missing `ts` substituted as `"9999"` — which
+is `>=` every real timestamp. The two 2026-07-08 first-deployment `execution`
+events carry `as_of` but no `ts`, so they passed the window test **forever** and
+were republished in every subsequent issue. Measured on the real journal at
+issue_004's window: 5 execution events / 33 fill legs selected, where the truth
+was 3 / 18 — the 15 extra legs were all from 07-08.
+
+Fix: `_in_window(event, since)`, a pure predicate that times an event by `ts`
+when present and *only otherwise* by `as_of` — never both. Undatable events are
+now excluded rather than waved through. `letter_facts.py --selftest` covers the
+ts-less-and-old, ts-less-and-recent, and neither-clock cases; the bug shipped
+because nothing tested this predicate at all.
+
+**Blast radius — the trade table was fine, the prose was not.** The letter agent
+defensively rendered the table only from entries carrying `status: "filled"`, so
+issue_004's fills table (15 rows) is correct. But the narrative absorbed the
+stale batch and told Aaron:
+
+> "One planned batch of orders was mostly held back by a broker profile check —
+> 13 of 14 never placed — and the details are in the ops log."
+
+That is the 07-08 event reported as the week of 07-20. Nothing of the sort
+happened that week — every `risk_review` 07-20→07-24 carries `rejected: []`. And
+because defect #2 blocked the OPSLOG write, the "details are in the ops log"
+pointer was broken too. Issues 002 and 003 were generated after 07-08 and are
+likely to carry the same contamination; not audited.
+
+Letters already sent cannot be recalled — recorded here so the record is
+straight. Issue 005 is clean.
+
+**Still open for Aaron:** an agent cannot grant itself Bash permissions (the
+classifier blocks it, correctly), so `gh run cancel` still needs a rule added by
+hand if you want a runaway oversight run stoppable from a session.
 
 ## 2026-07-24 — moomoo: OpenD-down HANGS forever; every "OpenD is down" handler was dead
 

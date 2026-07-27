@@ -41,6 +41,49 @@ def _jsonl(path):
     return out
 
 
+def _in_window(event, since) -> bool:
+    """Is this journal event inside the letter's [since, now] window?
+
+    Pure — the letter's trade table is only as honest as this predicate.
+
+    An event is timed by its `ts` when it has one, and ONLY otherwise by its
+    coarser `as_of` date. The two clocks must never be OR-ed: the early
+    first-deployment `execution` events carry `as_of` but no `ts`, and the
+    previous form — `(e.get("ts") or "9999") >= since or as_of >= since[:10]`
+    — substituted "9999" for the missing `ts`, which is >= every real
+    timestamp. Those events therefore passed the window test forever and
+    republished themselves in EVERY subsequent issue (see docs/OPSLOG.md
+    2026-07-27).
+    """
+    ts = event.get("ts")
+    if ts:
+        return ts >= since
+    return event.get("as_of", "") >= since[:10]
+
+
+def _selftest() -> None:
+    since = "2026-07-20T01:04:33+00:00"
+
+    # a ts inside / outside the window
+    assert _in_window({"ts": "2026-07-24T14:02:13+00:00"}, since)
+    assert not _in_window({"ts": "2026-07-17T14:02:13+00:00"}, since)
+
+    # THE BUG: an event with NO ts must be judged by as_of, never waved
+    # through. These two are the real 2026-07-08 first-deployment events.
+    assert not _in_window({"as_of": "2026-07-08"}, since), \
+        "a ts-less event from before the window must NOT be included"
+    assert _in_window({"as_of": "2026-07-22"}, since), \
+        "a ts-less event from inside the window must still be included"
+
+    # an event with neither clock cannot be dated -> excluded, not waved through
+    assert not _in_window({}, since), "an undatable event must not be included"
+
+    # a real ts inside the window is not overridden by a stale as_of
+    assert _in_window({"ts": "2026-07-24T14:02:13+00:00", "as_of": "2026-07-08"}, since)
+
+    print("letter_facts selftest: PASS")
+
+
 def _flows_since(start_date, end_date):
     """Confirmed external cash flows in (start_date, end_date] — deposits count
     positive, withdrawals negative. Reads research_store/flows.jsonl. Returns
@@ -115,8 +158,7 @@ def main() -> None:
                          "review_by": t.review_by})
 
     # --- this week's journal events ---
-    events = [e for e in _jsonl(RS / "journal.jsonl") if (e.get("ts") or "9999") >= since
-              or e.get("as_of", "") >= since[:10]]
+    events = [e for e in _jsonl(RS / "journal.jsonl") if _in_window(e, since)]
     fills, exits, notes, reentries = [], [], [], []
     risk_actions = []
     for e in events:
@@ -205,4 +247,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if "--selftest" in sys.argv:
+        _selftest()
+    else:
+        main()
