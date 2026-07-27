@@ -8,10 +8,12 @@ short (fresh IPOs) so the backtest can drop them honestly.
     python scripts/fetch_prices.py [--force] [--years 10]
 """
 import argparse
+import datetime as dt
 import sys
 import time
 from collections import Counter
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -40,10 +42,16 @@ def _try_pull(sym: str, years: int):
     ticker apart from a systemic outage (expired token / locked DB / network)."""
     from adapters.schwab import research  # noqa: E402
     last_err = None
+    # end_date is REQUIRED to see the current session: Schwab defaults endDate to
+    # the previous trading day, so omitting it returns yesterday's panel even at
+    # 18:00 ET. The (possibly partial) today bar is filtered by
+    # _drop_unsettled_session before anything ranks on it.
+    now = dt.datetime.now(MARKET_TZ)
     for cand in (sym, sym.replace(".", "/")):  # BRK.B -> BRK/B fallback
         try:
             ph = research.get_price_history(
-                cand, period_type="year", period=years, frequency_type="daily"
+                cand, period_type="year", period=years, frequency_type="daily",
+                end_date=now,
             )
             if ph:
                 return ph, None
@@ -54,6 +62,38 @@ def _try_pull(sym: str, years: int):
 
 
 _FIELDS = ("open", "high", "low", "close")
+
+
+MARKET_TZ = ZoneInfo("America/New_York")
+# RTH closes 16:00 ET; give Schwab a buffer to stamp the settled daily bar.
+SETTLE_AFTER = dt.time(16, 15)
+
+
+def _drop_unsettled_session(panels: dict, now_et: dt.datetime) -> tuple[dict, str | None]:
+    """Drop the current session's bar unless it has closed AND settled.
+
+    Why this exists: we now pass `endDate` to Schwab (see `_try_pull`), which is
+    the ONLY way to get today's bar at all — without it Schwab silently defaults
+    `endDate` to the PREVIOUS trading day, so an 18:00 ET run ranked on
+    yesterday's close (the 2026-07-23 regime-gate lag). But `endDate=now` during
+    RTH returns a LIVE, partial bar whose `close` is just the last trade. Feeding
+    that to momentum/the regime gate would rank the book on an intraday snapshot.
+
+    So: before 16:15 ET, drop today's row (falls back to the old, correct-if-late
+    behaviour); after it, keep it — that is the whole point of the fix.
+
+    Returns (panels, dropped_date_iso | None). Pure: no network, no I/O, no clock.
+    """
+    close = panels.get("close")
+    if close is None or close.empty:
+        return panels, None
+    last = close.index.max()
+    today = now_et.date()
+    if last.date() != today:
+        return panels, None                      # nothing from today — nothing to drop
+    if now_et.time() >= SETTLE_AFTER:
+        return panels, None                      # settled close — keep it
+    return {f: p.drop(index=last, errors="ignore") for f, p in panels.items()}, str(last.date())
 
 
 def _field_panels(raw: dict) -> dict:
@@ -117,6 +157,10 @@ def main() -> None:
         raise SystemExit(2)
 
     panels = _field_panels(raw)
+    panels, dropped = _drop_unsettled_session(panels, dt.datetime.now(MARKET_TZ))
+    if dropped:
+        print(f"  dropped UNSETTLED session bar {dropped} (before "
+              f"{SETTLE_AFTER.strftime('%H:%M')} ET — partial, not a close)")
     field_to_path = {"open": OPENS, "high": HIGHS, "low": LOWS, "close": CLOSES}
     for field, path in field_to_path.items():
         try:
@@ -159,6 +203,37 @@ def _selftest() -> None:
     # sorted by date, aligned index across tickers
     assert list(panels["close"].index) == sorted(panels["close"].index)
     print("selftest OK: _field_panels open/high/low/close")
+
+    # --- unsettled-session guard (2026-07-27 regime-lag fix) -------------------
+    def _panels_ending(day: str) -> dict:
+        idx = pd.to_datetime([pd.Timestamp(day) - pd.Timedelta(days=1), pd.Timestamp(day)])
+        return {f: pd.DataFrame({"AAA": [1.0, 2.0]}, index=idx) for f in _FIELDS}
+
+    def _et(day: str, h: int, m: int = 0) -> dt.datetime:
+        return dt.datetime.combine(dt.date.fromisoformat(day), dt.time(h, m), tzinfo=MARKET_TZ)
+
+    D = "2026-07-27"
+    # mid-session: today's bar is a LIVE partial -> must be dropped
+    p, dropped = _drop_unsettled_session(_panels_ending(D), _et(D, 10, 24))
+    assert dropped == D, f"expected partial {D} bar dropped, got {dropped}"
+    assert p["close"].index.max().date() == dt.date(2026, 7, 26), p["close"].index
+    for f in _FIELDS:                                    # every field, not just close
+        assert len(p[f]) == 1, (f, p[f])
+    # after settle: today's bar is the real close -> must be KEPT (the whole fix)
+    p, dropped = _drop_unsettled_session(_panels_ending(D), _et(D, 18, 3))
+    assert dropped is None and p["close"].index.max().date() == dt.date(2026, 7, 27)
+    # boundary is inclusive at 16:15
+    _, dropped = _drop_unsettled_session(_panels_ending(D), _et(D, 16, 15))
+    assert dropped is None, "16:15 ET must count as settled"
+    _, dropped = _drop_unsettled_session(_panels_ending(D), _et(D, 16, 14))
+    assert dropped == D, "16:14 ET is still unsettled"
+    # panel that doesn't reach today (weekend/holiday run) -> untouched
+    _, dropped = _drop_unsettled_session(_panels_ending("2026-07-24"), _et(D, 10, 0))
+    assert dropped is None, "no bar for today -> nothing to drop"
+    # empty panel must not explode
+    _, dropped = _drop_unsettled_session({f: pd.DataFrame() for f in _FIELDS}, _et(D, 10, 0))
+    assert dropped is None
+    print("selftest OK: _drop_unsettled_session (partial dropped, settled kept)")
 
 
 if __name__ == "__main__":

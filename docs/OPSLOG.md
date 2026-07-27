@@ -8,6 +8,76 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-27 — The price panel could never see today: Schwab `endDate` defaults to the PREVIOUS trading day
+
+**Every book this system has ever produced was ranked on one-day-stale data.**
+Not a scheduling accident — a silent API default we never passed a value for.
+
+`adapters/schwab/research.get_price_history()` omitted `endDate`. Schwab defaults
+that to the **previous trading day**, so the daily panel structurally could not
+contain the current session no matter when we ran. The slow loop fires at 18:00
+ET, two hours after the close, and still got yesterday.
+
+Proven directly, 2026-07-27 10:27 ET, same call twice:
+
+```
+omitted end_date -> last bar 2026-07-24   (the bug)
+end_date=now     -> last bar 2026-07-27   (the fix)
+```
+
+Corroborated across every logged run (`logs/slow.log`, run wall-clock from the
+trailing `backup_ledger: pushed` stamp vs. the panel's own last date):
+
+| ran (ET) | panel last | as_of | regime | lag |
+| --- | --- | --- | --- | --- |
+| Thu 2026-07-23 18:03 | 2026-07-22 | 2026-07-22 | ON | 1d |
+| Fri 2026-07-24 18:03 | 2026-07-23 | 2026-07-23 | **OFF** | 1d |
+| Sun 2026-07-26 20:03 | 2026-07-24 | 2026-07-24 | OFF | 2d (correct — weekend) |
+
+**Consequence.** SPY closed below its 50DMA on **Thu 07-23** (738.18 vs 745.05).
+That regime-off signal did not reach a book until the **Fri 07-24** run, and was
+not executed until the **Mon 07-27** fast loop — two sessions late. In the gap,
+Friday's fast loop *bought* PANW into a market that had already tripped the gate.
+
+**Measured cost of the delay on this episode: ≈ $0.69.** Exiting at Friday's
+close instead of Monday's fills would have been +$0.69 across the 11 names; the
+stray PANW round-trip was +$0.05. The day's realized −$4.26 is therefore
+**not** mostly attributable to this defect — it came from the 50DMA whipsaw
+(OFF 07-17/20 → ON 07-21/22 → OFF 07-23/24, SPY oscillating inside ~1% of the
+line) and from five of ten entries filling **above** their entry zone (LITE
++5.0%, KEEL +3.6%, NBIS +3.4%, MU +2.0%, AMAT +1.4%). The fix would **not** have
+prevented those entries: Jul 22's close (747.41) was genuinely above the 50DMA,
+so the gate was legitimately ON when they were bought.
+
+Severity is about mechanism, not this week's dollars: a two-session lag on the
+*risk switch* is only cheap when the tape drifts. In a fast selloff it is the
+difference between exiting on the signal and exiting after the damage.
+
+**Fix.** `get_price_history()` takes `end_date` and passes `endDate` through;
+`fetch_prices._try_pull` sends `end_date=now`. Because `endDate=now` during RTH
+returns a **live, partial** bar (its `close` is the last trade — verified: today's
+bar read 739.62 while the NBBO last was 739.69), a pure guard
+`_drop_unsettled_session()` discards the current day's row before 16:15 ET and
+keeps it after. Covered by `scripts/fetch_prices.py --selftest`, mutation-tested
+both directions (never-drop and always-drop, the latter being the original bug).
+
+**No trades were reversed.** The regime is still off — at 10:27 ET SPY was 739.69
+live and 738.93 settled against a 745.07 50DMA. Today's liquidation was *late,
+not wrong*; re-entering would have churned real money a second time. The two
+sleeve buys (XLI, XLK) skipped on `EQUITY_NOT_ENOUGH_BP` re-plan on the next
+run once Monday's proceeds settle.
+
+**Still open (flagged, not bundled):** `scripts/risk_review.py::_gather_highs`
+uses the same call without `end_date`, so the give-back high-water mark misses
+the current session's high. It runs at 12:00 and 15:45 ET, both intraday, so the
+partial-bar question needs its own decision rather than a copy of this fix.
+
+**First verification:** tonight's 18:00 ET slow loop should produce the first
+same-day book in this system's history — expect `as_of 2026-07-27` in
+`logs/slow.log`, not `2026-07-24`.
+
+---
+
 ## 2026-07-27 — Health check cried wolf every Monday; newsletter couldn't write this log
 
 Two defects found during a routine "is everything running?" audit. Everything

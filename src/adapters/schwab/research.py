@@ -52,6 +52,7 @@ def get_price_history(
     period: int = 1,
     frequency_type: str = "daily",
     frequency: int = 1,
+    end_date=None,
     client=None,
 ) -> list:
     """Return OHLCV candles for a symbol (default: 1 month of daily bars).
@@ -59,14 +60,27 @@ def get_price_history(
     Each candle: {open, high, low, close, volume, datetime}. Tune period_type
     (day/month/year/ytd), period, frequency_type (minute/daily/weekly/monthly),
     and frequency for finer/coarser history.
+
+    ⚠️ `end_date` is NOT optional in practice for any same-day use. Schwab
+    defaults `endDate` to the PREVIOUS TRADING DAY when it is omitted, so an
+    omitted end_date can never return the current session's bar — not even
+    hours after the close. Verified 2026-07-27: omitted -> last bar 07-24;
+    end_date=now -> last bar 07-27. That silent default is what delayed the
+    regime-gate exit by two sessions. Pass `end_date=datetime.now()` whenever
+    you need today's bar, and drop the bar if the session has not settled
+    (see scripts/fetch_prices.py::_drop_unsettled_session).
     """
     client = client or build_client(interactive_auth=False)
+    kw = {}
+    if end_date is not None:
+        kw["endDate"] = end_date
     resp = client.price_history(
         symbol,
         periodType=period_type,
         period=period,
         frequencyType=frequency_type,
         frequency=frequency,
+        **kw,
     )
     resp.raise_for_status()
     return resp.json().get("candles", [])
