@@ -34,6 +34,14 @@ target_r_mults = [2.2, 4.0]             # targets as multiples of risk (R): tier
                                         #   5%/day mover — it would reject the whole book).
 ma_exit_days  = 21                      # exit if close < 21-day MA, even pre-target
 no_chase      = true                    # only enter within the thesis entry_zone
+chase_tol_sigma = 0.5                   # how far ABOVE entry_zone[1] still counts as
+                                        #   "not chasing", in daily sigmas. Asymmetric:
+                                        #   a price BELOW the zone is a better fill and
+                                        #   is never blocked. Vol-scaled because the zone
+                                        #   is a flat +/-0.5% band. 0.5s blocks ~8% of
+                                        #   entries (2y/168 names); it would have blocked
+                                        #   LITE (-18.1%) and KEEL (-14.1%) on 2026-07-23.
+                                        #   Raise to loosen, 0 = only the raw zone.
 
 # --- The momentum signal (see docs/STRATEGY.md §3 for exact math) ------------
 # Deterministic. Run as CODE, do not eyeball. Same signal on both engines.

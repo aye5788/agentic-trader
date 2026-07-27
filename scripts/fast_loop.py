@@ -67,6 +67,47 @@ def plan_orders(targets: dict, positions: dict, account_value: float,
     return sorted(orders, key=lambda o: (o["side"] != "sell", -o["amount"]))
 
 
+def apply_chase_guard(orders: list[dict], zones: dict, prices: dict,
+                      *, tol_sigma: float) -> tuple[list[dict], list[dict]]:
+    """Enforce `[trade_management] no_chase` — don't buy a name that has already
+    run away from its thesis entry zone. Returns (kept, blocked). Pure.
+
+    This implements a rule that was documented in docs/STRATEGY.md §6,
+    docs/DESIGN.md, the Thesis dataclass, and set as `no_chase = true` in
+    strategy.toml — and enforced by NOTHING. Every buy went in at market at
+    whatever the price was. On 2026-07-23 LITE filled 5.0% above its zone and
+    exited -18.1%.
+
+    ASYMMETRIC ON PURPOSE. Only an over-price blocks. The documented wording
+    ("only buy inside the entry_zone") would also skip a name trading BELOW the
+    zone — refusing a better fill, which is nonsense. Cheap never blocks.
+
+    Ceiling is vol-scaled (`tol_sigma` * the name's daily sigma) because the zone
+    itself is a flat +/-0.5% band while the rest of the geometry is vol-scaled: a
+    fixed band is noise for a 7%/day mover and a straitjacket for a 1.5%/day ETF.
+    At 0.5 sigma this blocks ~8% of entries (2y, 168 names).
+
+    FAILS OPEN by design: a missing zone, sigma, or quote passes the order
+    through. A guard that halts all buying on a quote hiccup is a new outage;
+    passing through is exactly today's behaviour, never worse.
+    """
+    kept, blocked = [], []
+    for o in orders:
+        z = zones.get(o["symbol"]) or {}
+        hi, sig, px = z.get("high"), z.get("sigma"), prices.get(o["symbol"])
+        if o["side"] != "buy" or not hi or not sig or not px:
+            kept.append(o)
+            continue
+        ceiling = hi * (1.0 + tol_sigma * sig)
+        if px > ceiling:
+            blocked.append({**o, "blocked": (
+                f"no_chase: {px:.4g} > zone high {hi:.4g} +{tol_sigma:g}s "
+                f"(ceiling {ceiling:.4g}, sigma {sig*100:.1f}%/d)")})
+        else:
+            kept.append(o)
+    return kept, blocked
+
+
 def apply_reentry(orders: list[dict], reviews: dict, prices: dict,
                   guard: float) -> tuple[list[dict], list[dict], list[dict]]:
     """Route buys for names under post-take-profit review ([reentry]) out of
@@ -186,7 +227,32 @@ def _selftest() -> None:
         assert load_cooldown(p, today="2026-07-17") == {"XLK"}   # OLD expired -> excluded
         assert load_cooldown(p, today="2026-07-25") == set()     # all expired
         assert load_cooldown(Path(d) / "missing.json") == set()  # absent -> fail open
-    print("selftest OK: exits, opens, rebalances, band-skip, reentry routing, cooldown block")
+    # --- no-chase guard (the rule that was documented but never wired) --------
+    Z = {"LITE": {"high": 833.85, "sigma": 0.0569},   # 0.5s ceiling ~ 857.6
+         "MU":   {"high": 964.28, "sigma": 0.0487},   # 0.5s ceiling ~ 987.8
+         "EEM":  {"high": 65.31,  "sigma": 0.0151}}
+    b = lambda s: {"symbol": s, "side": "buy", "amount": 5.0}
+    kept, blk = apply_chase_guard([b("LITE")], Z, {"LITE": 875.34}, tol_sigma=0.5)
+    assert not kept and len(blk) == 1, (kept, blk)          # the real 07-23 fill
+    assert "no_chase" in blk[0]["blocked"]
+    kept, blk = apply_chase_guard([b("MU")], Z, {"MU": 983.84}, tol_sigma=0.5)
+    assert len(kept) == 1 and not blk, (kept, blk)          # inside tolerance
+    # ASYMMETRY: below the zone is a better fill, never blocked
+    kept, blk = apply_chase_guard([b("EEM")], Z, {"EEM": 40.0}, tol_sigma=0.5)
+    assert len(kept) == 1 and not blk, "cheap must never block"
+    # sells are never chase-guarded
+    kept, blk = apply_chase_guard([{"symbol": "LITE", "side": "sell", "amount": 5.0}],
+                                  Z, {"LITE": 99999.0}, tol_sigma=0.5)
+    assert len(kept) == 1 and not blk, "sells must pass"
+    # fail OPEN on missing quote / sigma / zone
+    for zz, pp in ((Z, {}), ({"LITE": {"high": 833.85}}, {"LITE": 875.34}), ({}, {"LITE": 875.34})):
+        kept, blk = apply_chase_guard([b("LITE")], zz, pp, tol_sigma=0.5)
+        assert len(kept) == 1 and not blk, ("must fail open", zz, pp)
+    # tolerance actually widens
+    _, blk = apply_chase_guard([b("LITE")], Z, {"LITE": 875.34}, tol_sigma=1.0)
+    assert not blk, "1.0s must admit the 07-23 LITE fill"
+    print("selftest OK: exits, opens, rebalances, band-skip, reentry routing, cooldown block, "
+          "no-chase (asymmetric, fail-open)")
 
 
 def main() -> None:
@@ -254,6 +320,34 @@ def main() -> None:
             print(f"cooldown: blocking rebuy of "
                   f"{', '.join(sorted(o['symbol'] for o in cblocked))}")
         blocked += cblocked
+
+    # ---- no-chase: never open a name that has run past its entry zone --------
+    tm = cfg.get("trade_management", {})
+    if tm.get("no_chase"):
+        want = sorted({o["symbol"] for o in approved if o["side"] == "buy"})
+        quotes = {}
+        if want:
+            try:                       # Schwab = PRIMARY quote source (CLAUDE.md)
+                from adapters.schwab import research as _rs   # noqa: E402
+                for sym, q in (_rs.get_quotes(want) or {}).items():
+                    px = ((q or {}).get("quote") or {}).get("lastPrice")
+                    if px:
+                        quotes[sym] = float(px)
+            except Exception as e:     # fail OPEN, but never silently
+                print(f"no_chase: quote fetch failed ({type(e).__name__}: {e}) — "
+                      f"guard SKIPPED this run, orders pass through")
+            missing = [s for s in want if s not in quotes]
+            if missing:
+                print(f"no_chase: no quote for {', '.join(missing)} — passing through")
+        zones = {t.symbol: {"high": (t.entry_zone or [None, None])[1],
+                            "sigma": (t.signals or {}).get("sigma")}
+                 for t in prod.theses}
+        approved, chased = apply_chase_guard(
+            approved, zones, quotes, tol_sigma=float(tm.get("chase_tol_sigma", 0.5)))
+        if chased:
+            print("no_chase: blocking "
+                  + ", ".join(sorted(o["symbol"] for o in chased)))
+        blocked += chased
 
     # ---- post-take-profit re-entry: judgment, not rubber-stamp ([reentry]) ----
     review = []
