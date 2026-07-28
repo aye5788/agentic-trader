@@ -79,12 +79,48 @@ Not yet fixed — the honest options are to record a gap when the distill return
 None (not just when rows are empty), or to normalise ETF capital flow by AUM /
 shares × price instead of market cap. Needs a decision, not a reflex.
 
-**Also unverified: `run_universe_refresh.sh` has never executed once.** No
-`logs/universe.log` exists. Cron is `0 19 1-7 1,4,7,10 *` (quarterly, first week
-of Jan/Apr/Jul/Oct) and the jobs were only armed 2026-07-24 — after the July
-window closed. Next natural fire is **Oct 1–7**. Given this repo's record with
-never-run jobs, it should be exercised with `--dry-run` long before October
-rather than discovered broken then.
+**`run_universe_refresh.sh` had never executed once — so we ran it, and it was
+broken.** No `logs/universe.log` existed. Cron is `0 19 1-7 1,4,7,10 *` and the
+wrapper additionally exits unless `date +%u -eq 7`, so the real cadence is the
+**first Sunday** of Jan/Apr/Jul/Oct. Jobs were armed 2026-07-24, after Sun Jul 5
+had passed; next natural fire **Sun Oct 4**.
+
+Exercised manually with `--dry-run` on 2026-07-28. It **crashed twice**, both
+times for the same design error in `moomoo/research._snap_chunk`:
+
+```
+RuntimeError: snapshot failed for US.AUR (non-ticker error):
+  Get Market Snapshot request failed due to high frequency. Maximum 60 times per 30 seconds.
+RuntimeError: snapshot failed for US.HSBC (non-ticker error): PacketErr.Timeout
+```
+
+Neither ticker was at fault. `_snap_chunk` bisects a failed batch to isolate a
+bad ticker — correct for a ticker-level error, catastrophic for a connection-level
+one. moomoo's ceiling is 60 `get_market_snapshot` calls / 30s; an 817-name pond
+trips it, bisection splits into two more calls *against the ceiling just hit*,
+those fail, split again — ~800 calls in seconds, then it blames whichever single
+code the recursion reaches first. **The retry strategy was manufacturing the
+failure it reported.**
+
+Fixed: `_snap_call` paces to 0.55s/request; `_TRANSIENT_MARKERS` (rate limit,
+timeout, connect/disconnect, network) retry the SAME batch with bounded linear
+backoff and never bisect; bisection now only runs for errors that implicate a
+ticker. Selftested with a fake ctx on all three paths — including an assertion
+that the retried batch stays full-size rather than split.
+
+**Third run: exit 0, 5m06s.** Decision **HOLD** — "16 changes > 5 (possible data
+glitch)" plus 20 stale seeds (ACHR, BMNR, CAG, CMCSA, CRWV, HTZ, MARA, MSFT,
+MSTR, NFLX, NKE, ORCL, PLTR, RGTI, SMCI, SMR, SNAP, SOC, SOFI, T). Proposed
++8 (TSM, SKHY, ASML, DHR, UPS, TMO, CDNS, ARM) / −8 (CAH, CVNA, D, DASH, HON,
+MNST, PGR, RDDT), keep 142. It correctly refused to auto-apply and
+`config/universe.csv` was untouched.
+
+Note the HOLD reason is probably *not* a data glitch: the threshold of 5 assumes
+a universe already being maintained quarterly, and this one has never been
+refreshed since inception. 16 changes after that long is plausible drift. A
+dry-run proposal file now sits in `research_store/universe/proposals/` and the
+dashboard surfaces HOLD proposals, so expect a pending-review banner for an
+off-cycle proposal — delete the two `2026-07-28.*` files to clear it.
 
 ---
 
