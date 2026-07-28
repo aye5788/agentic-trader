@@ -116,11 +116,19 @@ The operationally critical bit:
 src/adapters/schwab/    Schwab Market Data client + research functions
 src/adapters/finnhub/   Finnhub analyst/estimates client + research (event-calendar spine)
 src/adapters/moomoo/    Data-only moomoo client via OpenD — RUNS UNDER SYSTEM
-                        /usr/bin/python3 (3.10), not .venv. research.py wired:
-                        snapshot_turnover, screen_top_marketcap, candidate_pond
-                        (universe maintenance). The moomoo API offers MUCH more
-                        (capital flow, short interest, put/call+IV, insider,
-                        earnings-price-move, institutional) — see docs/DATA_SOURCES.md.
+                        /usr/bin/python3 (3.10), not .venv. TWO consumers, both
+                        data-only: scripts/universe_refresh.py (snapshot_turnover,
+                        screen_top_marketcap, candidate_pond — quarterly universe
+                        maintenance; ⚠️ has NEVER once run, next window Oct 1-7)
+                        and scripts/collect_signals.py (capital_flow_daily,
+                        short_interest, option_overview, snapshot_fields — the
+                        weekly Sun 20:15 forward-log signal panel; running since
+                        2026-07-26). All 7 research.py functions are consumed.
+                        Still unwired (no adapter fn): insider, earnings-price-
+                        move, institutional. ⚠️ capflow_bignet_20d silently nulls
+                        for EVERY ETF and does NOT register in `gaps` — so a
+                        regime-off (all-ETF) panel is 100% empty while reporting
+                        clean. See docs/DATA_SOURCES.md + OPSLOG 2026-07-28.
 src/adapters/fred/      Macro regime indicators (VIX, 10y-2y, HY spread) — deep
                         history; confirms the Schwab regime gate. Needs FRED_API_KEY.
 config/strategy.toml    CODIFIED STRATEGY — single source of truth: risk gates,
