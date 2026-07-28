@@ -8,6 +8,86 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-28 — `no_chase` was set, documented three times, and read by zero code
+
+**The third "documented but never wired" defect in five days.** `no_chase = true`
+sat in `config/strategy.toml`. The rule was written in `docs/STRATEGY.md` §6,
+in the `docs/DESIGN.md` enforcement table ("fast loop only buys if live price
+in-zone"), and in the `Thesis` dataclass itself (`entry_zone: [low, high];
+never chase above`). `grep -rn no_chase --include=*.py` returned **nothing**;
+`scripts/fast_loop.py` contained no reference to `entry_zone` at all. Every buy
+went in at market at whatever the price was.
+
+**Cost.** Of the 10 names opened 2026-07-23, five filled *above* their entry
+zone: LITE +5.0%, KEEL +3.6%, NBIS +3.4%, MU +2.0%, AMAT +1.4%. LITE exited
+−18.1% and KEEL −14.1% — between them most of that day's −$4.26. LITE gapped
+only +1.4% at the open and then ran another ~4% before the 10:00 ET fast loop
+bought it at market.
+
+**Fix — `fast_loop.apply_chase_guard()`, three deliberate choices:**
+
+- **Asymmetric.** Only an over-price blocks. The documented wording ("if live
+  price is outside it, skip") would also refuse a name trading *below* its zone.
+  That is not a safety rule, it is a bug: on 2026-07-28 it would have skipped
+  XLK at **3.8% below** zone. Cheap never blocks. STRATEGY.md corrected.
+- **Vol-scaled.** `entry_zone` is a flat ±0.5% band while stops and targets are
+  vol-scaled. Measured over 2y × 168 names, a literal ±0.5% gate fills only
+  **46%** of the time and blocks **24.7%** of entries *for being cheaper*.
+  Ceiling is now `entry_zone[1] × (1 + chase_tol_sigma × sigma)`.
+- **Fails open.** Missing quote/sigma/zone passes the order through, logged.
+  A guard that halts all buying on a quote hiccup is a new outage; passing
+  through is exactly the old behaviour, never worse.
+
+**`chase_tol_sigma = 0.5` measured, not guessed.** Blocks 7.8% of entries across
+2y/168 names (open-based proxy; true rate is higher since fills land ~30min
+after the open) and blocks exactly LITE and KEEL in the live cohort. 1.0σ blocks
+neither — LITE's sigma is 5.69%, so a 1.0σ ceiling sits above the bad fill.
+
+**Live 2026-07-28:** guard evaluated both buys, no fetch failure, nothing
+blocked — XLK filled 168.58 vs a 176.54 ceiling, XLI 182.05 vs 185.08. It has
+**not yet fired in anger**: regime is off, so only low-vol ETFs near their zones
+are being bought. The real test is the next regime-on single-name entry.
+
+**The pattern is now the finding.** Signal panel never ran (07-24), price panel
+never saw today (07-27), no_chase never wired (07-28). Three for three: behaviour
+documented as working, silently dead, no alert, each found only via downstream
+damage. Nothing in this repo checks that a documented rule or a config flag is
+actually read by code. `src/repo_checks.py` is the natural home for a
+"config key with no reader" check — not yet built.
+
+---
+
+## 2026-07-28 — moomoo: capital flow is silently null for every ETF, and reports 0 gaps
+
+Found while auditing what the moomoo surface actually does. The weekly signal
+panel (Sun 20:15) **is** running — `logs/signals.log` and the `signal_panel`
+journal events confirm `opend_ok=True`, OpenD active on 127.0.0.1:11111.
+
+But `capflow_bignet_20d` is **null for every ETF** (EEM, IWM, SPY, XLE, XLI,
+XLK) while single names get real values — and the event still reports
+**`gaps: []`**. The 2026-07-27 panel is 4-for-4 ETFs, i.e. the capital-flow
+signal was 100% empty across the whole panel while the run looked clean.
+
+**Mechanism.** `collect_signals._panel_for` records a gap only when
+`capital_flow_daily()` returns no rows. `signal_panel.distill_capflow(rows,
+market_val)` returns `None` when `rows or market_val` is falsy — and moomoo's
+snapshot carries no `total_market_val` for ETFs. So rows arrive, market cap
+doesn't, the field nulls, and **no gap is recorded**. Same species as the three
+above: a health signal that reads green while carrying nothing.
+
+Not yet fixed — the honest options are to record a gap when the distill returns
+None (not just when rows are empty), or to normalise ETF capital flow by AUM /
+shares × price instead of market cap. Needs a decision, not a reflex.
+
+**Also unverified: `run_universe_refresh.sh` has never executed once.** No
+`logs/universe.log` exists. Cron is `0 19 1-7 1,4,7,10 *` (quarterly, first week
+of Jan/Apr/Jul/Oct) and the jobs were only armed 2026-07-24 — after the July
+window closed. Next natural fire is **Oct 1–7**. Given this repo's record with
+never-run jobs, it should be exercised with `--dry-run` long before October
+rather than discovered broken then.
+
+---
+
 ## 2026-07-27 — The price panel could never see today: Schwab `endDate` defaults to the PREVIOUS trading day
 
 **Every book this system has ever produced was ranked on one-day-stale data.**
@@ -72,9 +152,11 @@ uses the same call without `end_date`, so the give-back high-water mark misses
 the current session's high. It runs at 12:00 and 15:45 ET, both intraday, so the
 partial-bar question needs its own decision rather than a copy of this fix.
 
-**First verification:** tonight's 18:00 ET slow loop should produce the first
-same-day book in this system's history — expect `as_of 2026-07-27` in
-`logs/slow.log`, not `2026-07-24`.
+**VERIFIED 2026-07-28.** The Mon 07-27 18:03 ET run produced
+`panel: ... 2016-07-27 .. 2026-07-27` and `as_of 2026-07-27` — lag **0d**, the
+first same-day book this system has made. `current.json` carries `as_of
+2026-07-27`. Tuesday's fast loop then traded off it, so signal→execution is now
+one session instead of two.
 
 ---
 

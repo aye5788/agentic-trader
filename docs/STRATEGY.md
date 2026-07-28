@@ -84,8 +84,17 @@ excluded from the held set (it can still be computed, but never held).
 
 ## 6. Trade management (per position, IBD-derived)
 
-- **Entry:** no chasing — only buy inside the thesis `entry_zone`; if live price
-  is outside it, skip.
+- **Entry:** no chasing — **ASYMMETRIC**. A buy is skipped only when the live
+  price has run *above* `entry_zone[1]` by more than `chase_tol_sigma` × the
+  name's daily sigma. A price *below* the zone is a better fill and is **never**
+  blocked. (This doc used to say "if live price is outside it, skip" — that
+  wording would also refuse a cheaper price, which is nonsense; on 2026-07-28 it
+  would have skipped XLK at 3.8% *below* its zone.) The tolerance is vol-scaled
+  because `entry_zone` is a flat ±0.5% band while the rest of the geometry
+  scales with vol: flat is noise for a 7%/day mover and a straitjacket for a
+  1.5%/day ETF. Enforced in `fast_loop.apply_chase_guard`, `[trade_management]
+  no_chase` + `chase_tol_sigma` (default 0.5σ ≈ 8% of entries blocked).
+  **Fails open** — a missing quote/sigma/zone lets the order through, logged.
 - **Stop:** volatility-adjusted (below the recent swing low / an ATR multiple) —
   **not** a flat 2–3%.
 - **Targets:** tiered scale-out at **multiples of risk** (R = entry−stop):

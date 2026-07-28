@@ -148,6 +148,20 @@ it had never fired. First scheduled fire: **Sun 2026-07-26 20:15 ET**.
 
 **Known null: `capflow_bignet_20d` is ETF-only-null.** The 2026-07-24 live dry-run
 (14 held names) filled all 9 fields for every name *except* capital flow on the 4
-ETFs (XLE, IWM, SPY, EEM) — moomoo's capital-flow endpoint does not serve ETFs.
-The distiller is null-safe and this does **not** register in `gaps`; treat a null
-capflow on an ETF as expected, not a collection failure.
+ETFs (XLE, IWM, SPY, EEM); the 2026-07-27 run nulled it on all four (XLE, XLK,
+IWM, XLI). The distiller is null-safe and this does **not** register in `gaps`.
+
+⚠️ **Corrected 2026-07-28 — the cause is NOT "the endpoint doesn't serve ETFs".**
+`get_capital_flow` returns rows fine. `signal_panel.distill_capflow(rows,
+market_val)` divides by market cap and returns `None` when *either* input is
+falsy — and moomoo's ETF snapshot carries no `total_market_val`. Meanwhile
+`collect_signals._panel_for` appends a gap only when `capital_flow_daily()`
+returns **no rows**. So rows arrive, market cap doesn't, the field nulls, and the
+event still reports `gaps: []`.
+
+Why it matters: **in a regime-off book the sleeve is 100% ETFs**, so the entire
+capital-flow signal is empty across the whole panel while the run reports clean
+(`opend_ok=True, gaps: []`, 2026-07-27). That is a health signal reading green
+while carrying nothing — do not treat "0 gaps" as "panel complete". Fix options
+(undecided): record a gap when the distill returns None rather than only when
+rows are empty, or normalise ETF flow by AUM / (shares × price).

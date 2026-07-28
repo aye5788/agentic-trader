@@ -220,6 +220,14 @@ src/momentum.py         THE SIGNAL — single source of truth for the ranking ma
 scripts/fetch_prices.py Cache ~10y daily closes (names+ETFs+SPY) from Schwab to
                         research_store/prices/ (git-ignored). Rate-limited 0.6s;
                         needs pyarrow (CSV fallback if absent).
+                        ⚠️ MUST pass end_date — Schwab defaults `endDate` to the
+                        PREVIOUS TRADING DAY, so omitting it can never return the
+                        current session even hours after the close (this silently
+                        made every book 1 day stale until 2026-07-27). Because
+                        end_date=now returns a LIVE PARTIAL bar during RTH,
+                        _drop_unsettled_session() discards today's row before
+                        16:15 ET and keeps it after. Same omission still present
+                        in risk_review._gather_highs (intraday — needs its own call).
 scripts/backtest.py     Weekly walk-forward sim of the 70/30 book/sleeve vs SPY.
                         simulate() = parameterized core returning a metrics dict.
                         ⚠️ survivorship-biased (today's names over history) = upper
@@ -249,6 +257,12 @@ scripts/fast_loop.py    FAST LOOP diff core: stored targets vs. RH holdings →
                         account guardrail. NEVER places — placement is the agent's
                         review_equity_order→place_equity_order MCP step, gated by
                         the proof gate. --selftest covers the diff logic.
+                        apply_chase_guard() enforces [trade_management] no_chase:
+                        skips a BUY priced above entry_zone[1] by more than
+                        chase_tol_sigma × sigma. ASYMMETRIC (cheaper never blocks
+                        — the old doc wording would have refused better fills),
+                        vol-scaled, FAILS OPEN. Wired 2026-07-28 after being
+                        documented-but-dead since the start; see docs/OPSLOG.md.
 src/adaptive.py         ADAPTIVE CORE — dial-agnostic Bayesian grid estimator
                         (smoothness prior + uncertainty-gated recommendation +
                         oos_gap). Pure. Reused by every adaptive dial.

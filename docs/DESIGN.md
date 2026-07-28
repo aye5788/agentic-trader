@@ -196,7 +196,7 @@ rule becomes a hard field on the thesis record and/or a governance guardrail:
 
 | Rule | Setting | Where enforced |
 | ---- | ------- | -------------- |
-| Entry zone | defined buy-price range; never chase above it | `entry_zone`; fast loop only buys if live price in-zone |
+| Entry zone | defined buy-price range; never chase **above** it — cheaper never blocks | `entry_zone` + `[trade_management] no_chase`/`chase_tol_sigma`; enforced by `fast_loop.apply_chase_guard` (asymmetric, vol-scaled, fails open). ⚠️ Was documented here as enforced from the start but wired NOWHERE until 2026-07-28 — see OPSLOG |
 | Stop loss | defined + enforced, **volatility-adjusted** (below recent swing low / ATR mult) — *not* IBD's flat 2–3% (too tight for volatile momentum names) | `stop`; governance auto-exits on breach |
 | Profit targets | tiered at **multiples of risk** (~2.2R / 4R), vol-scaled so reward:risk ≥ 2:1 holds for any name — *not* a fixed 5/10% (unreachable at 2:1 for a high-vol mover) | `targets: [t1, t2]` |
 | Moving-average exit | exit if close < short-term MA (e.g. 21-day), even if stop not hit | daily fast-loop check (Schwab price history) |
