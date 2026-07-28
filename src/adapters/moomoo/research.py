@@ -1,5 +1,6 @@
 """Data-only moomoo research calls for universe maintenance."""
 import csv
+import time
 
 from moomoo import RET_OK, Market, PeriodType, SimpleFilter, SortDir, StockField
 
@@ -39,20 +40,72 @@ def snapshot_turnover(tickers, ctx=None) -> dict:
 # systemic) must NOT be silently skipped: dropping a good name corrupts the ranking.
 _UNQUOTABLE_MARKERS = ("not available", "unknown stock", "no data")
 
+# TRANSIENT / SYSTEMIC conditions — properties of the CONNECTION, not of any ticker.
+# Bisecting these is always wrong: it splits a batch that had nothing wrong with it,
+# doubles the call rate, and eventually blames whichever innocent code lands first.
+# Both entries here were found by actually running the job (2026-07-28): the rate
+# limit blamed US.AUR, the timeout blamed US.HSBC. Neither ticker was at fault.
+_TRANSIENT_MARKERS = (
+    "high frequency", "maximum 60 times", "request too frequent",   # 60 calls / 30s
+    "timeout", "connect", "disconnect", "network",                  # OpenD / socket
+)
+
+# moomoo ceiling: 60 get_market_snapshot calls / 30s. Pace every call so we do not
+# reach it, and back off rather than bisect if we somehow do (OpenD is SHARED with
+# moomoo-vol-desk, so the sibling repo's traffic counts against the same budget).
+_SNAP_MIN_INTERVAL = 0.55
+_SNAP_MAX_RETRY = 5
+_SNAP_BACKOFF = 6.0
+_last_snap = [0.0]
+
+
+def _is_transient(df) -> bool:
+    """True for connection-level failures that must be RETRIED, never bisected."""
+    s = str(df).lower()
+    return any(m in s for m in _TRANSIENT_MARKERS)
+
+
+def _snap_call(q, codes):
+    """get_market_snapshot, paced to stay under the 60-per-30s ceiling."""
+    wait = _SNAP_MIN_INTERVAL - (time.monotonic() - _last_snap[0])
+    if wait > 0:
+        time.sleep(wait)
+    try:
+        return q.get_market_snapshot(codes)
+    finally:
+        _last_snap[0] = time.monotonic()
+
 
 def _snap_chunk(q, codes, out) -> None:
     """Snapshot `codes` into `out`. A batch moomoo rejects is bisected to isolate the
     offending code(s). A single code that fails with a *ticker-unavailable* error is
-    skipped; any OTHER single-code failure (rate limit / systemic) is RAISED so it
-    surfaces loudly rather than silently dropping a good name."""
+    skipped; any OTHER single-code failure is RAISED so it surfaces loudly rather
+    than silently dropping a good name.
+
+    ⚠️ TRANSIENT failures (rate limit, OpenD timeout, socket) are handled BEFORE
+    bisection and never bisect. Bisecting a connection-level failure is actively
+    harmful: the batch had nothing wrong with it, the split doubles the call rate
+    against the very ceiling just hit, and the recursion eventually blames whichever
+    innocent code lands first. Both live failures of universe_refresh on 2026-07-28
+    were this — rate limit blamed US.AUR, timeout blamed US.HSBC. Back off and retry
+    the SAME batch instead; bisect only for an error that implicates a ticker."""
     if not codes:
         return
-    ret, df = q.get_market_snapshot(codes)
+    ret, df = _snap_call(q, codes)
+    attempts = 0
+    while ret != RET_OK and _is_transient(df) and attempts < _SNAP_MAX_RETRY:
+        attempts += 1
+        time.sleep(_SNAP_BACKOFF * attempts)          # linear backoff: 6s, 12s, ...
+        ret, df = _snap_call(q, codes)
     if ret == RET_OK:
         for _, r in df.iterrows():
             tv = r["turnover"]
             out[_bare(r["code"])] = float(tv) if tv == tv else 0.0
         return
+    if _is_transient(df):
+        raise RuntimeError(
+            f"snapshot transient failure on {len(codes)} codes after {attempts} retries "
+            f"(OpenD is shared with moomoo-vol-desk — is it running a big pull?): {df}")
     if len(codes) == 1:
         if any(m in str(df).lower() for m in _UNQUOTABLE_MARKERS):
             return  # genuinely unquotable single ticker — skip it
@@ -171,6 +224,53 @@ def _selftest() -> None:
     assert _bare("US.AAPL") == "AAPL"
     assert _bare("AAPL") == "AAPL"
     print("moomoo.research selftest OK: code<->ticker helpers")
+
+    # --- rate limit must NOT bisect (the 2026-07-28 first-run crash) -----------
+    global _SNAP_MIN_INTERVAL, _SNAP_BACKOFF
+    _SNAP_MIN_INTERVAL, _SNAP_BACKOFF = 0.0, 0.0      # keep the selftest instant
+
+    class _DF(list):                                   # stands in for a moomoo frame
+        def __init__(self, rows): super().__init__(rows)
+        def iterrows(self): return enumerate(self)
+
+    class _Q:
+        """Rate-limits the first `n_limited` calls, then serves normally."""
+        def __init__(self, n_limited, bad=()):
+            self.n_limited, self.bad, self.calls, self.max_batch = n_limited, set(bad), 0, 0
+        def get_market_snapshot(self, codes):
+            self.calls += 1
+            self.max_batch = max(self.max_batch, len(codes))
+            if self.n_limited > 0:
+                self.n_limited -= 1
+                return 1, "Get Market Snapshot request failed due to high frequency. " \
+                          "Maximum 60 times per 30 seconds."
+            if any(c in self.bad for c in codes):
+                if len(codes) == 1:
+                    return 1, "unknown stock"
+                return 1, "batch contains an unquotable code"
+            return RET_OK, _DF([{"code": c, "turnover": 1.0} for c in codes])
+
+    codes = [f"US.T{i}" for i in range(8)]
+    q = _Q(n_limited=3); out = {}
+    _snap_chunk(q, list(codes), out)
+    assert len(out) == 8, out                          # all recovered
+    assert q.calls == 4, f"retried same batch, no bisection: {q.calls} calls"
+    assert q.max_batch == 8, "must retry the FULL batch, never a split one"
+
+    # a genuine bad ticker still bisects and is skipped
+    q = _Q(n_limited=0, bad={"US.T3"}); out = {}
+    _snap_chunk(q, list(codes), out)
+    assert "T3" not in out and len(out) == 7, out
+
+    # rate limit that never clears raises — it must not be mistaken for a bad ticker
+    q = _Q(n_limited=99); out = {}
+    try:
+        _snap_chunk(q, list(codes), out)
+        raise AssertionError("expected RuntimeError on persistent rate limit")
+    except RuntimeError as e:
+        assert "transient" in str(e), e
+        assert q.calls == _SNAP_MAX_RETRY + 1, f"bounded retries, got {q.calls}"
+    print("moomoo.research selftest OK: transient errors back off, never bisect")
 
 
 if __name__ == "__main__":
