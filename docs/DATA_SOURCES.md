@@ -165,7 +165,8 @@ field to a `SimpleFilter` silently encodes the wrong field number:
   `capflow_bignet_20d`'s silent nulls: gate on a liquidity/market-cap floor and
   require the indicator be non-zero.
 
-**V2 — `get_stock_screen(request)` (条件选股V2, ProtoID 3252) — BROKEN HERE.**
+**V2 — `get_stock_screen(request)` (条件选股V2, ProtoID 3252) — WORKS, but needs
+`protobuf < 5`.**
 
 Far richer: **11 property families, 244+ factors** per the official docs (the
 local `moomoo.quote.stock_screen_const` carries **31 enums / 633 members**),
@@ -178,23 +179,56 @@ lending fee, beta, PE/PB/PS historical percentile and industry rank),
 `FinancialProperty` (131, incl. CAGRs and forward `future_duration`), and
 explicit `add_retrieve_*` projection instead of V1's `is_no_filter` trick.
 
-⛔ **It fails on this box** with
+⚠️ **Under system `/usr/bin/python3` it fails** with
 `'google._upb._message.FieldDescriptor' object has no attribute 'label'`.
-Cause: `moomoo-api 10.9.6908` declares `protobuf >= 3.20.0` **with no upper
-bound**, but its V2 response decoder
-(`quote_query.py` → `StockScreenQuery._parse_rsp_item_result`, 3 sites) uses
-`FieldDescriptor.label`, **removed** in protobuf 6/7 — and the box has **7.35.1**.
-`.is_repeated` is the replacement. Additional `.label` uses live in
-`moomoo/common/pbjson.py`, so the fix is not a single edit and an in-memory patch
-of the one method was **not** sufficient. Blast radius is limited to
-`get_stock_screen`; V1 and the other 165 methods are unaffected because they use
-explicit protobuf field access, not the generic reflection walker.
+Cause: `moomoo-api 10.9.6908` (the **latest** release — July 2026, so there is no
+upgrade to wait for) declares `protobuf >= 3.20.0` **with no upper bound**, but its
+V2 decoder uses `FieldDescriptor.label`, **removed** in protobuf 6/7 — and the box
+has **7.35.1**. `.label` is used in both
+`quote_query.py::StockScreenQuery._parse_rsp_item_result` (3 sites) and
+`moomoo/common/pbjson.py`, so patching one method in memory is not enough. The
+official docs pin no protobuf version for Python (they reference 3.5.1 for the
+C++/Java bundles and recommend Python 3.8) — i.e. the SDK is written against a
+pre-6 protobuf. Blast radius is limited to `get_stock_screen`: V1 and the other
+165 methods use explicit protobuf field access, not the generic reflection walker.
 
-**Unresolved:** whether V2 is *entitled* to this account is still unknown — the
-crash happens while decoding the reply, before any entitlement signal is visible.
-Deciding the fix is a judgement call, not a mechanical one: the moomoo SDK is
-installed in **system `/usr/bin/python3`, shared with `moomoo-vol-desk`**, so
-pinning protobuf down or patching the SDK in place affects the sibling repo too.
+✅ **How to actually run V2 — an isolated venv, verified 2026-07-29.** Do NOT pin
+or patch the system install: that SDK is shared with `moomoo-vol-desk`. Stand up a
+separate interpreter and point it at the **same** OpenD (data channel only — never
+launch a second gateway):
+
+```bash
+/usr/bin/python3 -m venv v2env
+./v2env/bin/pip install "moomoo-api==10.9.6908" "protobuf<5"   # resolves to 4.25.9
+./v2env/bin/python -c "import google.protobuf as p; print(p.__version__)"
+```
+
+**Entitlement: CONFIRMED.** `US mktcap >= $1e10 AND 60d change >= 15% AND MA20 >
+MA60 (daily)` returned `all_count=325` (V1's equivalent gave 345 — consistent).
+Retrieved on US mega-caps (`mktcap >= $1T`, all_count=14):
+
+| Featured factor | Result |
+| --- | --- |
+| `ANALYST_RATING` | ✅ 4.0–5.0 |
+| `ANALYST_TARGET_PRICE_RATE` | ✅ upside vs target (META +0.374, AAPL −0.030) |
+| `INST_RATIO` | ✅ institutional ownership (AAPL 0.663, META 0.676) |
+| `MORNINGSTAR_MOAT`, `MORNINGSTAR_STAR` | ✅ |
+| `INDUSTRY_RANK_PE`, `TRADE_INDEX`, `NEWS_INDEX` | ✅ |
+| `INST_HOLDING_RATIO` | empty — use `INST_RATIO` instead |
+| `BETA`, `SHORT_POSITION`, `COVER_DAYS`, `HIST_PERCENTILE_PE` | empty even on mega-caps |
+
+The empty ones are **not** proof of no-entitlement: `add_retrieve_featured` takes
+`period` / `range_period` / `first_custom_param`, and these are the factors that
+plausibly require one (`HIST_PERCENTILE_PE` needs a `RangePeriod`; `BETA` a
+period). Untested — re-probe with those args before concluding anything. Short
+interest is already covered by the wired `get_short_interest`, so `SHORT_POSITION`
+being empty costs us nothing today.
+
+⚠️ **Reading the reply is manual.** Items come back as
+`{'stock_id': …, 'results': [{'type', 'property': {'name': <numeric id>}, 'value_type', 'sval'|'ival'|'aval'|'dval'}]}`
+— numeric property ids, NOT names. Map with `int(FeaturedProperty.X)` etc.
+`value_type` present with no value field = **missing data** (docs), which is how
+the empties above present. Value types: 1=`sval`, 2=`ival`, 3=`aval`, 4=`dval`.
 
 ⚠️ **V2 flips two conventions** — do not port a V1 query by hand:
 percentages are **decimals** (`0.05` = 5%, vs V1's `5.0`), and indicator/pattern
