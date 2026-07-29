@@ -13,7 +13,6 @@ Prints NO secrets — only timestamps and a pass/fail.
 import argparse
 import datetime as dt
 import pathlib
-import sqlite3
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
@@ -21,17 +20,9 @@ from adapters.schwab import client as schwab_client  # noqa: E402  (import loads
 
 REFRESH_TTL_DAYS = 7  # Schwab refresh tokens live 7 days; access token ~30 min.
 
-
-def _token_issued() -> dt.datetime | None:
-    """Freshest refresh_token_issued from tokens.db. Checkpoints the WAL first so
-    the read reflects a just-completed re-auth, not the stale main-file snapshot."""
-    con = sqlite3.connect(schwab_client.tokens_db_path())
-    try:
-        con.execute("PRAGMA wal_checkpoint(FULL)")   # fold WAL -> main
-        row = con.execute("SELECT refresh_token_issued FROM schwabdev").fetchone()
-    finally:
-        con.close()
-    return dt.datetime.fromisoformat(row[0]) if row and row[0] else None
+# The WAL-checkpointed reader lives in the adapter (one source of truth for token
+# age). Kept re-exported under this name because src/health.py imports it.
+_token_issued = schwab_client.refresh_token_issued
 
 
 def main() -> None:

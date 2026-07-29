@@ -4,7 +4,9 @@ Wraps `schwabdev` and wires it up from environment variables so the rest of the
 codebase never touches credentials directly. Designed to run headless (no local
 browser) so the same code works on a VPS.
 """
+import datetime as dt
 import os
+import sqlite3
 from pathlib import Path
 
 import schwabdev
@@ -30,6 +32,66 @@ def tokens_db_path() -> str:
     if configured:
         return configured
     return str(REPO_ROOT / "secrets" / "tokens.db")
+
+
+def refresh_token_issued() -> dt.datetime | None:
+    """Freshest `refresh_token_issued` from tokens.db, or None if never authed.
+
+    Checkpoints the WAL first so the read reflects a just-completed re-auth and
+    not the stale main-file snapshot. THE single source of truth for token age —
+    never infer it from the tokens.db file mtime, which moves every ~30 min when
+    the *access* token rotates and so looks fresh on a six-day-old refresh token.
+    """
+    db = tokens_db_path()
+    if not Path(db).exists():
+        return None
+    con = sqlite3.connect(db)
+    try:
+        con.execute("PRAGMA wal_checkpoint(FULL)")   # fold WAL -> main
+        row = con.execute("SELECT refresh_token_issued FROM schwabdev").fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    if not (row and row[0]):
+        return None
+    issued = dt.datetime.fromisoformat(row[0])
+    return issued if issued.tzinfo else issued.replace(tzinfo=dt.timezone.utc)
+
+
+def force_reauth(client) -> bool:
+    """Force schwabdev to mint a NEW refresh token (runs the OAuth login).
+
+    ⚠️  The force flag is the whole point. schwabdev's update_tokens() renews the
+    refresh token only when it has <60.5 min left, so constructing a Client — or
+    calling update_tokens() bare — is a NO-OP on a token with days remaining. It
+    returns quietly without ever prompting, which is how a weekly re-auth can
+    appear to succeed while renewing nothing. Always pair with reauth_took().
+
+    Returns False rather than raising when there is no TTY: schwabdev reads the
+    pasted redirect URL via input(), so a non-interactive shell (Claude Code's
+    `!`, cron) hits EOFError. Callers report that through reauth_took()'s
+    did-it-actually-move check instead of a traceback.
+    """
+    try:
+        return bool(client.update_tokens(force_refresh_token=True))
+    except EOFError:
+        return False
+
+
+def reauth_took(before: dt.datetime | None, after: dt.datetime | None) -> bool:
+    """Did a re-auth actually land? Pure.
+
+    The ONLY honest success signal is the stored issue time moving forward — not
+    a zero exit code, and not an absent exception. schwabdev swallows several
+    failure paths (stale auth code, EOF on the paste prompt, losing the tokens.db
+    write lock to agentic-monitor) and returns False rather than raising.
+    """
+    if after is None:
+        return False
+    if before is None:
+        return True
+    return after > before
 
 
 def build_client(*, interactive_auth: bool) -> "schwabdev.Client":

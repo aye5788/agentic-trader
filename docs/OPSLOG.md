@@ -8,6 +8,58 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-29 — `schwab_auth.py` printed "✅ Auth complete" without re-authing
+
+**The weekly Schwab re-auth was a no-op unless the token was already inside its
+last hour.** Aaron ran `.venv/bin/python scripts/schwab_auth.py`, got the ✅, and
+`refresh_token_issued` in `secrets/tokens.db` was still **2026-07-23** — six days
+stale, one day from expiry.
+
+**Root cause.** `schwab_auth.py` did nothing but `build_client(interactive_auth=
+True)`. But `interactive_auth` only gates a *"does a token file exist"* check —
+both branches construct the identical `schwabdev.Client`. `Client.__init__` calls
+`tokens.update_tokens()` with no force flags, and that renews the refresh token
+**only when `rt_delta < 3630s` (60.5 min)** (`schwabdev/tokens.py:297`). With a
+day left it silently took the access-token branch and returned. The script then
+printed `✅ Auth complete — token stored. Good for 7 days.` unconditionally. A
+re-auth that renewed nothing was byte-identical to one that worked.
+
+Implication: every re-auth run with >1h of headroom has been a no-op since the
+repo was written. The ones that appeared to work were the late ones.
+
+**Second decoy.** `secrets/tokens.db` mtime *does* move — every ~30 min, when the
+**access** token rotates. So the file looks freshly written on a six-day-old
+refresh token. This is the footgun `schwab_status.py` already existed to kill;
+the trap is that the auth script itself never checked.
+
+**Same bug in `schwab_finish_auth.py`** — the non-TTY variant. Its `call_on_auth`
+hook is only invoked from the refresh path, so with headroom it was never called
+and it too printed success having exchanged nothing.
+
+**Fix — force it, then prove it (`src/adapters/schwab/client.py`):**
+
+- `force_reauth(client)` → `update_tokens(force_refresh_token=True)`. The force
+  flag is the actual fix; without it schwabdev never prompts.
+- `reauth_took(before, after)` → pure. Success is `refresh_token_issued` **moving
+  forward**, never a zero exit or an absent exception. schwabdev returns `False`
+  (not raises) on a stale auth code, on losing the tokens.db write lock to
+  `agentic-monitor`, and logs-and-continues on a short paste.
+- `refresh_token_issued()` — the WAL-checkpointed reader, moved here from
+  `schwab_status.py` so all four consumers share one source of truth for token
+  age (`schwab_status._token_issued` is now an alias; `src/health.py` imports it).
+- `force_reauth` maps `EOFError` → `False`, so a no-TTY run prints the actionable
+  diagnostic instead of a traceback.
+- Both auth scripts now exit **1** with a cause list when the timestamp didn't
+  move, and print the new issue + expiry date when it did.
+
+**Verification.** `scripts/schwab_auth.py --selftest` covers the force kwarg (the
+regression that started this), the EOF path, and the `reauth_took` truth table.
+End-to-end with stdin closed: the script now *reaches* the Schwab authorize
+prompt — which it never did before — and on EOF fails loudly, exit 1, token left
+intact.
+
+---
+
 ## 2026-07-28 — `no_chase` was set, documented three times, and read by zero code
 
 **The third "documented but never wired" defect in five days.** `no_chase = true`
