@@ -57,7 +57,16 @@ cd /opt/agentic-trader
 3. The browser lands on a `https://127.0.0.1:8182/?code=…` page that **fails to
    load — that's normal**. Copy the **full** URL from the address bar.
 4. Paste it at the `paste the address bar url here:` prompt, hit Enter.
-5. You should see `✅ Auth complete`.
+5. You should see `✅ Auth complete — refresh token issued <today>, good until
+   <today+7>`. **The dates are the proof.** If it instead prints `❌ RE-AUTH DID
+   NOT TAKE` and exits 1, nothing was renewed — your old token is untouched, so
+   just retry (fastest cause: the ~30s code window lapsed).
+
+   Until 2026-07-29 this script printed a bare `✅ Auth complete` *unconditionally*
+   and renewed nothing unless the token was already inside its last hour — so a
+   dead re-auth looked exactly like a good one. It now forces the renewal and
+   verifies the stored issue date advanced before claiming anything. Details:
+   `docs/OPSLOG.md` 2026-07-29.
 
 **Confirm it worked:**
 ```

@@ -5,8 +5,8 @@ checkpointed first, so you NEVER mis-read a stale file date — that footgun is
 exactly what this tool exists to kill), reports days left on the 7-day refresh
 window, and makes a live Schwab call to prove the token actually works.
 
-    python scripts/schwab_status.py            # status + live API check
-    python scripts/schwab_status.py --no-call  # skip the live call
+    .venv/bin/python scripts/schwab_status.py            # status + live API check
+    .venv/bin/python scripts/schwab_status.py --no-call  # skip the live call
 
 Prints NO secrets — only timestamps and a pass/fail.
 """
@@ -19,6 +19,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 from adapters.schwab import client as schwab_client  # noqa: E402  (import loads .env)
 
 REFRESH_TTL_DAYS = 7  # Schwab refresh tokens live 7 days; access token ~30 min.
+REAUTH_CMD = schwab_client.REAUTH_CMD  # one source of truth — see client.py
 
 # The WAL-checkpointed reader lives in the adapter (one source of truth for token
 # age). Kept re-exported under this name because src/health.py imports it.
@@ -32,7 +33,9 @@ def main() -> None:
 
     issued = _token_issued()
     if issued is None:
-        raise SystemExit("no Schwab token found — run: python scripts/schwab_auth.py")
+        raise SystemExit(
+            f"no Schwab token found — run: {REAUTH_CMD}"
+        )
 
     now = dt.datetime.now(dt.timezone.utc)
     expires = issued + dt.timedelta(days=REFRESH_TTL_DAYS)
@@ -44,9 +47,9 @@ def main() -> None:
     print(f"  expires: {expires.astimezone(dt.timezone.utc).isoformat(timespec='minutes')}"
           f"  ({days_left:.1f} days left)")
     if state == "OK" and days_left < 2:
-        print("  ⚠️  re-auth soon: python scripts/schwab_auth.py")
+        print(f"  ⚠️  re-auth soon: {REAUTH_CMD}")
     elif state == "EXPIRED":
-        print("  ⚠️  re-auth now: python scripts/schwab_auth.py")
+        print(f"  ⚠️  re-auth now: {REAUTH_CMD}")
 
     if not args.no_call:
         try:

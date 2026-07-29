@@ -81,7 +81,9 @@ NEVER_REMEDY = "Has this EVER been scheduled? Check `crontab -l` (editing cronta
 
 # What to actually DO about each condition — the whole point of the alert.
 REMEDY = {
-    "schwab_token":  "Run: .venv/bin/python scripts/schwab_auth.py (OPERATOR_MANUAL §1)",
+    # Mirrors adapters.schwab.client.REAUTH_CMD verbatim (kept a literal so this
+    # daily ops alert never depends on importing schwabdev to tell you what to run).
+    "schwab_token":  "Run: cd /opt/agentic-trader && .venv/bin/python scripts/schwab_auth.py (OPERATOR_MANUAL §1)",
     "signal_panel":  "OpenD likely logged out — see OPERATOR_MANUAL §4",
     "ledger_backup": "Check the box still has push access to agentic-trader-ledger",
     "adaptive_tune": "Check GitHub Actions — the weekly tuner has not run",

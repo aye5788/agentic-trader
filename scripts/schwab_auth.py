@@ -1,11 +1,17 @@
 """Weekly Schwab OAuth re-login — FORCES a brand-new refresh token.
 
-RUN THIS IN A REAL TERMINAL — in Claude Code, prefix with `!`:
-    ! .venv/bin/python scripts/schwab_auth.py
+RUN THIS IN A REAL SSH TERMINAL:
+    cd /opt/agentic-trader && .venv/bin/python scripts/schwab_auth.py
 
 It prints an authorization URL. Open it, log in and approve. Schwab redirects to
 your callback URL (the page will fail to load — that is expected). Copy the FULL
 URL from the browser address bar and paste it back at the prompt.
+
+⚠️  NOT via Claude Code's `!` — that has no interactive stdin, so the paste prompt
+hits EOF and nothing is renewed. (This docstring used to *recommend* `!`, which
+was flatly wrong.) In an agent shell use the two-step flow instead: run this to
+print the URL, then hand the redirect URL to `scripts/schwab_finish_auth.py` as an
+argument, within ~30s. See README "Re-auth: which method".
 
 ⚠️  WHY THE FORCE MATTERS (this silently broke every early re-auth):
 schwabdev renews the refresh token ONLY when it has <60.5 minutes left. Merely
@@ -17,6 +23,9 @@ verify refresh_token_issued actually advanced before claiming success.
 
 Schwab refresh tokens expire every 7 days, so this must be re-run weekly to keep
 an unattended VPS deployment alive.
+
+There is no bare `python` on the box and schwabdev lives ONLY in the .venv, so
+always spell out the interpreter:
 
     .venv/bin/python scripts/schwab_auth.py
     .venv/bin/python scripts/schwab_auth.py --selftest   # no network, no prompt

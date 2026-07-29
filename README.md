@@ -82,8 +82,14 @@ Schwab refresh tokens **expire every 7 days** — the single biggest operational
 constraint for unattended running. Re-run this weekly:
 
 ```bash
-python scripts/schwab_auth.py     # prints a URL; log in, paste the redirected URL back
+.venv/bin/python scripts/schwab_auth.py   # prints a URL; log in, paste the redirected URL back
 ```
+
+There is no bare `python` on the box and `schwabdev` is installed **only** in the
+`.venv` — always spell out `.venv/bin/python`. The script forces a brand-new
+refresh token and then verifies `refresh_token_issued` actually advanced, so it
+can no longer report success without renewing anything (it used to: see
+`docs/OPSLOG.md` 2026-07-29). Exit 0 + a printed issue/expiry date is proof.
 
 The login is headless-friendly (no local browser server needed): you open the URL
 yourself and paste the redirect URL back — which is what makes VPS deployment viable.
@@ -91,7 +97,7 @@ yourself and paste the redirect URL back — which is what makes VPS deployment 
 **Check status any time** with:
 
 ```bash
-python scripts/schwab_status.py     # issued/expiry + days left + a live API call
+.venv/bin/python scripts/schwab_status.py   # issued/expiry + days left + a live API call
 ```
 
 Use this, **not** the `secrets/tokens.db` file date — the db is WAL-mode, so a fresh
@@ -111,7 +117,8 @@ you paste matters:
   goes to the browser→paste hop.
 - **Claude Code `!` (two-step, race-prone):** `schwab_auth.py`'s `input()` EOFs
   under `!`, so use the split flow — `! .venv/bin/python scripts/schwab_auth.py`
-  prints the URL (ignore the trailing `EOFError`), then
+  prints the URL, then reports `❌ RE-AUTH DID NOT TAKE` and exits 1 (expected —
+  the prompt got no input; your existing token is untouched). Follow with
   `! .venv/bin/python scripts/schwab_finish_auth.py "<full redirect url>"`. The
   chat round-trip often blows the 30s window; prefer the SSH method.
 

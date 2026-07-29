@@ -56,7 +56,36 @@ and it too printed success having exchanged nothing.
 regression that started this), the EOF path, and the `reauth_took` truth table.
 End-to-end with stdin closed: the script now *reaches* the Schwab authorize
 prompt — which it never did before — and on EOF fails loudly, exit 1, token left
-intact.
+intact. **Confirmed live the same day:** Aaron re-authed and `schwab_status.py`
+read `issued 2026-07-29T12:08+00:00 … (7.0 days left) … live check: OK` — the
+first re-auth ever verified to have actually renewed. `health_check --dry` then
+reported `healed: schwab_token`, 9/9 healthy.
+
+**Follow-up: the instructions were also wrong.** Auditing what the system tells
+you to run turned up two separate bad commands:
+
+- **Bare `python scripts/schwab_auth.py`** in `README.md` (×2), the
+  `schwab_status.py` docstring, its two runtime `⚠️ re-auth` prints, and
+  `client.py`'s no-token error. There is **no bare `python` on the box**, and
+  `schwabdev` is installed **only** in the `.venv` — so every one of those was a
+  guaranteed `ModuleNotFoundError`. Now sourced from single constants,
+  `client.REAUTH_CMD` / `STATUS_CMD` (built off `REPO_ROOT`, so they emit a
+  copy-pasteable `cd /opt/agentic-trader && .venv/bin/python …`). The phone-alert
+  remedy in `health_check.py` mirrors the string as a literal on purpose — that
+  daily ops alert must not depend on importing schwabdev to tell you what to run.
+- **`schwab_auth.py`'s own docstring recommended Claude Code's `!` prefix** —
+  header line, first thing you read. `!` has no interactive stdin, so `input()`
+  EOFs and nothing renews. It now says real SSH terminal, and points at the
+  two-step `schwab_finish_auth.py` flow for agent shells.
+
+`OPERATOR_MANUAL.md` §1 step 5 no longer says "you should see ✅ Auth complete" —
+it says the printed **issue + expiry dates** are the proof, because the bare ✅ was
+exactly the thing that lied. README's `!` two-step now describes the new clean
+`❌ RE-AUTH DID NOT TAKE` + exit 1 instead of a trailing `EOFError` traceback.
+
+Not fixed (out of scope, worth a sweep): ~25 other scripts' docstrings across the
+repo still say `python scripts/<name>.py`. Same footgun, no bare `python` exists.
+The GitHub Actions workflows are fine — CI does have `python` on PATH.
 
 ---
 

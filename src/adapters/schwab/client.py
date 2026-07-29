@@ -17,6 +17,15 @@ from dotenv import load_dotenv
 REPO_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(REPO_ROOT / ".env")
 
+# THE re-auth command — one string, every consumer (schwab_status, health_check's
+# phone alert, the no-token error below, OPERATOR_MANUAL). Copy-pasteable as-is:
+# absolute cd, and the .venv interpreter spelled out because there is no bare
+# `python` on the box and schwabdev is installed ONLY in the venv — a bare
+# `python scripts/schwab_auth.py` is a guaranteed ModuleNotFoundError. Several
+# call sites had drifted to exactly that; keep new ones pointed here.
+REAUTH_CMD = f"cd {REPO_ROOT} && .venv/bin/python scripts/schwab_auth.py"
+STATUS_CMD = f"cd {REPO_ROOT} && .venv/bin/python scripts/schwab_status.py"
+
 
 def _require(name: str) -> str:
     val = os.environ.get(name)
@@ -109,7 +118,7 @@ def build_client(*, interactive_auth: bool) -> "schwabdev.Client":
         raise SystemExit(
             f"No Schwab token found at {db}.\n"
             f"Run the one-time login first (in a real terminal):\n"
-            f"    python scripts/schwab_auth.py"
+            f"    {REAUTH_CMD}"
         )
 
     # NB: do NOT pass call_on_auth here. When schwabdev is given that callback it
