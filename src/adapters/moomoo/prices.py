@@ -1,0 +1,258 @@
+"""Daily OHLC bars from moomoo — the price feed behind the momentum signal.
+
+Replaces the Schwab price pull (`adapters.schwab.research.get_price_history`).
+Schwab's refresh token expired every 7 days and had to be renewed by hand at a
+browser; moomoo authenticates through the already-running OpenD gateway, so the
+price feed has no recurring credential chore at all. That is the whole reason
+this module exists.
+
+Emits candles in the SAME shape the Schwab path did — `{"datetime": <epoch ms>,
+"open","high","low","close"}` — so `scripts/fetch_prices.py::_field_panels` and
+`_drop_unsettled_session` are unchanged and the cached panels stay byte-compatible
+with everything already on disk.
+
+TWO paths, and picking the wrong one hits a wall:
+  • `snapshot_ohlc()` — today's bar, ANY number of tickers, **no quota**. This is
+    the daily append, and what the scheduled job should call.
+  • `daily_panel()`   — a date range via `request_history_kline`, which is metered
+    against a hard **100 distinct stocks account-wide**. Backfill only.
+
+⚠️ RUNTIME: the moomoo SDK is installed ONLY under system `/usr/bin/python3`
+(3.10), never the repo `.venv` (3.12). Any caller of this module must run under
+`/usr/bin/python3` — which has pandas/pyarrow/numpy available.
+"""
+import datetime as dt
+import time
+
+from moomoo import RET_OK, AuType, KLType
+
+from .client import quote_ctx
+from .research import _bare, _us
+
+# moomoo ceiling is 60 history calls / 30s and OpenD is shared, so pace every
+# call rather than discovering the limit. Mirrors research.py's snapshot pacing.
+_MIN_INTERVAL = 0.55
+_MAX_RETRY = 5
+_BACKOFF = 6.0
+_last_call = [0.0]
+
+# Bars come back with a `time_key` like "2026-07-28 00:00:00" (US/Eastern session
+# date). Only these four fields are consumed downstream.
+_FIELDS = ("open", "high", "low", "close")
+
+
+def _paced(fn, *a, **kw):
+    wait = _MIN_INTERVAL - (time.monotonic() - _last_call[0])
+    if wait > 0:
+        time.sleep(wait)
+    try:
+        return fn(*a, **kw)
+    finally:
+        _last_call[0] = time.monotonic()
+
+
+def _is_transient(msg: str) -> bool:
+    """Connection/limit conditions worth retrying. A dead ticker is NOT transient —
+    retrying it just burns the rate budget, so those return empty and get recorded."""
+    s = str(msg).lower()
+    return any(m in s for m in
+               ("frequency", "limit", "timeout", "connect", "disconnect", "network"))
+
+
+def _to_candles(df) -> list:
+    """moomoo frame -> the Schwab-shaped candle list. Drops rows with any missing
+    OHLC field: a partial bar silently becomes a real-looking price otherwise."""
+    out = []
+    for rec in df.to_dict("records"):
+        if any(rec.get(f) is None for f in _FIELDS):
+            continue
+        ts = rec.get("time_key")
+        if not ts:
+            continue
+        d = dt.datetime.fromisoformat(str(ts)).replace(tzinfo=dt.timezone.utc)
+        c = {"datetime": int(d.timestamp() * 1000)}
+        for f in _FIELDS:
+            c[f] = float(rec[f])
+        out.append(c)
+    return out
+
+
+def daily_ohlc(ticker: str, start: str, end: str, ctx=None):
+    """Daily QFQ-adjusted bars for one ticker in [start, end] (YYYY-MM-DD).
+
+    Returns (candles, err): candles is Schwab-shaped and possibly empty; err is a
+    message when the pull failed outright.
+
+    ⚠️ `AuType.NONE` is deliberate and load-bearing. The ~10y panel already on disk
+    came from Schwab, which returns UNADJUSTED closes, and moomoo appends to that
+    same series — so the adjustment mode has to agree or the splice date gets a fake
+    overnight return. Verified 2026-07-29 against the cached panel: NONE matches to
+    0.0000% on SPY/XLK/MU, while QFQ (dividend-adjusted) drifts up to 0.2569% and
+    HFQ is wildly off (NVDA 48,020%). Names whose ex-dividend date fell outside the
+    compared window matched under either mode, which is exactly what made QFQ look
+    fine at first glance — do not "fix" this back to QFQ on a spot check.
+    """
+    own = ctx is None
+    q = ctx or quote_ctx()
+    try:
+        code = _us(ticker)
+        for attempt in range(_MAX_RETRY):
+            out = _paced(q.request_history_kline, code, start=start, end=end,
+                         ktype=KLType.K_DAY, autype=AuType.NONE, max_count=None)
+            ret, data = out[0], out[1]
+            if ret == RET_OK:
+                return _to_candles(data), None
+            if not _is_transient(data):
+                return [], f"{data}"
+            time.sleep(_BACKOFF * (attempt + 1))
+        return [], f"rate-limited after {_MAX_RETRY} attempts"
+    except Exception as e:  # noqa: BLE001 — offline batch: record and move on
+        return [], f"{type(e).__name__}: {e}"
+    finally:
+        if own:
+            q.close()
+
+
+def snapshot_ohlc(tickers, ctx=None):
+    """Today's daily OHLC bar for `tickers` -> ({ticker: candle}, {ticker: err}).
+
+    THIS is the daily-append path, and the reason it exists rather than using
+    `daily_panel`: `request_history_kline` is metered against a hard **100 distinct
+    stocks, account-wide** quota (verified 2026-07-29 — the pull died at exactly
+    `stock: 100/100` with 98 of 168 universe names unfetched). `get_market_snapshot`
+    is rate-limited but NOT quota-metered and takes 400 codes per call, so the whole
+    universe costs ONE call and zero quota, forever.
+
+    The bar is the CURRENT session's and is partial during RTH — `last_price` is just
+    the last trade until the close settles. Callers must run it through
+    `fetch_prices._drop_unsettled_session`, which already handles exactly this.
+    """
+    own = ctx is None
+    q = ctx or quote_ctx()
+    out, errs = {}, {}
+    try:
+        codes = [_us(t) for t in tickers]
+        for i in range(0, len(codes), 400):
+            batch = codes[i:i + 400]
+            res = _paced(q.get_market_snapshot, batch)
+            ret, data = res[0], res[1]
+            if ret != RET_OK:
+                for c in batch:
+                    errs[_bare(c)] = str(data)[:200]
+                continue
+            for rec in data.to_dict("records"):
+                t = _bare(rec.get("code", ""))
+                ts = rec.get("update_time")
+                o, h, lo, c = (rec.get("open_price"), rec.get("high_price"),
+                               rec.get("low_price"), rec.get("last_price"))
+                if not ts or any(v is None for v in (o, h, lo, c)):
+                    errs[t] = "snapshot missing OHLC"
+                    continue
+                # A halted/never-traded name reports 0.0 across the bar. That is not
+                # a price — letting it through would post a -100% return.
+                if min(float(o), float(h), float(lo), float(c)) <= 0:
+                    errs[t] = "non-positive OHLC (halted / no trades)"
+                    continue
+                d = dt.datetime.fromisoformat(str(ts).split(".")[0])
+                out[t] = {"datetime": int(d.replace(tzinfo=dt.timezone.utc).timestamp() * 1000),
+                          "open": float(o), "high": float(h),
+                          "low": float(lo), "close": float(c)}
+    finally:
+        if own:
+            q.close()
+    return out, errs
+
+
+def daily_panel(tickers, start: str, end: str, ctx=None, progress=None):
+    """Pull `tickers` sequentially -> ({ticker: candles}, {ticker: err}).
+
+    One context for the whole batch (reconnecting per ticker is what made the
+    first universe_refresh run so slow). Sequential because history is per-symbol;
+    there is no batch history call.
+    """
+    own = ctx is None
+    q = ctx or quote_ctx()
+    raw, errs = {}, {}
+    try:
+        for i, t in enumerate(tickers, 1):
+            candles, err = daily_ohlc(t, start, end, ctx=q)
+            if candles:
+                raw[t] = candles
+            if err:
+                errs[t] = err
+            if progress:
+                progress(i, len(tickers), t, len(candles), err)
+    finally:
+        if own:
+            q.close()
+    return raw, errs
+
+
+def _selftest() -> None:
+    import math
+
+    # _to_candles: shape, ordering preserved, partial bars dropped
+    class _DF:
+        def __init__(self, rows): self.rows = rows
+        def to_dict(self, _): return self.rows
+
+    rows = [
+        {"time_key": "2026-07-27 00:00:00", "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
+        {"time_key": "2026-07-28 00:00:00", "open": 2.0, "high": 3.0, "low": 1.5, "close": 2.5},
+        {"time_key": "2026-07-29 00:00:00", "open": 3.0, "high": None, "low": 2.0, "close": 3.5},
+        {"time_key": None, "open": 4.0, "high": 5.0, "low": 3.0, "close": 4.5},
+    ]
+    c = _to_candles(_DF(rows))
+    assert len(c) == 2, f"partial + keyless bars must drop, got {len(c)}"
+    assert set(c[0]) == {"datetime", "open", "high", "low", "close"}, c[0]
+    assert c[0]["datetime"] < c[1]["datetime"], "order must survive"
+    assert c[1]["close"] == 2.5 and isinstance(c[1]["close"], float), c[1]
+    # epoch ms must round-trip to the same session date the API named
+    got = dt.datetime.fromtimestamp(c[1]["datetime"] / 1000, dt.timezone.utc).date()
+    assert got == dt.date(2026, 7, 28), got
+
+    # transient classification: retry the connection, never the dead ticker
+    assert _is_transient("request frequency limit exceeded")
+    assert _is_transient("Timeout waiting for response")
+    assert not _is_transient("code not exist"), "a dead ticker must not be retried"
+
+    assert not math.isnan(float(c[0]["open"]))
+
+    # --- snapshot_ohlc: the guards that keep bad bars out of the panel ----------
+    class _Q:
+        def __init__(self, rows): self.rows, self.batches = rows, []
+        def get_market_snapshot(self, codes):
+            self.batches.append(list(codes))
+            return RET_OK, _DF([r for r in self.rows if r["code"] in set(codes)])
+
+    rows = [
+        {"code": "US.GOOD", "update_time": "2026-07-28 16:00:00.123",
+         "open_price": 10.0, "high_price": 11.0, "low_price": 9.0, "last_price": 10.5},
+        {"code": "US.HALTED", "update_time": "2026-07-28 16:00:00",     # never traded
+         "open_price": 0.0, "high_price": 0.0, "low_price": 0.0, "last_price": 0.0},
+        {"code": "US.PARTIAL", "update_time": "2026-07-28 16:00:00",    # missing a leg
+         "open_price": 5.0, "high_price": None, "low_price": 4.0, "last_price": 4.5},
+    ]
+    global _MIN_INTERVAL
+    _MIN_INTERVAL = 0.0                                   # keep the selftest instant
+    fake = _Q(rows)
+    out, errs = snapshot_ohlc(["GOOD", "HALTED", "PARTIAL"], ctx=fake)
+    assert set(out) == {"GOOD"}, f"only the good bar may pass, got {sorted(out)}"
+    assert out["GOOD"]["close"] == 10.5, out["GOOD"]
+    assert "HALTED" in errs and "non-positive" in errs["HALTED"], errs
+    assert "PARTIAL" in errs and "missing OHLC" in errs["PARTIAL"], errs
+    # fractional-second update_time must not break the timestamp parse
+    assert dt.datetime.fromtimestamp(out["GOOD"]["datetime"] / 1000,
+                                     dt.timezone.utc).date() == dt.date(2026, 7, 28)
+
+    # batching: 400 codes per call is the snapshot ceiling
+    many = _Q([])
+    snapshot_ohlc([f"T{i}" for i in range(900)], ctx=many)
+    assert [len(b) for b in many.batches] == [400, 400, 100], [len(b) for b in many.batches]
+
+    print("moomoo.prices selftest OK: candle shape, retry classification, "
+          "snapshot guards, 400-code batching")
+
+
+if __name__ == "__main__":
+    _selftest()
