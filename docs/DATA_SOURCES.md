@@ -96,9 +96,7 @@ prospectively (meta-labeling), NOT to fit a 1-year backtest.
 - `get_rating_change(market, change_type, …)` — market-WIDE upgrade/downgrade
   screen (cross-reference against the universe), not per-name.
 - `get_corporate_actions_buybacks(code)` — **US NOT supported** (HK/A-share only).
-- `get_stock_filter` with **`StockField` (133 fields)** — a screening catalog
-  (fundamentals: ROE/margins/growth/PE/PB/PS; technicals: MACD/RSI/KDJ/BOLL/EMA;
-  52wk ratios; turnover). Snapshot screening, no history.
+- `get_stock_filter` — the screener. Fully mapped in **§5e** below.
 - Also present (categories, mostly unexplored): ARK fund flows
   (`get_ark_*`), full options analytics (`get_option_chain`, `get_option_rank`,
   `get_option_screen`, IV/greeks), breadth (`get_rise_fall_distribution`,
@@ -120,6 +118,97 @@ ctx.close()
 ```
 Some endpoints return **>2-tuples** — normalize with `data = out[1]`, never blindly
 `ret, data = out` (that raised "expected 2, got 6" on 2026-07-23).
+
+### 5e. The screener, mapped (probed 2026-07-29 + official docs)
+
+`OpenQuoteContext` exposes **166 public methods; this repo calls 5**
+(`get_market_snapshot`, `get_stock_filter`, `get_capital_flow`,
+`get_short_interest`, `get_option_underlying_overview`). There are **TWO**
+screeners, and the newer one is currently broken on this box.
+
+**V1 — `get_stock_filter(market, filter_list, plate_code, begin, num)` — WORKS.**
+
+`StockField` has **121 members**, and they are **partitioned by numeric range** —
+each field is legal in exactly ONE filter class. The SDK does not enforce this
+readably (it just subtracts an `*_enum_begin` offset), so passing a financial
+field to a `SimpleFilter` silently encodes the wrong field number:
+
+| Filter class | Fields | Range | Extra required knob |
+| --- | --- | --- | --- |
+| `SimpleFilter` | 22 | 0–99 | — (snapshot: price, MARKET_VAL, PE/PB/PS/PCF, 52wk ratios, shares) |
+| `AccumulateFilter` | 5 | 100–199 | `days` (CHANGE_RATE, AMPLITUDE, VOLUME, TURNOVER, TURNOVER_RATE) |
+| `FinancialFilter` | 46 | 200–299 | `quarter` (`FinancialQuarter`) |
+| `PatternFilter` | 20 | 300–399 | `ktype`; boolean screen, returns no value |
+| `CustomIndicatorFilter` | 28 | 400+ | `ktype`, `relative_position`, `stock_field2` |
+
+- **Multiple filters AND together**, and narrow monotonically — verified
+  1502 → 345 → 88 (mktcap ≥ 10B → +60d chg ≥ 15% → +MA stack long).
+- **`is_no_filter=True` is the projection mechanism.** The response carries ONLY
+  the fields named in `filter_list`; add a filter with `is_no_filter=True` to get a
+  field back without constraining it. Docs' "50+ fields returned" is the available
+  superset, not what any one call returns.
+- ⚠️ **The result object's `__dict__` has MIXED str and tuple keys** — so `dir()`
+  and `getattr()` **raise `TypeError`** on it. Simple fields are `'market_val'`;
+  accumulate are `('change_rate', 60)`; financial are `('roe', 'annual')`;
+  indicator are `('rsi', '14', 'k_day')`. Read `obj.__dict__` directly.
+- `plate_code` scopes a screen to a plate: `get_plate_list(Market.US, Plate.ALL)`
+  returns **349** plates; `US.LIST20077` ('Semiconductors') screened to 15 names.
+  Plate names are **not unique** ("Semiconductors" appears twice) — match on code.
+- `consecutive_period` (docs: **[1–12]**) means "held for N *consecutive* periods",
+  NOT "occurred within the last N". A one-bar event × N>1 returns 0 by design.
+- `num` max **200**; docs recommend **≥3 s between calls**. Percentage fields take
+  **whole numbers** (`20` = 20%).
+- ⚠️ **The universe is unfiltered**: preferred shares, SPAC units, ADRs and OTC
+  shells all rank. Worse, a **missing indicator reads as `0.0`** and therefore
+  *passes* any `<` filter — `RSI(14) < 30` returned 534 names topped by three
+  `rsi=0.0` non-common-stock instruments. Same failure class as
+  `capflow_bignet_20d`'s silent nulls: gate on a liquidity/market-cap floor and
+  require the indicator be non-zero.
+
+**V2 — `get_stock_screen(request)` (条件选股V2, ProtoID 3252) — BROKEN HERE.**
+
+Far richer: **11 property families, 244+ factors** per the official docs (the
+local `moomoo.quote.stock_screen_const` carries **31 enums / 633 members**),
+built with `StockScreenRequest`. It adds whole categories V1 cannot express —
+`FeaturedProperty` (104: analyst rating + target-price gap, Morningstar fair
+value/moat, institutional holding ratio + change, short position, cover days,
+lending fee, beta, PE/PB/PS historical percentile and industry rank),
+`KlineShapeProperty` (double bottoms, head-and-shoulders, cup, wedge),
+`OptionProperty` (underlying IV/HV, IV rank/percentile, earnings IV crush),
+`FinancialProperty` (131, incl. CAGRs and forward `future_duration`), and
+explicit `add_retrieve_*` projection instead of V1's `is_no_filter` trick.
+
+⛔ **It fails on this box** with
+`'google._upb._message.FieldDescriptor' object has no attribute 'label'`.
+Cause: `moomoo-api 10.9.6908` declares `protobuf >= 3.20.0` **with no upper
+bound**, but its V2 response decoder
+(`quote_query.py` → `StockScreenQuery._parse_rsp_item_result`, 3 sites) uses
+`FieldDescriptor.label`, **removed** in protobuf 6/7 — and the box has **7.35.1**.
+`.is_repeated` is the replacement. Additional `.label` uses live in
+`moomoo/common/pbjson.py`, so the fix is not a single edit and an in-memory patch
+of the one method was **not** sufficient. Blast radius is limited to
+`get_stock_screen`; V1 and the other 165 methods are unaffected because they use
+explicit protobuf field access, not the generic reflection walker.
+
+**Unresolved:** whether V2 is *entitled* to this account is still unknown — the
+crash happens while decoding the reply, before any entitlement signal is visible.
+Deciding the fix is a judgement call, not a mechanical one: the moomoo SDK is
+installed in **system `/usr/bin/python3`, shared with `moomoo-vol-desk`**, so
+pinning protobuf down or patching the SDK in place affects the sibling repo too.
+
+⚠️ **V2 flips two conventions** — do not port a V1 query by hand:
+percentages are **decimals** (`0.05` = 5%, vs V1's `5.0`), and indicator/pattern
+K-line periods narrow to **daily + 1-hour only** (V1 allows 60m/day/week/month).
+V2's rate limit is documented as **10 requests / 30 s**.
+
+**Momentum-relevant methods still unwired** (no adapter fn):
+`get_period_change_rank` returns 5d/10d/20d/60d/120d/250d/YTD change **plus**
+market cap and PE in ONE market-wide ranked call — overlapping what
+`src/momentum.py` computes from Schwab history, and usable as an independent
+cross-check. Also `get_top_movers_rank`, `get_short_selling_rank`, `get_hot_list`
+(trade/search/news heat + ranks), `get_rise_fall_distribution` (breadth).
+Remember §5a: moomoo history is shallow — these are **forward-log** inputs, never
+backtest inputs.
 
 ---
 
