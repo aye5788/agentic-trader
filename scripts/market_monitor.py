@@ -1,12 +1,14 @@
 """MARKET MONITOR — the always-on stop-loss / take-profit watcher (Part 1 of 2).
 
 The daily loops only STORE each name's stop and take-profit prices; nothing
-enforced them. This does. During market hours it polls live Schwab quotes for
+enforced them. This does. During market hours it polls live moomoo quotes for
 every held name every `poll_secs` (all names in one call) and checks each price
 against its stored stop / targets. On a breach it journals the event and — Part 2
 — invokes the headless executor (prompts/exit.md) to place the market sell via RH.
 
-Watching is pure Python + Schwab (cheap, no Claude). Claude fires only on an
+Watching is pure Python + moomoo via OpenD (cheap, no Claude, and no weekly
+credential chore — the Schwab feed this replaced needed a browser re-auth every
+7 days to keep the stop watcher alive). Claude fires only on an
 actual breach. Governance: idles on the kill-switch; runs ALERT-ONLY (journal,
 no sell) whenever [proof] live_approved is false or [monitor] alert_only is true.
 A stopped-out name goes on a cooldown list so the slow loop won't rebuy it next
@@ -36,7 +38,8 @@ except Exception:
 import strategy as strat            # noqa: E402
 import governance as gov            # noqa: E402
 from research_store import read_current, store   # noqa: E402
-from adapters.schwab import research             # noqa: E402
+from adapters.moomoo import prices as mmp        # noqa: E402
+from adapters.moomoo.client import quote_ctx     # noqa: E402
 from notify import push as notify               # noqa: E402  shared ntfy helper
 
 MON = REPO / "research_store" / "monitor"
@@ -141,8 +144,16 @@ def _selftest() -> None:
 
 
 def _last_price(block: dict):
+    """Extract a usable mark from one quote block, or None.
+
+    `last` is the moomoo shape (adapters.moomoo.prices.live_quotes). The camelCase
+    keys are the old Schwab shape, kept as a fallback so an on-disk quotes.json
+    written before the feed switch still reads back. Only a POSITIVE number counts —
+    a 0.0 must never become a price, because it would read as a total loss and fire
+    a market sell.
+    """
     q = (block or {}).get("quote", {}) or block or {}
-    for k in ("lastPrice", "mark", "closePrice", "bidPrice"):
+    for k in ("last", "lastPrice", "mark", "closePrice", "bidPrice"):
         v = q.get(k)
         if isinstance(v, (int, float)) and v > 0:
             return float(v)
@@ -212,12 +223,15 @@ def _save(path, obj):
 
 
 class QuoteFeedError(Exception):
-    """The Schwab quote poll failed. Raised (not swallowed) so the main loop can
-    rebuild the client and, if the feed stays down, exit for a clean restart.
+    """The moomoo quote poll failed. Raised (not swallowed) so the main loop can
+    rebuild the OpenD context and, if the feed stays down, exit for a clean restart.
 
     Root cause this guards against (2026-07-15 lock-starve + 2026-07-22 stale
-    token): a long-lived process holding long-lived schwabdev state that rots
-    with no self-recovery. We treat a wedged feed as recoverable, not silent."""
+    token): a long-lived process holding long-lived client state that rots with no
+    self-recovery. That class of bug is not Schwab-specific — an OpenD context can
+    be dropped by a gateway restart just as easily (and OpenD is shared with
+    moomoo-vol-desk, which restarts it), so the recover/alert/exit ladder below is
+    kept verbatim. We treat a wedged feed as recoverable, not silent."""
 
 
 def _feed_action(consec_fail: int, alert_after: int, exit_after: int) -> str:
@@ -254,7 +268,7 @@ def _maybe_feed_alert(consec_fail: int, cooldown_secs: int) -> None:
     if not _feed_alert_due(now, st.get("last_ts"), cooldown_secs):
         return
     notify("🚨 Monitor feed DOWN — stops unwatched",
-           f"Schwab quotes failing {consec_fail}× in a row; the stop-loss watcher "
+           f"moomoo quotes failing {consec_fail}× in a row; the stop-loss watcher "
            f"is blind. Auto-recovering (client rebuilt each tick; restarts if it "
            f"persists). If it keeps failing, re-auth Schwab (weekly token).")
     _save(FEED_ALERT, {"last_ts": now.isoformat(timespec="seconds"),
@@ -359,7 +373,7 @@ def check_once(cfg, client) -> int:
         st = {"book_asof": prod.as_of, "fired": {}}
 
     try:
-        quotes = research.get_quotes(list(held), client=client)
+        quotes = mmp.live_quotes(list(held), ctx=client)
     except Exception as e:
         # Do NOT swallow: signal the main loop so it rebuilds the client and, if
         # the feed stays wedged, exits for a clean systemd restart + phone alert.
@@ -482,16 +496,25 @@ def main():
         return
     cfg = strat.load()
     poll = cfg["monitor"]["poll_secs"]
-    client = research.build_client(interactive_auth=False)
+    client = quote_ctx()
 
     if args.once:
-        if not args.force and not market_open():
-            print("market closed — nothing to do (use --force to test)")
-            return
+        # ⚠️ The context MUST be closed here. moomoo's OpenQuoteContext spawns
+        # NON-DAEMON threads (network_manager poll + callback_executor), so without
+        # close() the interpreter blocks forever in threading._shutdown AFTER the
+        # work is done — the run looks like a hang, exits only on SIGKILL, and trips
+        # the cron ERR trap on a pass that actually succeeded. The Schwab client this
+        # replaced needed no teardown, which is why the try/finally is new here.
         try:
-            check_once(cfg, client)
-        except QuoteFeedError as e:
-            print(f"  quote error: {e}")
+            if not args.force and not market_open():
+                print("market closed — nothing to do (use --force to test)")
+                return
+            try:
+                check_once(cfg, client)
+            except QuoteFeedError as e:
+                print(f"  quote error: {e}")
+        finally:
+            client.close()
         return
 
     print(f"monitor up — polling every {poll}s during 09:30–16:00 ET")
@@ -508,10 +531,17 @@ def main():
             except QuoteFeedError as e:
                 consec_fail += 1
                 print(f"  quote feed error #{consec_fail} (recovering): {e}")
-                # LAYER 1 (root cause): discard the possibly token-rotten client so
-                # a fresh one reloads/refreshes creds from tokens.db next tick.
+                # LAYER 1 (root cause): discard the wedged context so a fresh one
+                # reconnects to OpenD next tick. CLOSE the old one first — each
+                # OpenQuoteContext owns two non-daemon threads and a socket, so
+                # rebuilding without closing leaks both on every failure tick. On a
+                # ~2GB box that turns a transient feed blip into an OOM.
                 try:
-                    client = research.build_client(interactive_auth=False)
+                    client.close()
+                except Exception:
+                    pass                              # already dead; nothing to salvage
+                try:
+                    client = quote_ctx()
                 except Exception as be:
                     print(f"  client rebuild failed (will retry): {be}")
                 action = _feed_action(consec_fail, alert_after, exit_after)
@@ -520,7 +550,14 @@ def main():
                 elif action == "exit":                # LAYER 2: hand off to systemd
                     _maybe_feed_alert(consec_fail, cooldown)
                     print(f"  feed down {consec_fail}× — exiting nonzero for a clean "
-                          f"systemd restart (fresh client)")
+                          f"systemd restart (fresh context)")
+                    # Same non-daemon-thread trap as the --once path: without this
+                    # close, sys.exit() blocks in threading._shutdown and systemd
+                    # never gets the exit it is waiting on to restart us.
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
                     sys.exit(1)
             except Exception as e:
                 print(f"loop error (continuing): {e}")

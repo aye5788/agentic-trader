@@ -8,6 +8,84 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-29 — Schwab removed; moomoo is the market-data feed
+
+**Aaron's call, and the right one.** Schwab's 7-day refresh token was the only
+recurring human chore in the whole system, and the momentum signal consumed nothing
+from Schwab but daily closes. Everything else it nominally provided —
+fundamentals, options, movers — had no consumer. The survivorship-free backtest
+already ran on Alpaca. So the feed was carrying a weekly maintenance burden for one
+column of data.
+
+Corroborating evidence found mid-migration: the monitor journal shows the
+Schwab-backed stop watcher throwing `401 Unauthorized` on **2026-07-28** — the
+stop-loss watcher had already gone blind at least once on that feed.
+
+**Equivalence proved BEFORE switching.** Across the full 168-ticker universe,
+**166 matched the cached Schwab close exactly** and two by <0.15% (TER 0.13%,
+SPCX 0.07% — a persistent per-name close convention, not noise; TER showed the
+same 0.13% on the independent history path). `momentum.compute` on the old vs new
+panel is **bit-identical**: max |delta| 0.0 on R/sigma/trend/score/rank, same 111
+eligible names in the same rank order.
+
+**Three findings that shaped the design:**
+
+- **`AuType.NONE`, not `QFQ`.** The ~10y panel on disk is Schwab **unadjusted**, so
+  the adjustment mode must agree or the splice date gets a fake overnight return.
+  QFQ (dividend-adjusted) drifts to 0.2569%; HFQ is wildly off (NVDA 48,020%). The
+  trap: only names whose ex-dividend date fell *inside* the compared window
+  differed, so QFQ passed a 10-name spot check. Don't "fix" it back.
+- **`request_history_kline` is capped at 100 DISTINCT stocks, account-wide.** Hit
+  live at exactly `stock: 100/100` with 98 of 168 names unfetched. A full re-pull of
+  this universe is therefore **impossible** — which also makes the deep panel
+  **non-regenerable**. Backed up to `research_store/prices/backup/`.
+- **`get_market_snapshot` is unmetered and carries a full daily OHLC bar.** 400
+  codes/call, so the whole universe is ONE call in ~0.2s at zero quota. That is now
+  the daily-append path; history is backfill-only behind `--backfill`.
+
+**Two real bugs introduced and fixed during the switch** (both absent from the
+Schwab path, which is why they were easy to miss):
+
+- **Non-daemon threads blocked interpreter shutdown.** `OpenQuoteContext` spawns a
+  `network_manager` poll thread and a `callback_executor`, neither a daemon. The
+  monitor's `--once` path never closed the context, so the process finished its work
+  and then hung forever in `threading._shutdown` — exiting only on SIGKILL and
+  tripping the cron ERR trap on a pass that had *succeeded*. Also fixed on the
+  `sys.exit(1)` feed-down path (systemd never got the exit it waits on to restart)
+  and in the rebuild loop, which leaked a context + two threads + a socket on every
+  failure tick — an OOM path on a ~2GB box.
+- **`_is_transient` missed `"timed out"`.** moomoo emits BOTH spellings —
+  `PacketErr.Timeout` from the snapshot call, `Get Historical Candlestick request
+  timed out.` from the history call. Matching only `"timeout"` classified a
+  retryable history timeout as a dead ticker. `live_quotes` now also retries
+  transients in place rather than escalating: a `PacketErr.Timeout` appeared within
+  a minute of cutover, and in the monitor a raise costs a full context rebuild.
+
+**Moved to `/usr/bin/python3`** (moomoo SDK is not in `.venv`): `fetch_prices`,
+`market_monitor` (+ `run_monitor.sh`, service restarted and verified polling),
+`fast_loop`, `risk_review`. `prompts/fast_loop.md` and `prompts/risk_review.md`
+updated — running `fast_loop.py` under `.venv` would fail the moomoo import and,
+because `no_chase` is deliberately fail-open, silently skip the chase guard that
+cost real money on 2026-07-23.
+
+**Also rerouted:** `risk_review._gather_highs` now reads `highs.parquet` (already on
+disk, no API call) and folds in today's session high from a live snapshot;
+`_gather_vix` and `slow_loop.fetch_vix` now use FRED `VIXCLS`, which was already the
+documented fallback.
+
+**Deleted:** `src/adapters/schwab/`, `schwab_auth.py`, `schwab_status.py`,
+`schwab_finish_auth.py`, `schwab_scope*.py`, the `schwab_token` health check and its
+phone remedy, `schwabdev` from requirements, `SCHWAB_*` from `.env.example`.
+`secrets/tokens.db` and the live `.env` keys are left on the box, inert — remove at
+leisure.
+
+⚠️ **Unrelated pre-existing failure found:** `scripts/risk_review.py --selftest`
+fails (`KeyError: 'NVDA'` in the trail-up assertion) on **both** runtimes and on the
+**unmodified** file — confirmed by stashing. Not caused by this migration, but
+risk_review is armed and places real trades, so it needs its own fix.
+
+---
+
 ## 2026-07-29 — `schwab_auth.py` printed "✅ Auth complete" without re-authing
 
 **The weekly Schwab re-auth was a no-op unless the token was already inside its

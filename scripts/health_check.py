@@ -81,9 +81,9 @@ NEVER_REMEDY = "Has this EVER been scheduled? Check `crontab -l` (editing cronta
 
 # What to actually DO about each condition — the whole point of the alert.
 REMEDY = {
-    # Mirrors adapters.schwab.client.REAUTH_CMD verbatim (kept a literal so this
-    # daily ops alert never depends on importing schwabdev to tell you what to run).
-    "schwab_token":  "Run: cd /opt/agentic-trader && .venv/bin/python scripts/schwab_auth.py (OPERATOR_MANUAL §1)",
+    # No credential-expiry remedy remains. `schwab_token` lived here and was the
+    # only recurring human chore in the whole system; moomoo authenticates through
+    # OpenD, so there is nothing to renew on a schedule any more.
     "signal_panel":  "OpenD likely logged out — see OPERATOR_MANUAL §4",
     "ledger_backup": "Check the box still has push access to agentic-trader-ledger",
     "adaptive_tune": "Check GitHub Actions — the weekly tuner has not run",
@@ -126,7 +126,6 @@ def diff(rows, flagged: dict) -> tuple[list, list]:
 def compose(to_alert) -> tuple[str, str]:
     """Build the push. Job names + ages only — nothing about the book."""
     n = len(to_alert)
-    urgent = any(c.status in ("expired", "due") for c in to_alert)
     if n == 1:
         title = f"Agentic upkeep: {to_alert[0].label}"
     else:
@@ -137,9 +136,11 @@ def compose(to_alert) -> tuple[str, str]:
         remedy = NEVER_REMEDY if c.status == "never" else REMEDY.get(c.key)
         if remedy:
             lines.append(f"  {remedy}")
-    if urgent:
-        lines.append("")
-        lines.append("Schwab expiry kills the price feed — stops stop being watched.")
+    # There used to be an "expired/due -> Schwab expiry kills the price feed"
+    # footer here. It was the only urgency tier, and it existed solely because a
+    # 7-day credential could silently take the stop watcher down. moomoo has no
+    # expiring credential, so every remaining condition is a job-stopped-running
+    # condition and the per-item remedy above says everything there is to say.
     return title, "\n".join(lines)
 
 
@@ -365,7 +366,7 @@ def _selftest() -> None:
     now = dt.datetime(2026, 7, 24, tzinfo=dt.timezone.utc)
     ok = C("slow_loop", "Slow loop", now, "ok", "fine")
     bad = C("signal_panel", "Panel", None, "never", "never ran")
-    due = C("schwab_token", "Schwab token", now, "due", "1.0 days left")
+    due = C("monitor", "Monitor", now, "stale", "last ran 3d ago")
 
     # fires once
     to_alert, healed = diff([ok, bad], {})
@@ -396,8 +397,8 @@ def _selftest() -> None:
 
     # message carries the remedy and no numbers from the book
     title, body = compose([due])
-    assert "schwab_auth.py" in body, body
-    assert "price feed" in body, "urgent context missing"
+    assert "systemctl status agentic-monitor" in body, body
+    assert "Monitor" in body, "must name the condition"
     assert "$" not in body, "alerts must never carry dollar figures"
 
     title, body = compose([bad, due])
@@ -419,9 +420,9 @@ def _selftest() -> None:
     # --- issue body composition (pure — no gh invoked) ---
     body = issue_body([bad, due])
     assert "Panel" in body and "signal_panel" in body, "must name the bad condition"
-    assert "Schwab token" in body and "schwab_token" in body, "must name the due condition"
+    assert "Monitor" in body and "monitor" in body, "must name the second condition"
     assert "crontab -l" in body, "must carry the never-ran remedy"
-    assert "schwab_auth.py" in body, "must carry the schwab remedy"
+    assert "systemctl status agentic-monitor" in body, "must carry the monitor remedy"
     assert OPS_VS_CODE_NOTE in body, "must carry the ops-vs-code note verbatim"
     assert "$" not in body, "issue body (PUBLIC) must never carry a dollar figure"
 

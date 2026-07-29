@@ -327,10 +327,10 @@ def main() -> None:
         want = sorted({o["symbol"] for o in approved if o["side"] == "buy"})
         quotes = {}
         if want:
-            try:                       # Schwab = PRIMARY quote source (CLAUDE.md)
-                from adapters.schwab import research as _rs   # noqa: E402
-                for sym, q in (_rs.get_quotes(want) or {}).items():
-                    px = ((q or {}).get("quote") or {}).get("lastPrice")
+            try:                       # moomoo = quote source (via OpenD)
+                from adapters.moomoo import prices as _mmp    # noqa: E402
+                for sym, q in (_mmp.live_quotes(want) or {}).items():
+                    px = (q or {}).get("last")
                     if px:
                         quotes[sym] = float(px)
             except Exception as e:     # fail OPEN, but never silently

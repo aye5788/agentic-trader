@@ -12,6 +12,7 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
 fi
 
 mkdir -p logs
-PY=.venv/bin/python
-[ -x "$PY" ] || PY=python3
-exec "$PY" scripts/market_monitor.py
+# The stop watcher now polls moomoo via OpenD, and the moomoo SDK is installed ONLY
+# under system python3 (3.10) — never the .venv (3.12). Running this under .venv
+# would fail at import, which for THIS service means no stop-loss watching at all.
+exec /usr/bin/python3 scripts/market_monitor.py

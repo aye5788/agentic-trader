@@ -38,19 +38,17 @@ PANEL = REPO / "research_store" / "prices" / "closes.parquet"
 
 
 def fetch_vix() -> tuple[float | None, str]:
-    """Current VIX level for the regime ceiling: live Schwab '$VIX' quote first,
-    FRED VIXCLS (prior close) as fallback. Returns (None, reason) when both
-    fail — the caller treats that FAIL-OPEN (VIX gate skipped, trend floor
-    still gates) because a data outage should not push the book to cash."""
-    try:
-        from adapters.schwab import research
-        blk = research.get_quotes(["$VIX"]).get("$VIX", {})
-        q = blk.get("quote", blk) or {}
-        px = q.get("lastPrice") or q.get("closePrice")
-        if px and float(px) > 0:
-            return float(px), "Schwab $VIX live"
-    except Exception as e:
-        print(f"  VIX via Schwab failed ({type(e).__name__}) — trying FRED")
+    """Current VIX level for the regime ceiling, from FRED VIXCLS.
+
+    Was a live Schwab '$VIX' quote with FRED as fallback; the Schwab branch is gone
+    with the rest of that adapter, so FRED is now the only source. Practical effect
+    is small — VIXCLS is the settled prior close rather than an intraday tick, and
+    the slow loop runs pre-open anyway, so the prior close is the number a pre-open
+    regime decision should use.
+
+    Returns (None, reason) on failure — the caller treats that FAIL-OPEN (VIX gate
+    skipped, trend floor still gates) because a data outage should not push the book
+    to cash."""
     try:
         from adapters.fred import indicators
         v = indicators.get_vix()
@@ -59,7 +57,7 @@ def fetch_vix() -> tuple[float | None, str]:
             return float(v["value"]), f"FRED VIXCLS {v.get('date', '')}{stale}"
     except Exception as e:
         print(f"  VIX via FRED failed ({type(e).__name__})")
-    return None, "unavailable (Schwab+FRED) — gate skipped fail-open"
+    return None, "unavailable (FRED) — gate skipped fail-open"
 
 
 def geometry(price: float, sigma: float, stop_mult: float, r_mults: list[float]) -> dict:

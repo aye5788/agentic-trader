@@ -55,8 +55,13 @@ def _is_transient(msg: str) -> bool:
     """Connection/limit conditions worth retrying. A dead ticker is NOT transient —
     retrying it just burns the rate budget, so those return empty and get recorded."""
     s = str(msg).lower()
+    # "timed out" is listed separately from "timeout" on purpose: moomoo uses BOTH
+    # spellings ("PacketErr.Timeout" from the snapshot call, "Get Historical
+    # Candlestick request timed out." from the history call), and matching only the
+    # first silently treated a retryable history timeout as a dead ticker.
     return any(m in s for m in
-               ("frequency", "limit", "timeout", "connect", "disconnect", "network"))
+               ("frequency", "limit", "timeout", "timed out",
+                "connect", "disconnect", "network"))
 
 
 def _to_candles(df) -> list:
@@ -163,6 +168,56 @@ def snapshot_ohlc(tickers, ctx=None):
     return out, errs
 
 
+def live_quotes(tickers, ctx=None):
+    """Live marks for the intraday stop watcher -> {ticker: {last, open, high, low}}.
+
+    Same unmetered `get_market_snapshot` call as `snapshot_ohlc`, but shaped for
+    `market_monitor`: it wants the current price to compare against a stored stop,
+    plus the session high/low. One call covers every holding — the Schwab path this
+    replaces made a per-name request.
+
+    A name whose snapshot has no positive last price is OMITTED rather than given a
+    zero. The monitor treats a missing symbol as "no data this tick" (safe: no
+    trigger), whereas a 0.0 would read as a catastrophic gap and fire a market sell.
+
+    Transient failures are retried in-place before raising. Observed live within a
+    minute of the feed cutover: `PacketErr.Timeout` on a single tick. OpenD is shared
+    with moomoo-vol-desk, so brief timeouts are expected rather than exceptional —
+    and in the monitor a raise costs a full context teardown/rebuild, so absorbing
+    the blip here is much cheaper than escalating it. A raise still happens when
+    retries are exhausted, which keeps the recover/alert/exit ladder intact for a
+    genuinely wedged feed.
+    """
+    own = ctx is None
+    q = ctx or quote_ctx()
+    out = {}
+    try:
+        codes = [_us(t) for t in tickers]
+        for i in range(0, len(codes), 400):
+            for attempt in range(_MAX_RETRY):
+                res = _paced(q.get_market_snapshot, codes[i:i + 400])
+                ret, data = res[0], res[1]
+                if ret == RET_OK or not _is_transient(data):
+                    break
+                time.sleep(min(_BACKOFF, 1.5 * (attempt + 1)))
+            if ret != RET_OK:
+                raise RuntimeError(f"get_market_snapshot failed: {str(data)[:200]}")
+            for rec in data.to_dict("records"):
+                last = rec.get("last_price")
+                if not isinstance(last, (int, float)) or last <= 0:
+                    continue
+                out[_bare(rec.get("code", ""))] = {
+                    "last": float(last),
+                    "open": rec.get("open_price"),
+                    "high": rec.get("high_price"),
+                    "low": rec.get("low_price"),
+                }
+    finally:
+        if own:
+            q.close()
+    return out
+
+
 def daily_panel(tickers, start: str, end: str, ctx=None, progress=None):
     """Pull `tickers` sequentially -> ({ticker: candles}, {ticker: err}).
 
@@ -214,7 +269,13 @@ def _selftest() -> None:
     # transient classification: retry the connection, never the dead ticker
     assert _is_transient("request frequency limit exceeded")
     assert _is_transient("Timeout waiting for response")
+    # both spellings moomoo actually emits — snapshot vs history call
+    assert _is_transient("PacketErr.Timeout"), "snapshot timeout must be retryable"
+    assert _is_transient("Get Historical Candlestick request timed out."), \
+        "'timed out' is a DIFFERENT string from 'timeout' — both must match"
     assert not _is_transient("code not exist"), "a dead ticker must not be retried"
+    assert not _is_transient("Insufficient historical K-line quota"), \
+        "quota exhaustion is not transient — retrying cannot help"
 
     assert not math.isnan(float(c[0]["open"]))
 

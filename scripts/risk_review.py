@@ -233,30 +233,52 @@ def _held(prod):
 
 
 def _gather_highs(prod) -> dict:
-    """Highest intraday HIGH since ENTRY per held name, from Schwab price history.
-    NOTE: get_price_history returns a LIST of candle dicts (NOT {"candles":[...]}),
-    each {open,high,low,close,volume,datetime(epoch ms)}. Bounding to bars at/after
-    the thesis entry (`as_of`) keeps give-back honest — a pre-entry spike we never
-    held through must not count as our high-water mark."""
+    """Highest HIGH since ENTRY per held name -> {symbol: high}.
+
+    Reads the cached highs panel (research_store/prices/highs.parquet), same as
+    _gather_rel_strength reads closes — no API call at all. This replaced a Schwab
+    per-name `get_price_history` loop; the panel already holds 10y of daily highs
+    and is refreshed by scripts/fetch_prices.py, so the request was redundant.
+
+    Bounding to bars at/after the thesis entry (`as_of`) keeps give-back honest — a
+    pre-entry spike we never held through must not count as our high-water mark.
+
+    The panel excludes the unsettled current session, so TODAY's intraday high is
+    folded in from a live moomoo snapshot (one unmetered call). Without it, a name
+    that peaked and reversed this morning would understate its give-back — the exact
+    thing this function exists to measure. Best-effort: if the snapshot fails, the
+    settled-panel high still stands.
+    """
     try:
-        from adapters.schwab import research
-        out = {}
-        for t in _held(prod):
-            candles = research.get_price_history(t.symbol, period_type="year", period=1)
-            entry_ms = None
-            if t.as_of:
-                try:
-                    entry_ms = datetime.fromisoformat(t.as_of[:10]).replace(
-                        tzinfo=timezone.utc).timestamp() * 1000
-                except Exception:
-                    entry_ms = None
-            highs = [c["high"] for c in candles if c.get("high")
-                     and (entry_ms is None or (c.get("datetime") or 0) >= entry_ms)]
-            if highs:
-                out[t.symbol] = max(highs)
-        return out
+        import pandas as pd
+        panel = pd.read_parquet(REPO / "research_store" / "prices" / "highs.parquet")
     except Exception:
         return {}
+
+    held = list(_held(prod))
+    out = {}
+    for t in held:
+        if t.symbol not in panel.columns:
+            continue
+        s = panel[t.symbol].dropna()
+        if t.as_of:
+            try:
+                s = s[s.index >= pd.Timestamp(t.as_of[:10])]
+            except Exception:
+                pass
+        if len(s):
+            out[t.symbol] = float(s.max())
+
+    try:                                    # today's session high, if reachable
+        from adapters.moomoo import prices as mmp
+        live = mmp.live_quotes([t.symbol for t in held])
+        for sym, q in live.items():
+            h = q.get("high")
+            if isinstance(h, (int, float)) and h > 0:
+                out[sym] = max(out.get(sym, 0.0), float(h))
+    except Exception:
+        pass
+    return out
 
 
 def _gather_rel_strength(prod) -> dict:
@@ -311,10 +333,15 @@ def _gather_entry_sigma(prod) -> dict:
 
 
 def _gather_vix() -> float | None:
+    """Latest VIX. Sourced from FRED (`VIXCLS`), which already served the macro
+    regime indicators — so this needed no new plumbing when the Schwab `$VIX` quote
+    went away. FRED publishes the settled daily close, not an intraday tick; for a
+    twice-daily de-risk review that is the right granularity anyway."""
     try:
-        from adapters.schwab import research
-        q = research.get_quote("$VIX")
-        return _q_last(q)
+        from adapters.fred import indicators
+        v = indicators.get_vix()
+        val = (v or {}).get("value")
+        return float(val) if isinstance(val, (int, float)) else None
     except Exception:
         return None
 

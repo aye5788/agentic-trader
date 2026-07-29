@@ -28,10 +28,14 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
     "cash":<get_portfolio.cash>,"as_of":"<YYYY-MM-DD>","ts":"<now, ISO-8601 UTC>",
     "positions":{"SYM":{"qty":<quantity>,"avg_cost":<average_buy_price>,"last":<quote last price>},...}}
    ```
-5. **Plan.** Run `.venv/bin/python scripts/fast_loop.py` (the project venv — the
-   system `python` is too old for this code). It applies governance (drawdown
-   halt, per-order caps, whitelist) and writes `research_store/rh/order_plan.json`
-   with `approved`, `blocked`, and the `live_approved` flag.
+5. **Plan.** Run `/usr/bin/python3 scripts/fast_loop.py` — **system python3, not
+   the .venv.** The `no_chase` guard needs a live quote and quotes now come from
+   moomoo, whose SDK exists only under system python3. Under `.venv` the import
+   fails, and because that guard is deliberately fail-open the run would proceed
+   with the chase check silently skipped — the exact defect that cost real money on
+   2026-07-23. It applies governance (drawdown halt, per-order caps, whitelist) and
+   writes `research_store/rh/order_plan.json` with `approved`, `blocked`, and the
+   `live_approved` flag.
 6. **Gate.** Read `order_plan.json`.
    - If a preflight halt fired (script printed "TRADING HALTED") → STOP.
    - If `live_approved` is `false` → STOP. Report the plan. Place NOTHING.

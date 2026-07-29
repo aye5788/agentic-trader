@@ -13,7 +13,9 @@ HARD RULES (CLAUDE.md overrides everything):
 PROCEDURE — follow exactly:
 
 1. Kill-switch: if research_store/HALT exists → STOP, do nothing.
-2. Build facts: run `.venv/bin/python scripts/risk_review.py --facts`. Read
+2. Build facts: run `/usr/bin/python3 scripts/risk_review.py --facts` (system
+   python3, not .venv — today's session high comes from moomoo, whose SDK is not
+   in the venv; under .venv the high-water mark silently omits today). Read
    research_store/rh/risk_review_facts.json. Also read
    research_store/monitor/deferred_intents.json — resolve any watch-note you left
    last pass ("did NVDA reclaim its 21-day?").
@@ -29,7 +31,7 @@ PROCEDURE — follow exactly:
      this Friday). lower_tp: add "targets" (each <= current), "expires".
    - trim: add "fraction" in (0,1). exit: no extra fields.
    - watch: add "note" and "expires".
-5. Apply non-order changes: run `.venv/bin/python scripts/risk_review.py --apply`.
+5. Apply non-order changes: run `/usr/bin/python3 scripts/risk_review.py --apply`.
    It ALWAYS validates the one-way invariant, journals, and pushes your phone if
    anything acted. It writes stricter-only overrides and records watch-notes ONLY
    if it ran ARMED (live_approved AND not alert_only — the same gate step 6

@@ -38,11 +38,8 @@ from dataclasses import dataclass
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
-# Schwab refresh tokens live 7 days and cannot be renewed unattended.
-SCHWAB_TTL_DAYS = 7
 # Remind this many days before expiry — enough runway to hit a busy day and still
 # have a couple of chances left.
-SCHWAB_WARN_DAYS = 3
 
 
 # Sentinel for a probe we chose NOT to run (e.g. the dashboard skips the network
@@ -89,7 +86,7 @@ SPECS = {
 
 
 def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
-    """Pure: {key: timestamp|None} + schwab_issued -> verdicts. No I/O."""
+    """Pure: {key: timestamp|None} -> verdicts. No I/O."""
     out: list[Check] = []
 
     for key, (label, max_days, source) in SPECS.items():
@@ -109,23 +106,6 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
         else:
             out.append(Check(key, label, ts, "ok", f"last ran {_ago(age)} ago"))
 
-    # Schwab is the odd one out: judged on time REMAINING, not time since.
-    issued = probes.get("schwab_issued")
-    if issued is None:
-        out.append(Check("schwab_token", "Schwab token", None, "never",
-                         "could not read tokens.db"))
-    else:
-        expires = issued + dt.timedelta(days=SCHWAB_TTL_DAYS)
-        left = (expires - now).total_seconds() / 86400
-        if left <= 0:
-            out.append(Check("schwab_token", "Schwab token", issued, "expired",
-                             "EXPIRED — price feed is dead until you re-auth"))
-        elif left <= SCHWAB_WARN_DAYS:
-            out.append(Check("schwab_token", "Schwab token", issued, "due",
-                             f"{left:.1f} days left — re-auth this week"))
-        else:
-            out.append(Check("schwab_token", "Schwab token", issued, "ok",
-                             f"{left:.1f} days left"))
     return out
 
 
@@ -211,18 +191,6 @@ def _last_actions_run(workflow: str = "adaptive-tune") -> dt.datetime | None:
         return None
 
 
-def _schwab_issued() -> dt.datetime | None:
-    try:
-        sys.path.insert(0, str(REPO / "scripts"))
-        from schwab_status import _token_issued  # noqa: PLC0415
-        ts = _token_issued()
-    except Exception:
-        return None
-    if ts is None:
-        return None
-    return ts if ts.tzinfo else ts.replace(tzinfo=dt.timezone.utc)
-
-
 def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dict:
     """Collect the timestamps evaluate() judges. All failures degrade to None."""
     root = root or REPO
@@ -235,7 +203,6 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "signal_panel":  _newest_journal_event(root, "signal_panel"),
         "newsletter":    _newest_in_dir(root / "research_store" / "newsletters", "*.sent"),
         "adaptive_tune": _last_actions_run() if use_network else SKIPPED,
-        "schwab_issued": _schwab_issued(),
     }
 
 
@@ -296,17 +263,11 @@ def _selftest() -> None:
     r = {c.key: c for c in evaluate(mon_check, {"monitor": fri_close - 3 * day})}
     assert r["monitor"].status == "stale", "a truly dead monitor must still alarm"
 
-    # schwab: fresh / due / expired
-    def schwab(issued_days_ago):
-        return {c.key: c for c in evaluate(now, {"schwab_issued": now - issued_days_ago * day})}["schwab_token"]
-    assert schwab(1).status == "ok", schwab(1)
-    assert schwab(5).status == "due", schwab(5)          # 2 days left
-    assert schwab(8).status == "expired", schwab(8)
-    assert schwab(4).status == "due", "3 days left is the warn boundary"
-    assert schwab(3.5).status == "ok", "3.5 days left is still fine"
-
-    # unreadable token db -> never, not a crash
-    assert {c.key: c for c in evaluate(now, {})}["schwab_token"].status == "never"
+    # no credential-expiry check remains: the Schwab token was the only one, and
+    # moomoo authenticates through OpenD (whose liveness IS the signal_panel /
+    # monitor artifact checks above). Guard against it creeping back silently.
+    assert not any(c.key == "schwab_token" for c in evaluate(now, {})), \
+        "schwab_token check should be gone with the adapter"
 
     # healthy property tracks status
     assert Check("k", "l", now, "ok", "").healthy
