@@ -301,6 +301,17 @@ def _selftest() -> None:
     assert not r["adaptive_tune"].healthy, "unknown is not a clean bill of health"
     assert r["signal_panel"].alertable, "a genuinely-never-run job must alert"
 
+    # evaluate() must emit a row for EVERY spec key on every path, sentinels
+    # included. health_check.diff() clears any flag whose key is absent from the
+    # rows (that is how a retired check's flag gets dropped), so a branch that
+    # silently skipped a key would clear its fire-once flag and re-alert a
+    # condition that never healed. Cheap to assert, silent and confusing to hit.
+    for _label, _probes in (("empty", {}),
+                            ("skipped", {k: SKIPPED for k in SPECS}),
+                            ("halted", {k: HALTED for k in SPECS}),
+                            ("paired", {"fast_loop": (None, now)})):
+        assert {c.key for c in evaluate(now, _probes)} == set(SPECS), _label
+
     # a deliberately halted job is "unknown" too: not healthy, but never alerting.
     # Throwing the kill-switch is an operator decision, not a fault to nag about.
     r = {c.key: c for c in evaluate(now, {"fast_loop": HALTED, "risk_review": HALTED})}
