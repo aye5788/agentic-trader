@@ -12,7 +12,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -355,6 +355,19 @@ def _q_last(q: dict):
 
 
 def _selftest() -> None:
+    # Expiry fixtures MUST be relative to today. `read_overrides`/`read_intents`
+    # prune against the real `date.today()`, so a hardcoded future date rots into
+    # the past and the fixture is pruned before the assertion ever runs. That is
+    # exactly what happened: every `expires` below was pinned to "2026-07-18",
+    # which went stale on 2026-07-19 and left this selftest failing with
+    # KeyError 'NVDA' — on an ARMED job that places real orders.
+    # The subtler damage was to the armed=False case at the end: pruning made
+    # `read_overrides(...) == {}` true whether or not the file was wrongly
+    # written, so the ships-safe property silently stopped being tested. It now
+    # asserts the file does not exist, which pruning cannot fake.
+    LIVE = (date.today() + timedelta(days=7)).isoformat()   # always in the future
+    DEAD = "2000-01-01"                                     # always in the past
+
     # --- one-way geometry: stop may only move UP, targets only pull IN ---
     acc, rej = validate_geometry({"stop": 100.0, "targets": [120.0, 140.0]},
                                  {"stop": 105.0, "targets": [118.0, 135.0]})
@@ -388,15 +401,20 @@ def _selftest() -> None:
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "overrides.json"
-        write_override("NVDA", {"stop": 105.0}, "trail up", "2026-07-18", path=p)
+        write_override("NVDA", {"stop": 105.0}, "trail up", LIVE, path=p)
         got = read_overrides(path=p)
         assert got["NVDA"]["stop"] == 105.0 and got["NVDA"]["reason"] == "trail up", got
         # an already-expired override is pruned on read
-        write_override("OLD", {"stop": 1.0}, "stale", "2000-01-01", path=p)
+        write_override("OLD", {"stop": 1.0}, "stale", DEAD, path=p)
         assert "OLD" not in read_overrides(path=p)
+        # ...and pruning must not take the live one with it
+        assert "NVDA" in read_overrides(path=p)
         ip = Path(d) / "intents.json"
-        append_intent({"symbol": "AMD", "note": "watch 21d reclaim", "expires": "2026-07-18"}, path=ip)
+        append_intent({"symbol": "AMD", "note": "watch 21d reclaim", "expires": LIVE}, path=ip)
         assert read_intents(path=ip)[0]["symbol"] == "AMD"
+        # an expired intent is pruned on read, same as an override
+        append_intent({"symbol": "OLD", "note": "stale", "expires": DEAD}, path=ip)
+        assert [i["symbol"] for i in read_intents(path=ip)] == ["AMD"]
 
     # --- per-position fact-builder ---
     from research_store.models import Thesis
@@ -423,7 +441,7 @@ def _selftest() -> None:
         ovp, dp = Path(d) / "ov.json", Path(d) / "dec.json"
         dp.write_text(json.dumps([
             {"symbol": "NVDA", "kind": "tighten_stop", "reason": "trail",
-             "stop": 108.0, "expires": "2026-07-18"},
+             "stop": 108.0, "expires": LIVE},
             {"symbol": "AMD", "kind": "buy", "reason": "sneaky entry"},   # must be rejected
         ]))
         applied, orders, rejected = apply_decisions(
@@ -444,22 +462,28 @@ def _selftest() -> None:
         # must not knock a valid decision in the SAME batch off the applied list
         applied3, orders3, rejected3 = apply_decisions(
             [{"symbol": "GME", "kind": "tighten_stop", "reason": "garbage in",
-              "stop": "garbage", "expires": "2026-07-18"},
+              "stop": "garbage", "expires": LIVE},
              {"symbol": "NVDA", "kind": "tighten_stop", "reason": "trail",
-              "stop": 109.0, "expires": "2026-07-18"}],
+              "stop": 109.0, "expires": LIVE}],
             current_geom={"NVDA": {"stop": 100.0, "targets": [120.0], "entry_low": 130.0}},
             armed=True, overrides_path=Path(d) / "o3.json", intents_path=Path(d) / "i3.json")
         assert any(r["symbol"] == "GME" for r in rejected3), rejected3
         assert "NVDA" in [a["symbol"] for a in applied3], applied3
 
-        # armed=False must write NO override file — the top ships-safe property
+        # armed=False must write NO override file — the top ships-safe property.
+        # Assert on the FILE, not on read_overrides(): a read prunes expired
+        # entries and returns {} either way, which is how a decayed fixture date
+        # turned this check vacuous once already. The file's absence cannot be
+        # faked by pruning.
+        o4 = Path(d) / "o4.json"
         applied4, _, _ = apply_decisions(
             [{"symbol": "AMD", "kind": "tighten_stop", "reason": "trail",
-              "stop": 51.0, "expires": "2026-07-18"}],
+              "stop": 51.0, "expires": LIVE}],
             current_geom={"AMD": {"stop": 50.0, "targets": [70.0], "entry_low": 60.0}},
-            armed=False, overrides_path=Path(d) / "o4.json", intents_path=Path(d) / "i4.json")
+            armed=False, overrides_path=o4, intents_path=Path(d) / "i4.json")
         assert "AMD" in [a["symbol"] for a in applied4], applied4    # validated...
-        assert read_overrides(path=Path(d) / "o4.json") == {}       # ...but never persisted
+        assert not o4.exists(), f"armed=False wrote {o4}"            # ...but never persisted
+        assert read_overrides(path=o4) == {}
 
     print("selftest OK: one-way geometry + action validation")
 

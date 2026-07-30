@@ -79,6 +79,15 @@ OPS_VS_CODE_NOTE = (
 # sends you to the wrong place entirely, so "never" gets its own advice.
 NEVER_REMEDY = "Has this EVER been scheduled? Check `crontab -l` (editing crontab.template arms nothing)"
 
+# "blocked" means the job RAN and did not finish, so its log is fresh and contains
+# the reason — a different place to look than a stale job (where the question is
+# whether cron fired at all). On 2026-07-30 the cause was a gated command waiting
+# on an approval that headless cron can never give, which is invisible unless you
+# read the tail, so point there explicitly.
+BLOCKED_REMEDY = ("It ran but stalled — `tail -40` its log for the reason. "
+                  "A command awaiting approval means .claude/settings.json is "
+                  "missing an allowlist entry (see OPSLOG 2026-07-30)")
+
 # What to actually DO about each condition — the whole point of the alert.
 REMEDY = {
     # No credential-expiry remedy remains. `schwab_token` lived here and was the
@@ -93,6 +102,16 @@ REMEDY = {
     "monitor":       "systemctl status agentic-monitor",
     "newsletter":    "Check logs/newsletter.log",
 }
+
+
+def _remedy(c) -> str | None:
+    """Status-specific advice wins over the per-job default: "never" and "blocked"
+    both send you somewhere the generic "check its log" line would not."""
+    if c.status == "never":
+        return NEVER_REMEDY
+    if c.status == "blocked":
+        return BLOCKED_REMEDY
+    return REMEDY.get(c.key)
 
 
 def load_state() -> dict:
@@ -117,9 +136,20 @@ def diff(rows, flagged: dict) -> tuple[list, list]:
 
     to_alert = unhealthy and not already flagged  (fire-once)
     healed   = previously flagged, now healthy    (clears silently)
+               ...plus any flag whose CHECK no longer exists at all.
+
+    That last clause matters: `healed` used to be derived only from current rows,
+    so a flag for a deleted check could never be matched and never cleared. When
+    the Schwab adapter was removed on 2026-07-29 its `schwab_token` flag was left
+    behind, and every run since printed "1 still unresolved and already notified"
+    for a condition that no longer had any way to heal. A stuck flag is not inert:
+    the fire-once rule keys off `flagged`, so the leak also permanently suppresses
+    that key should a check of the same name ever return.
     """
+    live = {c.key for c in rows}
     to_alert = [c for c in rows if c.alertable and c.key not in flagged]
     healed = [c.key for c in rows if c.healthy and c.key in flagged]
+    healed += [k for k in flagged if k not in live]      # check retired -> drop it
     return to_alert, healed
 
 
@@ -133,7 +163,7 @@ def compose(to_alert) -> tuple[str, str]:
     lines = []
     for c in to_alert:
         lines.append(f"• {c.label}: {c.detail}")
-        remedy = NEVER_REMEDY if c.status == "never" else REMEDY.get(c.key)
+        remedy = _remedy(c)
         if remedy:
             lines.append(f"  {remedy}")
     # There used to be an "expired/due -> Schwab expiry kills the price feed"
@@ -156,7 +186,7 @@ def issue_body(to_alert) -> str:
     lines = ["Daily health check found the following unhealthy scheduled job(s):", ""]
     for c in to_alert:
         lines.append(f"- **{c.label}** (`{c.key}`) — status: `{c.status}` — {c.detail}")
-        remedy = NEVER_REMEDY if c.status == "never" else REMEDY.get(c.key)
+        remedy = _remedy(c)
         if remedy:
             lines.append(f"  - Remedy: {remedy}")
     lines.append("")
@@ -394,6 +424,30 @@ def _selftest() -> None:
     assert healed == [], "unknown must not clear an existing flag either"
     to_alert, healed = diff([unknown], {"adaptive_tune": {}})
     assert to_alert == [] and healed == [], "unknown leaves a prior flag untouched"
+
+    # a flag whose CHECK no longer exists must be dropped, not carried forever.
+    # `schwab_token` sat in health_state.json from 2026-07-28 through 2026-07-30
+    # because healed was derived only from current rows, so a retired check could
+    # never match and never clear.
+    to_alert, healed = diff([ok], {"schwab_token": {}})
+    assert healed == ["schwab_token"], healed
+    assert to_alert == [], "retiring a check must not alert"
+    # ...and a live-but-unhealthy flag is still NOT dropped by that rule
+    to_alert, healed = diff([bad], {"signal_panel": {}})
+    assert healed == [], "a still-broken condition must keep its flag"
+
+    # "blocked" (ran but did not finish) alerts, and gets its own remedy: the
+    # generic "check its log" does not tell you to look for an approval prompt.
+    blocked = C("fast_loop", "Fast loop (execution)", None, "blocked",
+                "RAN 9h ago but did not finish — output 2.4d old")
+    to_alert, _ = diff([blocked], {})
+    assert [c.key for c in to_alert] == ["fast_loop"], to_alert
+    title, body = compose([blocked])
+    assert "did not finish" in body, body
+    assert "allowlist" in body, "blocked must point at the permission cause"
+    assert "crontab -l" not in body, "blocked is not a never-scheduled condition"
+    assert "$" not in body, "alerts must never carry dollar figures"
+    assert "allowlist" in issue_body([blocked]), "issue body carries it too"
 
     # message carries the remedy and no numbers from the book
     title, body = compose([due])

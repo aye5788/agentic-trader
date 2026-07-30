@@ -12,6 +12,19 @@ demand positive evidence: every scheduled job leaves an artifact behind (a book,
 a log line, a journal event, a git commit), so a job that stopped running shows
 up as an artifact that stopped moving.
 
+2026-07-30 sharpened *which* artifact counts. The fast loop and risk review had
+been dark for two sessions — an allowlist stopped their gated commands, so each
+agent ran, wrote a log explaining it was blocked, and exited 0. Both were checked
+by LOG mtime, and a blocked run still writes its log, so this file reported
+"7/8 healthy" straight through the outage. The ERR trap in deploy/alert.sh was
+equally blind, for the mirror-image reason: it fires on a non-zero exit, and an
+agent politely reporting its own blockage exits 0.
+
+The lesson: a log proves the job STARTED, not that it did its work. Prefer the
+artifact the job exists to produce — for these two, `order_plan.json` and
+`risk_review_facts.json`, both of which were visibly stale the whole time. That
+artifact strictly dominates the log: if cron itself dies, the output stops too.
+
 Split in two on purpose:
   evaluate()  pure — timestamps in, verdicts out. All the logic, fully selftested.
   gather()    thin I/O — reads mtimes, the journal, tokens.db, the Actions API.
@@ -48,13 +61,35 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 # alarm — the dashboard would read NEVER RAN for a workflow that ran this morning.
 SKIPPED = "__skipped__"
 
+# Sentinel for a job that is deliberately stopped: the kill-switch is engaged, so
+# the fast loop and risk review halt before producing their artifacts. That is the
+# operator's intent, not a fault, and nagging daily about a switch someone chose to
+# throw is exactly the cry-wolf noise this module is supposed to avoid.
+HALTED = "__halted__"
+
+# Kill-switch path, mirroring [governance].kill_switch_file in config/strategy.toml.
+# Hardcoded rather than read from the config on purpose: this module imports nothing
+# from src/ and must stay importable under system python3.10 (no tomllib), because
+# the dashboard and the 08:00 cron check run on different interpreters. If the
+# config value is ever changed from the default, change it here too.
+KILL_SWITCH = "research_store/HALT"
+
+# A job whose log advanced while its output did not has RUN AND FAILED — the exact
+# 2026-07-30 signature. This is the sharpest signal in the module: on a healthy run
+# both timestamps move together within seconds, so the gap needs no modelling of
+# weekends, holidays or DST, and it fires after ONE bad run instead of waiting out
+# a multi-day staleness window. 12h is far above the normal seconds-to-minutes gap
+# (the log keeps appending through the post-Claude steps) and far below the ~24h
+# that a single missed daily run produces.
+BLOCKED_GAP = dt.timedelta(hours=12)
+
 
 @dataclass(frozen=True)
 class Check:
     key: str
     label: str
     last_seen: dt.datetime | None
-    status: str            # "ok" | "stale" | "never" | "due" | "expired" | "unknown"
+    status: str      # "ok" | "stale" | "never" | "blocked" | "due" | "expired" | "unknown"
     detail: str
 
     @property
@@ -71,8 +106,13 @@ class Check:
 # key -> (human label, stale after N days, what proves it ran)
 SPECS = {
     "slow_loop":     ("Slow loop (rebalance)",   3,  "research_store/current.json"),
-    "fast_loop":     ("Fast loop (execution)",   4,  "logs/fast.log"),
-    "risk_review":   ("Risk review",             4,  "logs/risk_review.log"),
+    # These two track their OUTPUT, not their log — see the 2026-07-30 note in the
+    # module docstring. fast_loop.py rewrites order_plan.json on EVERY run by
+    # design (it must never leave a stale plan for the placement agent), and
+    # risk_review.py --facts rewrites risk_review_facts.json on every run, so an
+    # unchanged mtime means the job did not get through its work.
+    "fast_loop":     ("Fast loop (execution)",   4,  "research_store/rh/order_plan.json"),
+    "risk_review":   ("Risk review",             4,  "research_store/rh/risk_review_facts.json"),
     # 4d, not 2d: this artifact only advances during RTH, so Friday's close ->
     # Monday's 08:00 check is ~2.7d of legitimate dead air (3.7d when Monday is
     # a market holiday). 2d alarmed every Monday. Matches the other weekday-only
@@ -94,6 +134,23 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
         if ts == SKIPPED:
             out.append(Check(key, label, None, "unknown", "not checked here"))
             continue
+        if ts == HALTED:
+            out.append(Check(key, label, None, "unknown",
+                             "kill-switch engaged — job intentionally stopped"))
+            continue
+
+        # A probe may be a bare timestamp, or (output_ts, log_ts) for the jobs
+        # where we can tell "started" apart from "finished". Only the pair can
+        # distinguish a job that never fired from one that fired and got stuck.
+        log_ts = None
+        if isinstance(ts, tuple):
+            ts, log_ts = ts
+        if log_ts is not None and (ts is None or log_ts - ts > BLOCKED_GAP):
+            behind = f"output {_ago(now - ts)} old" if ts else f"no {source} at all"
+            out.append(Check(key, label, ts, "blocked",
+                             f"RAN {_ago(now - log_ts)} ago but did not finish — {behind}"))
+            continue
+
         if ts is None:
             out.append(Check(key, label, None, "never",
                              f"no {source} has ever appeared"))
@@ -194,10 +251,16 @@ def _last_actions_run(workflow: str = "adaptive-tune") -> dt.datetime | None:
 def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dict:
     """Collect the timestamps evaluate() judges. All failures degrade to None."""
     root = root or REPO
+    # A thrown kill-switch stops both trading jobs before they write anything, so
+    # their artifacts go stale by design. Report that, don't alarm on it.
+    halted = HALTED if (root / KILL_SWITCH).exists() else None
     return {
         "slow_loop":     _mtime(root / "research_store" / "current.json"),
-        "fast_loop":     _mtime(root / "logs" / "fast.log"),
-        "risk_review":   _mtime(root / "logs" / "risk_review.log"),
+        # (output, log): the pair is what makes a blocked run visible.
+        "fast_loop":     halted or (_mtime(root / "research_store" / "rh" / "order_plan.json"),
+                                    _mtime(root / "logs" / "fast.log")),
+        "risk_review":   halted or (_mtime(root / "research_store" / "rh" / "risk_review_facts.json"),
+                                    _mtime(root / "logs" / "risk_review.log")),
         "monitor":       _mtime(root / "research_store" / "monitor" / "state.json"),
         "ledger_backup": _mtime(root / "logs" / "backup.log"),
         "signal_panel":  _newest_journal_event(root, "signal_panel"),
@@ -237,6 +300,65 @@ def _selftest() -> None:
     assert not r["adaptive_tune"].alertable, "an unperformed check must never alert"
     assert not r["adaptive_tune"].healthy, "unknown is not a clean bill of health"
     assert r["signal_panel"].alertable, "a genuinely-never-run job must alert"
+
+    # a deliberately halted job is "unknown" too: not healthy, but never alerting.
+    # Throwing the kill-switch is an operator decision, not a fault to nag about.
+    r = {c.key: c for c in evaluate(now, {"fast_loop": HALTED, "risk_review": HALTED})}
+    for k in ("fast_loop", "risk_review"):
+        assert r[k].status == "unknown", r[k]
+        assert not r[k].alertable, "a thrown kill-switch must not alert daily"
+        assert not r[k].healthy, "halted is not a clean bill of health"
+        assert "kill-switch" in r[k].detail, r[k]
+
+    # REGRESSION (2026-07-30): the fast loop and risk review ran, wrote their logs,
+    # and halted on a permission prompt for two sessions while this file reported
+    # 7/8 healthy. Both were keyed to LOG mtime, and a blocked run still logs. They
+    # are now keyed to the artifact each job exists to produce, so a fresh log with
+    # a stale output must read STALE. Pin the sources so a future edit cannot
+    # quietly point them back at a log.
+    assert SPECS["fast_loop"][2] == "research_store/rh/order_plan.json", SPECS["fast_loop"]
+    assert SPECS["risk_review"][2] == "research_store/rh/risk_review_facts.json", SPECS["risk_review"]
+    assert not any(s[2].startswith("logs/") for k, s in SPECS.items()
+                   if k in ("fast_loop", "risk_review")), \
+        "a log proves the job started, not that it did its work"
+    outage = {"fast_loop": now - 3 * day, "risk_review": now - 3 * day}   # logs were fresh
+    r = {c.key: c for c in evaluate(now, outage)}
+    assert all(r[k].status == "ok" for k in outage), "3d is inside the 4d window"
+    outage = {"fast_loop": now - 5 * day, "risk_review": now - 5 * day}
+    r = {c.key: c for c in evaluate(now, outage)}
+    for k in outage:
+        assert r[k].status == "stale" and r[k].alertable, r[k]
+
+    # ...but staleness alone was too slow: at the moment Aaron noticed by hand, the
+    # outage was 2.4d old and a 4d window still read "ok". The PAIR is what catches
+    # it after one bad run. Replay the real shape: log fresh, output two days back.
+    blocked = {"fast_loop": (now - 2 * day, now - dt.timedelta(hours=2)),
+               "risk_review": (now - 2 * day, now - dt.timedelta(hours=2))}
+    r = {c.key: c for c in evaluate(now, blocked)}
+    for k in blocked:
+        assert r[k].status == "blocked", r[k]
+        assert r[k].alertable and not r[k].healthy, r[k]
+        assert "did not finish" in r[k].detail, r[k]
+    # and it must fire while the staleness window still reads clean — that gap is
+    # the entire point, so assert the old check would NOT have caught this.
+    assert {c.key: c for c in evaluate(now, {k: v[0] for k, v in blocked.items()})
+            }["fast_loop"].status == "ok", "2d output age alone stays inside 4d"
+
+    # a healthy run writes both within seconds — that must never read as blocked
+    fine = {"fast_loop": (now - dt.timedelta(hours=3),
+                          now - dt.timedelta(hours=3) + dt.timedelta(minutes=4))}
+    assert {c.key: c for c in evaluate(now, fine)}["fast_loop"].status == "ok"
+    # nor may a long weekend: on a good Friday run both moved together, so the
+    # gap stays ~0 no matter how many days pass before the next run.
+    weekend = {"fast_loop": (now - 3 * day, now - 3 * day + dt.timedelta(minutes=2))}
+    assert {c.key: c for c in evaluate(now, weekend)}["fast_loop"].status == "ok", \
+        "both artifacts move together on a good run — weekends must stay quiet"
+    # a job that has run but NEVER produced its output is blocked, not "never"
+    r = {c.key: c for c in evaluate(now, {"fast_loop": (None, now - dt.timedelta(hours=1))})}
+    assert r["fast_loop"].status == "blocked" and "no research_store" in r["fast_loop"].detail, r["fast_loop"]
+    # a missing log degrades to plain staleness rather than crashing
+    r = {c.key: c for c in evaluate(now, {"fast_loop": (now - 5 * day, None)})}
+    assert r["fast_loop"].status == "stale", r["fast_loop"]
 
     # boundary: exactly at the limit is still ok, a hair past is stale
     mon_max = SPECS["monitor"][1]

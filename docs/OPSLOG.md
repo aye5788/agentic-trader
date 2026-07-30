@@ -8,6 +8,82 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-30 (later) — the two deferred follow-ups, both closed
+
+Same evening as the outage entry below. Aaron: "just fix so it runs correctly."
+
+### 1. `risk_review.py --selftest` was a decayed fixture, not a live bug
+
+The `KeyError: 'NVDA'` that `90123ce` flagged as needing its own fix turned out to be
+**test-data rot, not a defect in the trading logic.** Every `expires` in the selftest
+was pinned to the literal `"2026-07-18"`. `read_overrides`/`read_intents` prune against
+the real `date.today()`, so on **2026-07-19** the fixture began pruning itself before
+the assertion could read it. The production pruning was correct the whole time.
+
+Nothing in the armed order path was broken — but the selftest guarding it had been red
+for 11 days, which is its own kind of broken.
+
+**The subtler damage.** The last assertion in that block guards the ships-safe property
+`armed=False must write NO override file`, and it read:
+
+```python
+assert read_overrides(path=...) == {}
+```
+
+Once the fixture date went stale, pruning returned `{}` **whether or not the file had
+been wrongly written** — so the property silently stopped being tested. A decayed date
+turned a real safety assertion vacuous. It now asserts `not o4.exists()`, which pruning
+cannot fake. Fixture dates are computed relative to today (`LIVE`/`DEAD`), so this
+cannot rot again.
+
+### 2. Health checks could not see a job that runs and stalls
+
+Root cause of the blindness described below: `fast_loop` and `risk_review` were keyed to
+**log mtime**, and a blocked run still writes its log.
+
+Both now key to the artifact the job exists to *produce* — `order_plan.json` and
+`risk_review_facts.json`. `fast_loop.py` rewrites its plan on every run by design (it
+must never leave a stale plan for the placement agent), so an unchanged mtime genuinely
+means the work did not happen.
+
+**Staleness alone was still too slow.** At the moment Aaron noticed by hand the outage
+was 2.4d old, and the 4d window (needed for weekend/holiday gaps) still read `ok` — it
+would not have fired until ~Aug 2. So the sharper signal was added: **log fresh + output
+stale = `blocked`**. On a healthy run both timestamps move together within seconds, so
+the gap needs no modelling of weekends, holidays or DST, and it fires after **one** bad
+run instead of waiting out a multi-day window. Verified against the real fingerprint
+still on disk:
+
+```
+--> Fast loop (execution)  RAN 9h ago but did not finish — output 2.4d old
+```
+
+A thrown kill-switch suppresses both (status `unknown`, never alerting) — the operator
+chose that, and nagging daily about it is exactly the cry-wolf noise this module exists
+to avoid.
+
+### 3. Two smaller things found on the way
+
+- **Orphaned flags leaked forever.** `health_check.diff()` derived `healed` only from
+  current rows, so a flag for a *deleted* check could never match and never clear. That
+  is why `schwab_token` sat in `health_state.json` from Jul 28 to Jul 30 printing "1
+  still unresolved" for a check removed with the adapter. Not inert: fire-once keys off
+  `flagged`, so the leak would also permanently mute any future check of the same name.
+  Retired checks are now dropped.
+- **`blocked` needed its own remedy.** "Check logs/fast.log" is the right advice for a
+  stale job but useless for a stalled one — it points you at a fresh log without saying
+  what to look for. The blocked remedy names the actual cause: a gated command waiting
+  on an approval headless cron can never give.
+
+Dashboard renders `blocked` red (an actively-failing job outranks a merely quiet one).
+**18/18 selftests pass on both 3.10 and 3.12; `repo_checks` clean.**
+
+The 08:00 check was run by hand once tonight so the fire-once flag is already set —
+otherwise tomorrow's cron would have filed a `bug`+`auto-fix` issue and spawned an agent
+against an already-fixed problem. `claude.yml` is armed; that matters now.
+
+---
+
 ## 2026-07-30 — fast loop + risk review were dark for two sessions: an allowlist the prompt rewrite outran
 
 **Aaron noticed before any alert did** — "haven't heard anything in two days." He was

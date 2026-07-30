@@ -259,8 +259,10 @@ document.getElementById("healthMeta").textContent=
   hrows.length? (hbad? `${hbad} need${hbad===1?'s':''} attention` : "all healthy") : "—";
 document.getElementById("healthRows").innerHTML=
   hrows.length? hrows.map(h=>{
-    const col = h.status==="ok" ? "pos" : (h.status==="expired" ? "neg" : (h.status==="unknown" ? "dim" : "warn"));
-    const word = {ok:"OK", stale:"STALE", never:"NEVER RAN", due:"DUE", expired:"EXPIRED", unknown:"—"}[h.status]||h.status;
+    // "blocked" reads red like "expired": the job is actively failing right now,
+    // which is more urgent than an artifact that has merely gone quiet.
+    const col = h.status==="ok" ? "pos" : ((h.status==="expired"||h.status==="blocked") ? "neg" : (h.status==="unknown" ? "dim" : "warn"));
+    const word = {ok:"OK", stale:"STALE", never:"NEVER RAN", due:"DUE", expired:"EXPIRED", blocked:"BLOCKED", unknown:"—"}[h.status]||h.status;
     return prow(h.label, `${word}<span style="color:var(--dim);font-weight:400"> · ${h.detail}</span>`, col);
   }).join("") : prow("no health data","");
 
