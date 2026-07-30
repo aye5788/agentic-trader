@@ -15,6 +15,9 @@
       "Bash(.venv/bin/python scripts/fast_loop.py)",
       "Bash(.venv/bin/python scripts/record_fills.py)",
       "Bash(python3 scripts/record_fills.py)",
+      "Bash(/usr/bin/python3 scripts/fast_loop.py)",
+      "Bash(/usr/bin/python3 scripts/risk_review.py --facts)",
+      "Bash(/usr/bin/python3 scripts/risk_review.py --apply)",
       "Read",
       "Write",
       "Edit(docs/OPSLOG.md)"

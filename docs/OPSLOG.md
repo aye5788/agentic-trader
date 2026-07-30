@@ -8,6 +8,66 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-07-30 — fast loop + risk review were dark for two sessions: an allowlist the prompt rewrite outran
+
+**Aaron noticed before any alert did** — "haven't heard anything in two days." He was
+right, and the reason nothing alerted is the more interesting half of this entry.
+
+**Root cause.** `90123ce` (2026-07-29 **09:50 EDT**) rewrote both agent prompts to call
+the moomoo-capable interpreter by absolute path — `/usr/bin/python3 scripts/fast_loop.py`,
+`/usr/bin/python3 scripts/risk_review.py --facts|--apply`. Correct change; the moomoo SDK
+is not in `.venv`. But the permission allowlist was not moved with it. Every entry was
+bare-name or venv-scoped (`Bash(python3 scripts/fast_loop.py)`, `Bash(.venv/bin/python *)`)
+and **none matched an absolute path**. Under headless `claude -p` there is no one to
+approve, so both jobs stopped at their first gated command.
+
+The fast loop fired at **10:00 EDT the same morning — ten minutes after the commit.** It
+halted at step 5 with `Run halted at step 5, pending approval. Nothing placed.` Risk review
+halted at step 2 across four runs (Jul 29 + Jul 30, 12:00 and 15:45).
+
+**Neither alerting path could see it.** This is the part worth remembering:
+
+- `deploy/alert.sh` traps a **non-zero exit**. Claude exits **0** — it successfully wrote a
+  message explaining that it was blocked. A well-behaved agent reporting its own blockage
+  looks exactly like a clean run to the ERR trap.
+- `src/health.py` measures **log mtime** (`"fast_loop": _mtime("logs/fast.log")`). A blocked
+  run still writes to its log. Live during the outage it reported
+  `OK Fast loop (execution) last ran 9h ago` — **7/8 healthy**. The check is structurally
+  incapable of catching a job that runs, logs, and accomplishes nothing.
+
+The health model is "did the job leave evidence it ran." That was the right lesson from the
+signal panel that never ran (2026-07-24), but it does not cover a job that runs and *halts*.
+The distinguishing artifact already exists and was visibly stale throughout:
+`order_plan.json` (Jul 28 10:00) and `risk_review_facts.json` (Jul 28 15:45). **Deferred to
+its own pass** — Aaron's call, root cause first.
+
+**Consequences while dark.**
+
+- The book flipped **XLI → XLV** on Jul 28 evening. The Jul 29 10:00 fast loop was the run
+  that would have executed it, and is the run that got blocked. Rotation still pending.
+- **XLI is held but in neither risk system.** The monitor stop-watches book∩held, and the
+  risk review does the same — today's regenerated facts cover **3 positions (IWM, XLK, XLE)**,
+  not 4. An off-book holding is invisible to both by design, because normally the fast loop
+  closes it the same session. Here the window is open-ended. Worth its own thought: the
+  assumption "off-book positions are transient" is load-bearing and undocumented.
+
+**Fix.** Three allowlist entries in `.claude/settings.json` for the absolute-path forms.
+Verified by hand after applying: `risk_review.py --facts` ran clean under system python3
+(OpenD connected and closed cleanly — no non-daemon thread hang), writing fresh facts at
+23:17:55Z. All three covered names carry **no flags**, 3.0–4.0% above stop; the XLK
+watch-note open since Jul 28 resolves as *firmed* (+4.2%, giveback 0.21%). XLI rotation left
+to the normal 10:00 ET fast loop rather than an out-of-band order.
+
+**Standing flag, not addressed here.** `scripts/risk_review.py --selftest` fails
+(`KeyError 'NVDA'`) — pre-existing, called out in `90123ce`'s own message, confirmed there by
+stashing. This job is **armed and places real orders** with a red selftest. Needs its own fix.
+
+**The generalisable lesson:** a permission allowlist is a coupling to the *exact command
+string*, and prompts are code. Changing how a script is invoked is an interface change even
+though nothing in `src/` moved. Grep the allowlists whenever a prompt's command line changes.
+
+---
+
 ## 2026-07-29 — Schwab removed; moomoo is the market-data feed
 
 **Aaron's call, and the right one.** Schwab's 7-day refresh token was the only
