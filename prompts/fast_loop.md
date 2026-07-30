@@ -42,7 +42,14 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
 7. **Place** (only if `live_approved` is true): for each order in `approved`,
    sells first, then buys: `review_equity_order` → on a clean review →
    `place_equity_order` (fractional, dollar-notional, side + amount from the
-   plan). If a review returns a problem, skip that order — and record the skip
+   plan).
+   **If the order carries a `quantity` field, pass `quantity` INSTEAD of
+   `dollar_amount`** — that field appears only on a full exit, and a
+   dollar-denominated sell-all either gets rejected
+   (`EQUITY_DOLLAR_BASED_SELL_ALL_ERROR`) or fills leaving a dust position that
+   is held but off-book, and therefore watched by neither the monitor nor the
+   risk review. Use the amount only as the sanity check on what it should cost.
+   If a review returns a problem, skip that order — and record the skip
    in `fills.json` (step 9) with `"status":"skipped"` and a short `"reason"`
    (e.g. `"pending_settlement"` for an unsettled-cash rejection in this cash
    account — expected after any sell; the buy re-plans next run once cash

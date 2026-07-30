@@ -39,14 +39,27 @@ REBALANCE_BAND = 0.005    # skip trims/adds smaller than 0.5% of the account (ch
 
 
 def plan_orders(targets: dict, positions: dict, account_value: float,
-                *, min_order: float = MIN_ORDER, band: float = REBALANCE_BAND) -> list[dict]:
+                *, min_order: float = MIN_ORDER, band: float = REBALANCE_BAND,
+                shares: dict | None = None) -> list[dict]:
     """Deterministic diff. `targets`={sym: weight}, `positions`={sym: market_value $},
     `account_value`=total $ to allocate. Returns dollar-notional buy/sell orders.
 
     - a target with no/short position -> BUY the shortfall
     - a held name below/above target  -> trim/add to target (unless within `band`)
     - a held name NOT in targets       -> SELL to zero (full exit)
+
+    A FULL EXIT also carries `quantity` (exact shares held, from `shares`), and the
+    placement step must use it instead of the dollar amount. A dollar-denominated
+    sell-all cannot reliably close a position: the amount is computed from a stored
+    mark, so by the time it reaches the broker it is either a hair OVER the live
+    position value -- Robinhood rejects it with EQUITY_DOLLAR_BASED_SELL_ALL_ERROR
+    and fast_loop.md tells the agent to skip the order -- or a hair UNDER, which
+    fills but leaves a dust position behind. Dust is the worse outcome of the two:
+    it stays held, stays OUT of the book, and is therefore watched by neither the
+    monitor nor the risk review. Verified against the live broker on 2026-07-30 with
+    XLI: $4.96 (99.7% of the position) alerted, 0.027904 shares reviewed clean.
     """
+    shares = shares or {}
     orders = []
     for sym in sorted(set(targets) | set(positions)):
         tgt_val = targets.get(sym, 0.0) * account_value
@@ -56,13 +69,21 @@ def plan_orders(targets: dict, positions: dict, account_value: float,
             continue
         if account_value > 0 and abs(delta) / account_value < band and tgt_val > 0:
             continue    # small rebalance of an existing hold -> leave it (churn guard)
-        orders.append({
+        order = {
             "symbol": sym, "side": "buy" if delta > 0 else "sell",
             "amount": round(abs(delta), 2), "target_weight": round(targets.get(sym, 0.0), 4),
             "current_value": round(cur_val, 2), "target_value": round(tgt_val, 2),
             "reason": "exit (not in book)" if tgt_val == 0 else
                       ("open" if cur_val == 0 else "rebalance"),
-        })
+        }
+        # Full exit -> close it by SHARES, not dollars (see docstring). Guarded on a
+        # positive qty: the legacy snapshot schema reports qty=None, and there the
+        # dollar amount remains the only thing we know.
+        if tgt_val == 0 and order["side"] == "sell":
+            qty = shares.get(sym)
+            if qty and qty > 0:
+                order["quantity"] = qty
+        orders.append(order)
     # sells first (free up cash before buys) — matters for a cash account
     return sorted(orders, key=lambda o: (o["side"] != "sell", -o["amount"]))
 
@@ -190,6 +211,33 @@ def _selftest() -> None:
               f"[{o['reason']}] {o['current_value']}->{o['target_value']}")
     # expected: SELL TSLA $12 (exit), SELL NVDA $0 (30->30 within band=skip),
     #           BUY MSFT $30 (open), BUY AAPL $25 (5->30)
+
+    # A full exit must carry `quantity` so the agent closes it by SHARES. A
+    # dollar-denominated sell-all is computed from a stored mark and so reaches the
+    # broker either just over the live position value (rejected:
+    # EQUITY_DOLLAR_BASED_SELL_ALL_ERROR -> fast_loop.md skips the order) or just
+    # under (fills, leaves dust that is held but off-book, hence watched by neither
+    # the monitor nor the risk review). Confirmed live on 2026-07-30 with XLI.
+    ex = {o["symbol"]: o for o in plan_orders(targets, positions, acct,
+                                              shares={"TSLA": 0.0279, "NVDA": 1.5})}
+    assert ex["TSLA"]["quantity"] == 0.0279, ex["TSLA"]
+    assert ex["TSLA"]["side"] == "sell" and ex["TSLA"]["target_value"] == 0
+    # a partial trim is NOT a full exit -> stays dollar-denominated
+    trim = {o["symbol"]: o for o in plan_orders({"NVDA": 0.02}, {"NVDA": 30.0}, acct,
+                                                shares={"NVDA": 1.5})}
+    assert "quantity" not in trim["NVDA"], trim["NVDA"]
+    # buys are never quantity-denominated
+    assert all("quantity" not in o for o in plan_orders(targets, positions, acct,
+                                                        shares={"MSFT": 9.9})
+               if o["side"] == "buy")
+    # legacy snapshot (qty unknown) must fall back to dollars, not emit qty=None
+    legacy = {o["symbol"]: o for o in plan_orders(targets, positions, acct,
+                                                  shares={"TSLA": None})}
+    assert "quantity" not in legacy["TSLA"], legacy["TSLA"]
+    assert legacy["TSLA"]["amount"] == 12.0
+    # and with no shares mapping at all, behaviour is exactly as before
+    assert "quantity" not in {o["symbol"]: o for o in plan_orders(
+        targets, positions, acct)}["TSLA"]
     syms = {o["symbol"]: o for o in plan}
     assert syms["TSLA"]["side"] == "sell" and syms["TSLA"]["amount"] == 12.0
     assert syms["MSFT"]["side"] == "buy" and syms["MSFT"]["amount"] == 30.0
@@ -281,9 +329,11 @@ def main() -> None:
         sys.exit(f"no RH snapshot at {args.snapshot}\n  (the agent writes it from "
                  f"get_equity_positions + get_portfolio before running the fast loop)")
     positions = {s: p["value"] for s, p in valued["positions"].items()}
+    # exact share counts, so a full exit can be closed by quantity rather than $
+    held_shares = {s: p.get("qty") for s, p in valued["positions"].items()}
     acct = valued["account_value"]
 
-    plan = plan_orders(targets, positions, acct)
+    plan = plan_orders(targets, positions, acct, shares=held_shares)
     print(f"target book as_of {prod.as_of} | regime {prod.regime['status']} | "
           f"account ${acct:,.2f} | {len(targets)} targets")
 
