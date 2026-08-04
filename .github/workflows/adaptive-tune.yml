@@ -69,6 +69,10 @@ jobs:
           # Without these the live half silently contributes nothing (live_n=0).
           mkdir -p research_store/archive
           cp _ledger/archive/*.json        research_store/archive/ 2>/dev/null || true
+          # Echo the counts: with zero stop-outs the proposal looks identical whether
+          # or not the archive arrived, so the copy needs its own evidence in the log.
+          echo "ledger mirror: $(ls research_store/archive/*.json 2>/dev/null | wc -l) archived books, \
+$(wc -l < research_store/journal.jsonl 2>/dev/null || echo 0) journal lines"
 
       - name: Run the tuner
         run: |
