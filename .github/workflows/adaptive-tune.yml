@@ -64,6 +64,11 @@ jobs:
           cp _ledger/prices/highs.parquet  research_store/prices/ 2>/dev/null || true
           cp _ledger/prices/lows.parquet   research_store/prices/ 2>/dev/null || true
           cp _ledger/journal.jsonl         research_store/journal.jsonl 2>/dev/null || true
+          # Archived books carry each decision's entry_zone/stop/sigma — the geometry
+          # the live stop-out join needs to recover the multiple that was in force.
+          # Without these the live half silently contributes nothing (live_n=0).
+          mkdir -p research_store/archive
+          cp _ledger/archive/*.json        research_store/archive/ 2>/dev/null || true
 
       - name: Run the tuner
         run: |

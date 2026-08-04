@@ -8,6 +8,69 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-08-04 — the adaptive layer's live half was a stub; now wired
+
+Routine system review. Everything scheduled is running (all 8 `health.checks()` green,
+`repo_checks` PASS, moomoo feed clean at 168/168 bars). The finding was in the adaptive
+dial, and it is the same failure class as the signal panel that had never run.
+
+### What was wrong
+
+`scripts/tune_stop.py::_live_stop_samples()` **hard-returned `np.zeros(...)`** with the
+comment *"reserved for realized_history join; live_n=0 first cut"*. Every weekly proposal
+since 2026-07-23 has reported `live_n: 0`. That was written as a placeholder to be filled
+in "once live outcomes exist" — but it was **unconditional**, so it could never turn itself
+on. The promotion standard recorded at build time says *don't promote unless `live_n` is
+not ~0*; taken together, the tuner's own graduation criterion was **unsatisfiable by
+construction**. It would have gone on emitting confident, clean-looking proposals built
+purely on survivorship-biased replay, forever.
+
+**It has cost nothing so far.** There have been **zero live stop-outs in the entire
+history** — all 14 ledger outcomes are `rebalanced`/`regime_off` with `hit_stop: false`.
+A perfect implementation would also have contributed zero samples. The bug was a landmine,
+not an active loss: it would have first bitten on the first real stop-out, silently.
+
+### The join
+
+Live stop-outs now fold into the grid bucket for the multiple that was **in force for that
+decision**, recovered per-decision as `(entry - stop) / (entry * sigma)` from the archived
+thesis rather than read from today's config — so samples stay correctly bucketed across a
+promotion that moves the dial. Verified exact against all 14 live theses (2.5 ± 0.0008).
+Objective is `realized_R = pnl_pct / risk_pct`, the same mean-realized-R the replay half
+optimises. Only `hit_stop` outcomes contribute; a rotation or regime-flip exit says nothing
+about where the stop belongs. A live sample lands **only** in its own bucket — it carries no
+counterfactual, which is precisely what the replay half is for.
+
+### The second, quieter bug
+
+`deploy/backup_ledger.sh` ships `archive/*.json` to the mirror, but the CI workflow only
+copied `journal.jsonl` into the working tree. The archive holds the `entry_zone`/`stop`/
+`sigma` the join needs — so the join would have been **dead on arrival off-box** even once
+implemented, and dead in the same silent way. Workflow now copies the archive too.
+
+### Making the silence impossible to repeat
+
+The artifact now reports `live_stopouts_seen` (what the ledger holds) alongside `live_n`
+(what the join used), plus `live_join_healthy`. Equal = healthy; `seen > live_n` means the
+archive is missing or mismatched and the live half is being starved. A future starvation
+is now visible in the proposal itself rather than hiding behind a plausible `live_n: 0`.
+
+### Verification
+
+TDD throughout — test written first, failure witnessed (`NameError`), then implementation.
+`--selftest` covers bucketing, realized-R, empty-ledger, and the drift count on
+hand-computed vectors. End-to-end on a **real** archived thesis (`MU:2026-08-03`) with a
+synthetic stop-out at exactly the stop price: lands in bucket 2.5, realized R = −1.0000,
+`live_n` 0→1. Full tuner re-run reproduces the 2026-08-03 CI numbers **exactly**
+(`p_better` 0.6602, `replay_n` 13040, identical posterior), confirming the change is
+behaviour-neutral while there is nothing live to fold in.
+
+**Dial state unchanged:** `stop_atr_mult` is still 2.5. No proposal has ever been promoted;
+`config/strategy.adaptive.toml` does not exist. The latest proposal retains the incumbent —
+challenger 2.0 leads but at `p_better=0.66`, below the 0.90 gate. The gate is working.
+
+---
+
 ## 2026-07-30 (later) — the two deferred follow-ups, both closed
 
 Same evening as the outage entry below. Aaron: "just fix so it runs correctly."
