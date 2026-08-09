@@ -119,6 +119,16 @@ def concentration(positions: dict, account_value: float, max_pct: float) -> dict
     then be unreachable and this would report a confident PASS. Both a
     position's `value` and `account_value` are validated with
     `math.isfinite()`, not just a type check.
+
+    This is a long-only cash account: no shorting, no margin. A negative
+    position `value` therefore cannot be a real short exposure -- it means the
+    data is corrupt. `max(shares, key=...)` would pick the signed maximum, so
+    a negative mark either (a) is alone and reads as a small negative "PASS",
+    or (b) sits next to a smaller positive mark and vanishes from the
+    assessment entirely while the positive one is reported as worst. Both are
+    silent failures on a criterion that authorises action, so a negative
+    value is rejected up front, same as None/NaN/+-inf. Exactly 0.0 (dust, or
+    a written-down position) is legitimate and handled normally.
     """
     out = {"criterion": "concentration", "state": INSUFFICIENT, "value": None,
            "limit": max_pct, "room": None, "worst_symbol": None, "reason": ""}
@@ -140,6 +150,13 @@ def concentration(positions: dict, account_value: float, max_pct: float) -> dict
             return out
         if not math.isfinite(fv):
             out["reason"] = f"{sym} has a non-finite mark; concentration unmeasurable"
+            return out
+        if fv < 0.0:
+            out["reason"] = (
+                f"{sym} has a negative market value ({fv:.2f}); a long-only cash "
+                "account cannot hold a negative position, so this indicates "
+                "corrupt data, not a short exposure; concentration unmeasurable"
+            )
             return out
         shares[sym] = fv / av
     if not shares:
@@ -299,6 +316,51 @@ def _selftest() -> None:
     assert r_ord["state"] == PASS, r_ord
     assert r_ord["worst_symbol"] == "AAA" and abs(r_ord["value"] - 0.10) < 1e-9, r_ord
     assert abs(r_ord["room"] - 0.05) < 1e-9, r_ord
+
+    # --- negative market value discipline (review finding) ---------------------
+    # A long-only cash account cannot hold a negative position: a negative
+    # `value` means the data is corrupt, not that there is a short exposure.
+    # `max(shares, key=...)` picks the signed maximum, so a lone negative mark
+    # used to read as a small negative "PASS" -- must be INSUFFICIENT instead.
+    r_neg_solo = concentration({"AAA": {"value": -20.0}}, 100.0, mc)
+    assert r_neg_solo["state"] == INSUFFICIENT, r_neg_solo
+    assert r_neg_solo["value"] is None, r_neg_solo
+    assert r_neg_solo["worst_symbol"] is None, r_neg_solo
+    assert "AAA" in r_neg_solo["reason"], r_neg_solo
+    assert "negative" in r_neg_solo["reason"], r_neg_solo
+    # a negative mark next to a smaller positive one must NOT be shadowed: the
+    # old signed-max bug picked BBB as worst and dropped AAA from the
+    # assessment entirely. Must be INSUFFICIENT naming AAA, not a PASS on BBB.
+    r_neg_shadow = concentration(
+        {"AAA": {"value": -20.0}, "BBB": {"value": 5.0}}, 100.0, mc
+    )
+    assert r_neg_shadow["state"] == INSUFFICIENT, r_neg_shadow
+    assert r_neg_shadow["worst_symbol"] != "BBB", r_neg_shadow
+    assert r_neg_shadow["worst_symbol"] is None, r_neg_shadow
+    assert "AAA" in r_neg_shadow["reason"], r_neg_shadow
+    # order must not matter -- the negative mark is caught regardless of
+    # dict iteration order
+    r_neg_shadow_rev = concentration(
+        {"BBB": {"value": 5.0}, "AAA": {"value": -20.0}}, 100.0, mc
+    )
+    assert r_neg_shadow_rev["state"] == INSUFFICIENT, r_neg_shadow_rev
+    assert "AAA" in r_neg_shadow_rev["reason"], r_neg_shadow_rev
+    # a zero-value position is LEGITIMATE (dust, or fully written down) --
+    # 0.0 < 0.0 is False, so it must NOT be caught by the negative check and
+    # must be handled exactly as any other ordinary position.
+    r_zero = concentration({"AAA": {"value": 0.0}, "BBB": {"value": 5.0}}, 100.0, mc)
+    assert r_zero["state"] == PASS, r_zero
+    assert r_zero["worst_symbol"] == "BBB" and abs(r_zero["value"] - 0.05) < 1e-9, r_zero
+    assert abs(r_zero["room"] - 0.10) < 1e-9, r_zero
+    r_zero_solo = concentration({"AAA": {"value": 0.0}}, 100.0, mc)
+    assert r_zero_solo["state"] == PASS, r_zero_solo
+    assert r_zero_solo["worst_symbol"] == "AAA" and r_zero_solo["value"] == 0.0, r_zero_solo
+    assert abs(r_zero_solo["room"] - abs(mc)) < 1e-9, r_zero_solo
+    # a clean book (no negative marks at all) is entirely unaffected
+    r_clean = concentration(pos, 100.0, mc)
+    assert r_clean["state"] == PASS, r_clean
+    assert r_clean["worst_symbol"] == "AAA" and abs(r_clean["value"] - 0.10) < 1e-9, r_clean
+    assert abs(r_clean["room"] - 0.05) < 1e-9, r_clean
 
     print("selftest OK: mandate loads, terms match")
 
