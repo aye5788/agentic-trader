@@ -338,6 +338,13 @@ def status(equity: list[float], benchmark: list[float], positions: dict,
     `tradeable` is False when a BLOCKING criterion fails or cannot be measured.
     Informational criteria never affect it: they judge whether autonomy is
     working, not whether an order is safe.
+
+    EXCEPTION HANDLING: this function does NOT catch exceptions. A malformed `cfg`
+    (e.g. missing required keys) or an unexpected bug in a criterion function will
+    propagate as a crash rather than being converted into a degraded status. This
+    is intentional and consistent with the module's fail-loud design: load() raises
+    rather than defaulting, and callers (such as the intraday monitor) must be
+    aware that a crash is possible and handle it in their own error boundaries.
     """
     m = cfg or load()
     crit = {
@@ -837,6 +844,72 @@ def _selftest() -> None:
     assert all_dark["informational_fail"] == [], all_dark
     assert all_dark["tradeable"] is False, all_dark
     assert all_dark["degraded"] is True, all_dark
+
+    # --- four permanently-verified combinations (review findings 2026-08-09) ----
+    # Case 1: concentration FAIL alone (drawdown PASS) -> blocking_fail=["concentration"],
+    # tradeable=False, degraded=False.
+    # 10% drawdown against 15% limit = PASS; 20% position against 15% limit = FAIL
+    conc_fail_alone = status(
+        equity=[100.0, 90.0], benchmark=[50.0, 50.0],
+        positions={"AAA": {"value": 20.0}}, account_value=100.0,
+        outcomes=[], asof="2026-08-09")
+    assert conc_fail_alone["blocking_fail"] == ["concentration"], conc_fail_alone
+    assert conc_fail_alone["blocking_unmeasurable"] == [], conc_fail_alone
+    assert conc_fail_alone["tradeable"] is False, conc_fail_alone
+    assert conc_fail_alone["degraded"] is False, conc_fail_alone
+
+    # Case 2: drawdown INSUFFICIENT_DATA alone (concentration PASS) ->
+    # blocking_unmeasurable=["drawdown"], tradeable=False, degraded=True.
+    # Only 1 equity point = INSUFFICIENT; positions 10% = PASS
+    dd_insufficient_alone = status(
+        equity=[100.0], benchmark=[50.0],
+        positions={"AAA": {"value": 10.0}}, account_value=100.0,
+        outcomes=[], asof="2026-08-09")
+    assert dd_insufficient_alone["blocking_fail"] == [], dd_insufficient_alone
+    assert dd_insufficient_alone["blocking_unmeasurable"] == ["drawdown"], dd_insufficient_alone
+    assert dd_insufficient_alone["tradeable"] is False, dd_insufficient_alone
+    assert dd_insufficient_alone["degraded"] is True, dd_insufficient_alone
+
+    # Case 3: one blocking criterion FAIL, the other INSUFFICIENT_DATA ->
+    # both blocking lists populated, tradeable=False, degraded=True.
+    # Drawdown INSUFFICIENT (only 1 point); concentration FAIL (25% > 15%)
+    mixed_blocking = status(
+        equity=[100.0], benchmark=[50.0],
+        positions={"AAA": {"value": 25.0}}, account_value=100.0,
+        outcomes=[], asof="2026-08-09")
+    assert mixed_blocking["blocking_fail"] == ["concentration"], mixed_blocking
+    assert mixed_blocking["blocking_unmeasurable"] == ["drawdown"], mixed_blocking
+    assert mixed_blocking["tradeable"] is False, mixed_blocking
+    assert mixed_blocking["degraded"] is True, mixed_blocking
+
+    # Case 4: all four criteria PASS -> all lists empty, tradeable=True,
+    # degraded=False. Requires: drawdown < 15%, concentration < 15%, 4+ distinct
+    # closed trades each < 40% of total with positive sum, and book return >=
+    # benchmark return >= 0 over the window.
+    # Equity: 60 points, starting at 100, ending at 110 (+10% return, no DD)
+    # Benchmark: 60 points, starting at 50, ending at 52.5 (+5% return, lower)
+    # Positions: AAA at 10% of equity (< 15%) = $10 of $100
+    # Outcomes: 4 trades over last 90 days, realistic profit distribution,
+    # no single trade > 40% of $120 total, >= 4 distinct names
+    full_eq = [100.0] * 58 + [100.0, 110.0]  # 60 points: PASS drawdown
+    full_bm = [50.0] * 58 + [50.0, 52.5]     # 60 points: +10% vs +5%
+    full_pos = {"AAA": {"value": 10.0}}      # 10% of $100: PASS concentration
+    full_outcomes = [
+        _o("A", 1, 35.0),   # 35/120 = 29.2% of profit
+        _o("B", 2, 35.0),   # 35/120 = 29.2%
+        _o("C", 3, 30.0),   # 30/120 = 25.0%
+        _o("D", 4, 20.0)    # 20/120 = 16.7%
+        # Total: $120, max single: 35 (29.2% < 40%), 4 distinct names
+    ]
+    all_pass = status(
+        equity=full_eq, benchmark=full_bm,
+        positions=full_pos, account_value=100.0,
+        outcomes=full_outcomes, asof="2026-08-09")
+    assert all_pass["blocking_fail"] == [], all_pass
+    assert all_pass["blocking_unmeasurable"] == [], all_pass
+    assert all_pass["informational_fail"] == [], all_pass
+    assert all_pass["tradeable"] is True, all_pass
+    assert all_pass["degraded"] is False, all_pass
 
     print("selftest OK: mandate -- 4 criteria three-state, blocking vs "
           "informational, unmeasurable never passes")
