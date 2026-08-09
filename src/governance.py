@@ -106,6 +106,41 @@ def whitelist(cfg) -> set[str]:
     return col(cfg["universe"]["source"]) | col(cfg["etf_sleeve"]["source"])
 
 
+def assert_agentic_account(accounts, snapshot_account: str | None = None) -> str:
+    """Resolve THE one tradeable account, or raise. This is Layer 1.
+
+    The reference system at /opt/trading gets its Layer 1 from the endpoint: a
+    paper key that cannot reach real money at all. We have no equivalent — the
+    same token reaches every Robinhood account — so this guard is the boundary,
+    and it must be code rather than an instruction in a prompt.
+
+    Raises PermissionError on: no authorised account, more than one, or a
+    mismatch against the account a snapshot was taken from. Never guesses.
+
+    `agentic_allowed` must be the literal boolean True — deliberately `is True`,
+    not truthy. A string "true" or an int 1 must NOT authorise an account: this
+    mirrors the fail-closed style used elsewhere in this file (drawdown_halt,
+    vet_plan) where a loosely-typed value must never slide through the
+    permissive branch of the ONE guard standing between the agent and every
+    other account the user owns.
+    """
+    allowed = [a for a in (accounts or [])
+               if a.get("agentic_allowed") is True and a.get("account_number")]
+    if not allowed:
+        raise PermissionError(
+            "no account with agentic_allowed=true; placing nothing")
+    if len(allowed) > 1:
+        raise PermissionError(
+            f"expected exactly one agentic_allowed account, found {len(allowed)}: "
+            f"{sorted(str(a['account_number']) for a in allowed)}; placing nothing")
+    acct = str(allowed[0]["account_number"])
+    if snapshot_account is not None and str(snapshot_account) != acct:
+        raise PermissionError(
+            f"account mismatch: snapshot is from {snapshot_account!r} but the "
+            f"authorised account is {acct!r}; placing nothing")
+    return acct
+
+
 def gates(account_value: float, cfg) -> dict:
     """THE governance verdict, evaluated before any order.
 
@@ -339,9 +374,93 @@ def _selftest() -> None:
                 assert appr == [sell], bad
                 assert len(blkd) == 1 and "account value is invalid" in blkd[0]["blocked"]
 
+            # --- account scoping: OUR layer 1, since no paper endpoint exists ---
+            accts = [{"account_number": "111", "agentic_allowed": False},
+                     {"account_number": "222", "agentic_allowed": True}]
+            assert assert_agentic_account(accts) == "222"
+            # zero authorised accounts must raise, never fall through
+            try:
+                assert_agentic_account([{"account_number": "111",
+                                         "agentic_allowed": False}])
+                raise AssertionError("must raise when no account is authorised")
+            except PermissionError as e:
+                assert "no account" in str(e).lower(), e
+            # MORE than one is ambiguous and must raise rather than pick
+            try:
+                assert_agentic_account([{"account_number": "1", "agentic_allowed": True},
+                                        {"account_number": "2", "agentic_allowed": True}])
+                raise AssertionError("must raise on ambiguity")
+            except PermissionError as e:
+                assert "exactly one" in str(e).lower(), e
+            # a snapshot naming a DIFFERENT account must raise
+            try:
+                assert_agentic_account(accts, snapshot_account="111")
+                raise AssertionError("must raise on account mismatch")
+            except PermissionError as e:
+                assert "mismatch" in str(e).lower(), e
+            # matching snapshot is fine
+            assert assert_agentic_account(accts, snapshot_account="222") == "222"
+            # empty/garbage input raises rather than returning something falsy
+            for bad in ([], None):
+                try:
+                    assert_agentic_account(bad)
+                    raise AssertionError("must raise on empty account list")
+                except PermissionError:
+                    pass
+
+            # a truthy STRING "true" is not authorisation -- only the literal
+            # boolean True unlocks an account (mirrors the NaN-fail-closed style
+            # elsewhere in this file: don't let a loosely-typed value slide
+            # through a permissive branch).
+            try:
+                assert_agentic_account([{"account_number": "111", "agentic_allowed": "true"},
+                                         {"account_number": "222", "agentic_allowed": False}])
+                raise AssertionError("string 'true' must not authorise an account")
+            except PermissionError as e:
+                assert "no account" in str(e).lower(), e
+            # int 1 is truthy and == True, but is not `is True` -- must not authorise
+            try:
+                assert_agentic_account([{"account_number": "111", "agentic_allowed": 1}])
+                raise AssertionError("int 1 must not authorise an account")
+            except PermissionError as e:
+                assert "no account" in str(e).lower(), e
+            # agentic_allowed key absent entirely -- absence is not authorisation
+            try:
+                assert_agentic_account([{"account_number": "111"}])
+                raise AssertionError("missing agentic_allowed key must not authorise")
+            except PermissionError as e:
+                assert "no account" in str(e).lower(), e
+            # account_number empty or None on an otherwise-allowed account: an
+            # account we cannot name is one we must not trade
+            for bad_num in ("", None):
+                try:
+                    assert_agentic_account([{"account_number": bad_num, "agentic_allowed": True}])
+                    raise AssertionError(f"empty/None account_number ({bad_num!r}) must not authorise")
+                except PermissionError as e:
+                    assert "no account" in str(e).lower(), e
+            # snapshot_account as an int must match an account_number stored as a
+            # string, and vice versa. DECISION: this SHOULD match. Account
+            # numbers cross several boundaries in this repo (RH MCP JSON, the
+            # snapshot writer, hand-typed config) that are not disciplined about
+            # int vs str for what is the same real-world account number: the
+            # comparison must be about IDENTITY of the account, not the JSON
+            # type that happened to carry it. The implementation already
+            # normalises both sides through str() for exactly this reason, so a
+            # type-only mismatch must never cause a false "mismatch" refusal
+            # here -- that would be a spurious block on the ONLY account this
+            # system is allowed to trade, which is worse than being lenient on
+            # type.
+            assert assert_agentic_account(
+                [{"account_number": "222", "agentic_allowed": True}],
+                snapshot_account=222) == "222"
+            assert assert_agentic_account(
+                [{"account_number": 222, "agentic_allowed": True}],
+                snapshot_account="222") == "222"
+
         print("selftest OK: governance two-tier gates "
               "(only the kill switch blocks a sell), peak, whitelist, order cap, "
-              "NaN/inf account_value and order-amount fail-closed handling")
+              "NaN/inf account_value and order-amount fail-closed handling, "
+              "account-scoping layer 1 (assert_agentic_account)")
     finally:
         REPO, STATE = _repo, _state
 
