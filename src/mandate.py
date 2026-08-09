@@ -264,6 +264,66 @@ def pnl_concentration(outcomes: list[dict], asof: str, window_days: int,
     return out
 
 
+def relative_return(equity: list[float], benchmark: list[float],
+                    window_days: int) -> dict:
+    """Criterion 4 (INFORMATIONAL -- never gates an order). Total return of the
+    marked book against the benchmark over the trailing window, with a floor of
+    >= 0 on the book's own return.
+
+    Assumes no deposits or withdrawals across the window: the equity series is a
+    pure mark-to-market curve, so a change in value is entirely P&L.
+
+    Same non-finite trap as `drawdown()`/`concentration()`/`pnl_concentration()`:
+    NaN and +/-Infinity are valid Python floats, so an `isinstance(v, (int,
+    float))` check alone would not exclude them, and because every comparison
+    against NaN is False, a NaN could make a FAIL branch unreachable and read as
+    a confident PASS. The math here only reads each series' two window
+    endpoints, but a non-finite value ANYWHERE in the window -- including an
+    interior point neither endpoint touches -- means the series is corrupt and
+    the window cannot be trusted, so the whole series (not just the endpoints)
+    is scanned with `math.isfinite()` before any ratio is taken.
+    """
+    out = {"criterion": "relative_return", "state": INSUFFICIENT, "value": None,
+           "benchmark_return": None, "limit": 0.0, "room": None, "reason": ""}
+    if len(equity) != len(benchmark):
+        out["reason"] = (f"series misaligned: {len(equity)} equity vs "
+                         f"{len(benchmark)} benchmark points")
+        return out
+    if len(equity) < window_days:
+        out["reason"] = (f"need {window_days} daily closes, have {len(equity)} "
+                         "-- criterion not yet mature")
+        return out
+
+    window_eq = equity[-window_days:]
+    window_bm = benchmark[-window_days:]
+    for label, series in (("equity", window_eq), ("benchmark", window_bm)):
+        for v in series:
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                out["reason"] = f"non-numeric {label} value ({v!r}) in window"
+                return out
+            if not math.isfinite(fv):
+                out["reason"] = f"non-finite {label} value ({v!r}) in window"
+                return out
+
+    e0, e1 = float(window_eq[0]), float(window_eq[-1])
+    b0, b1 = float(window_bm[0]), float(window_bm[-1])
+    if e0 <= 0 or b0 <= 0:
+        out["reason"] = "non-positive starting value; return undefined"
+        return out
+    er, br = e1 / e0 - 1.0, b1 / b0 - 1.0
+    out.update(value=er, benchmark_return=br, room=er - br)
+    if er < 0:
+        out["state"] = FAIL
+        out["reason"] = (f"book {er:+.2%} vs benchmark {br:+.2%} over {window_days}d "
+                         "-- below the >= 0 floor")
+        return out
+    out["state"] = PASS if er >= br else FAIL
+    out["reason"] = f"book {er:+.2%} vs benchmark {br:+.2%} over {window_days}d"
+    return out
+
+
 def _selftest() -> None:
     m = load()
     assert m["drawdown"]["max_pct"] == 0.15, m["drawdown"]
@@ -582,6 +642,78 @@ def _selftest() -> None:
     assert r_non_outcome["state"] == PASS, r_non_outcome
     assert r_non_outcome["distinct_names"] == 4, r_non_outcome
     assert abs(r_non_outcome["value"] - 0.30) < 1e-9, r_non_outcome
+
+    # --- criterion 4: relative return (informational) -------------------------
+    # book +10%, SPY +5% over the window -> PASS
+    eq = [100.0] * 58 + [100.0, 110.0]
+    spy = [50.0] * 58 + [50.0, 52.5]
+    r = relative_return(eq, spy, 60)
+    assert r["state"] == PASS, r
+    assert abs(r["value"] - 0.10) < 1e-9 and abs(r["benchmark_return"] - 0.05) < 1e-9, r
+    assert abs(r["room"] - 0.05) < 1e-9, r
+    # book +2%, SPY +5% -> FAIL (lagging the benchmark)
+    assert relative_return([100.0] * 59 + [102.0], spy, 60)["state"] == FAIL
+    # book DOWN beats a worse SPY on relative terms, but the >= 0 floor still fails it
+    r = relative_return([100.0] * 59 + [98.0], [50.0] * 59 + [45.0], 60)
+    assert r["state"] == FAIL and "floor" in r["reason"], r
+    # too little history -> INSUFFICIENT (22 rows is the real 2026-08-09 state)
+    r = relative_return([100.0] * 22, [50.0] * 22, 60)
+    assert r["state"] == INSUFFICIENT and "22" in r["reason"], r
+    # mismatched series lengths are a data error, not a pass
+    assert relative_return([100.0] * 60, [50.0] * 59, 60)["state"] == INSUFFICIENT
+    # a non-positive starting value makes the return undefined
+    assert relative_return([0.0] * 60, [50.0] * 60, 60)["state"] == INSUFFICIENT
+
+    # --- non-finite discipline (same trap as drawdown/concentration/pnl) -------
+    nan = float("nan")
+    pos_inf = float("inf")
+    neg_inf = float("-inf")
+    # non-finite at the equity window's START endpoint
+    r_nan_e0 = relative_return([nan] + [100.0] * 59, spy, 60)
+    assert r_nan_e0["state"] == INSUFFICIENT, r_nan_e0
+    assert "non-finite" in r_nan_e0["reason"], r_nan_e0
+    # non-finite at the equity window's END endpoint (most recent)
+    r_nan_e1 = relative_return([100.0] * 59 + [pos_inf], spy, 60)
+    assert r_nan_e1["state"] == INSUFFICIENT, r_nan_e1
+    assert "non-finite" in r_nan_e1["reason"], r_nan_e1
+    # non-finite at an INTERIOR point of equity (not an endpoint) -- the return
+    # only reads the two endpoints, but a corrupt series in between still means
+    # the series cannot be trusted and must not silently read as clean
+    r_nan_e_mid = relative_return(
+        [100.0] * 29 + [neg_inf] + [100.0] * 29 + [110.0], spy, 60
+    )
+    assert r_nan_e_mid["state"] == INSUFFICIENT, r_nan_e_mid
+    assert "non-finite" in r_nan_e_mid["reason"], r_nan_e_mid
+    # non-finite at the benchmark window's START endpoint
+    r_nan_b0 = relative_return(eq, [nan] + [50.0] * 59, 60)
+    assert r_nan_b0["state"] == INSUFFICIENT, r_nan_b0
+    assert "non-finite" in r_nan_b0["reason"], r_nan_b0
+    # non-finite at the benchmark window's END endpoint (most recent)
+    r_nan_b1 = relative_return(eq, [50.0] * 59 + [nan], 60)
+    assert r_nan_b1["state"] == INSUFFICIENT, r_nan_b1
+    assert "non-finite" in r_nan_b1["reason"], r_nan_b1
+    # non-finite at an INTERIOR point of benchmark
+    r_nan_b_mid = relative_return(
+        eq, [50.0] * 29 + [pos_inf] + [50.0] * 29 + [52.5], 60
+    )
+    assert r_nan_b_mid["state"] == INSUFFICIENT, r_nan_b_mid
+    assert "non-finite" in r_nan_b_mid["reason"], r_nan_b_mid
+    # a zero starting value in the BENCHMARK is undefined, same as equity
+    r_zero_b0 = relative_return(eq, [0.0] * 59 + [52.5], 60)
+    assert r_zero_b0["state"] == INSUFFICIENT, r_zero_b0
+    assert "non-positive" in r_zero_b0["reason"], r_zero_b0
+    # both series entirely flat -- zero return on both sides. Book return (0.0)
+    # is not < 0 so the floor is satisfied, and 0.0 >= 0.0 (benchmark) is also
+    # satisfied -> PASS, matching neither, doesn't beat, the benchmark either.
+    r_flat = relative_return([100.0] * 60, [50.0] * 60, 60)
+    assert r_flat["state"] == PASS, r_flat
+    assert r_flat["value"] == 0.0 and r_flat["benchmark_return"] == 0.0, r_flat
+    assert r_flat["room"] == 0.0, r_flat
+    # a clean series is entirely unaffected by the non-finite handling
+    r_clean_rr = relative_return(eq, spy, 60)
+    assert r_clean_rr["state"] == PASS, r_clean_rr
+    assert abs(r_clean_rr["value"] - 0.10) < 1e-9, r_clean_rr
+    assert abs(r_clean_rr["benchmark_return"] - 0.05) < 1e-9, r_clean_rr
 
     print("selftest OK: mandate loads, terms match")
 
