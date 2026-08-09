@@ -247,10 +247,8 @@ Then arm.
 
 ## 11. Open items
 
-1. **Wake registration mechanism.** The reference rides moomoo server-side conditions
-   (`watcher.py: sync_server_triggers` / `drop_server_trigger`). We run OpenD here so
-   the capability exists, but this is the part of that system understood least — it
-   needs `session.py` and `watcher.py` read properly before building, not guessed at.
+1. ~~**Wake registration mechanism**~~ — **RESOLVED 2026-08-09**, read on `moom`. See
+   §12.
 2. **Mandate criterion 4** — chosen for meaning over ease of measurement; most likely
    of the four to need revision after live observation.
 3. **Liquidity threshold numbers** — the gate replacing the whitelist needs concrete
@@ -260,3 +258,60 @@ Then arm.
 5. Whether the epistemic layer (`rule_out` / `open_question` / `research_log`) ships
    with v1 or immediately after. It is not needed for the agent to trade correctly,
    but every session run without it produces reasoning that is lost.
+
+## 12. The wake mechanism (resolved)
+
+Read from `/opt/trading` on `moom`, 2026-08-09.
+
+**Registration** (`watcher/registry.py`) — a **typed whitelist**, not free text. Nine
+trigger types, each with a param schema validated strictly (missing params rejected,
+*extra* params rejected, every value type-checked). `reason` is mandatory. Rows are
+SQLite with `priority` (1–3, only priority-1 survives when the wake budget runs low),
+`cooldown_s`, `expires_at` (TTL, default 24h — *"triggers must not outlive the thesis
+that created them"*), `max_fires`, an optional `question_id` link, and `server_key`.
+
+```
+price_above / price_below      {symbol, value}
+pct_change_from_open           {symbol, pct}
+realized_vol_expansion         {symbol, lookback, mult}
+spread_widen_bps               {symbol, bps}
+volume_vs_adv                  {symbol, mult}
+position_pnl_cross             {symbol, usd}
+portfolio_drawdown_pct         {pct}
+option_unusual_activity        {underlying, min_contracts, max_dte}
+```
+
+**Server-side mirror** (`watcher.py: sync_server_triggers`) — `price_above` and
+`price_below` are mirrored into **moomoo's price-reminder engine**:
+`ctx.set_price_reminder(code, op=ADD, reminder_type=PRICE_UP|PRICE_DOWN, freq, value,
+note="wt<trigger_id>")`. Their stated reason: *"no polling, no local compute, and the
+alert survives this process dying."* The other seven types evaluate locally.
+
+**Fire path is a PUSH, not a poll.** `PriceReminderHandlerBase.on_recv_rsp` →
+`on_price_reminder(data)`, attached via `ctx.set_handler(Reminder())` + `ctx.start()`.
+The `note="wt<id>"` maps a fired reminder back to its local row.
+
+**Dispatch** (`dispatcher.py`) — fire-and-forget on a daemon thread: *"Tier 1 never
+waits on Claude."* A fire spawns a **full-authority session**, not an alert.
+
+### Porting notes
+
+- Everything needed exists here: same SDK, same OpenD. But this repo is **entirely
+  poll-based today** — `set_handler` push callbacks are a new pattern in
+  `src/adapters/moomoo/`.
+- ⚠️ **Cross-repo hazard that does not exist on `moom`.** Our OpenD is **shared with
+  `moomoo-vol-desk`**, and price reminders are account-level state on moomoo's
+  servers. Both repos setting reminders means each process's handler receives the
+  other's fires, and cleanup in one can clear the other's. Their `note="wt<id>"`
+  convention is exactly the mitigation — we need our own namespace prefix and must
+  filter incoming fires on it. `moom` has a dedicated OpenD and never had to think
+  about this.
+- Their own scar worth not repeating: `server_keys` was in-memory, so every watcher
+  restart lost the ability to clean up server-side reminders (orphaned reminders
+  accumulate at the broker). Persist the mapping.
+- **Opportunity beyond wakes:** a server-side reminder *survives this process dying*.
+  Our stops are software-only and vanish with the monitor — the single biggest
+  weakness in the current design. Mirroring each agent-set stop level as a price
+  reminder would give a broker-side alert that outlives the host. It cannot place the
+  sell, so it is not a stop, but it converts a silent unprotected position into a loud
+  one. Worth considering once the core inversion is in.
