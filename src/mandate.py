@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import sys
 import tomllib
+from datetime import datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -170,6 +171,96 @@ def concentration(positions: dict, account_value: float, max_pct: float) -> dict
     out["state"] = FAIL if shares[worst] > abs(max_pct) else PASS
     out["reason"] = (f"{worst} at {shares[worst]:.1%} of equity "
                      f"(limit {abs(max_pct):.0%})")
+    return out
+
+
+def _as_date(ts: str):
+    """Parse an ISO timestamp to a date. Returns None if unparseable — callers
+    must treat that as missing data, never as in-window."""
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).date()
+    except Exception:
+        return None
+
+
+def pnl_concentration(outcomes: list[dict], asof: str, window_days: int,
+                      max_share: float, min_names: int) -> dict:
+    """Criterion 3 (INFORMATIONAL — never gates an order). Over the trailing
+    window: no single closed round-trip above `max_share` of realized P&L, and at
+    least `min_names` distinct names closed.
+
+    Requires `realized_usd` on the outcome record. Records predating 2026-08-09
+    carry only `pnl_pct` and cannot support a share-of-dollars test; they report
+    INSUFFICIENT rather than passing by default.
+
+    Same non-finite trap as `drawdown()`/`concentration()`: NaN and +/-Infinity
+    are valid Python floats, so an `isinstance(v, (int, float))` check alone does
+    not exclude them, and because every comparison against NaN is False, a NaN
+    folded into the running total could make the FAIL branch unreachable and
+    read as a confident PASS. Missing `realized_usd` (the key absent, or
+    explicitly `None`) is legitimate legacy data -- pre-2026-08-09 records never
+    carried it -- and is excluded, counted in `missing`, letting the remaining
+    rows still produce a result. But a *present* `realized_usd` that is
+    non-numeric or non-finite is corrupt, not legacy: like `concentration()`'s
+    treatment of a negative mark, it aborts the whole computation with
+    INSUFFICIENT naming the offending symbol, rather than being silently
+    excluded and let the rest of the window read as clean -- the corrupt
+    record might have been the largest, and dropping it would understate the
+    concentration exactly like a dropped drawdown peak.
+    """
+    out = {"criterion": "pnl_concentration", "state": INSUFFICIENT, "value": None,
+           "limit": max_share, "room": None, "distinct_names": 0, "reason": ""}
+    cutoff = _as_date(asof)
+    if cutoff is None:
+        out["reason"] = f"unparseable asof {asof!r}"
+        return out
+    start = cutoff - timedelta(days=window_days)
+
+    rows, missing = [], 0
+    for e in outcomes or []:
+        if e.get("event") != "outcome":
+            continue
+        d = _as_date(e.get("at", ""))
+        if d is None or not (start <= d <= cutoff):
+            continue
+        outcome_data = e.get("outcome") or {}
+        if "realized_usd" not in outcome_data or outcome_data.get("realized_usd") is None:
+            missing += 1
+            continue
+        usd = outcome_data.get("realized_usd")
+        try:
+            fusd = float(usd)
+        except (TypeError, ValueError):
+            out["reason"] = (f"{e.get('symbol')!r} has a non-numeric realized_usd "
+                             f"({usd!r}); pnl_concentration unmeasurable")
+            return out
+        if not math.isfinite(fusd):
+            out["reason"] = (f"{e.get('symbol')!r} has a non-finite realized_usd "
+                             f"({usd!r}); pnl_concentration unmeasurable")
+            return out
+        rows.append((e.get("symbol"), fusd))
+
+    if not rows:
+        out["reason"] = (f"no closed round-trip in the last {window_days}d carries "
+                         f"realized_usd ({missing} lacked it)")
+        return out
+    total = sum(u for _, u in rows)
+    if total <= 0:
+        out["reason"] = (f"trailing realized P&L is {total:.2f}; a share-of-profit "
+                         "test has no meaning without profit")
+        return out
+
+    biggest = max(u for _, u in rows)
+    share = biggest / total
+    names = len({s for s, _ in rows})
+    out.update(value=share, distinct_names=names, room=abs(max_share) - share)
+    ok = share <= abs(max_share) and names >= min_names
+    out["state"] = PASS if ok else FAIL
+    out["reason"] = (f"largest round-trip {share:.0%} of {total:.2f} realized "
+                     f"(limit {abs(max_share):.0%}), {names} distinct names "
+                     f"(min {min_names})")
+    if missing:
+        out["reason"] += f"; {missing} legacy record(s) lacked realized_usd and were excluded"
     return out
 
 
@@ -361,6 +452,67 @@ def _selftest() -> None:
     assert r_clean["state"] == PASS, r_clean
     assert r_clean["worst_symbol"] == "AAA" and abs(r_clean["value"] - 0.10) < 1e-9, r_clean
     assert abs(r_clean["room"] - 0.05) < 1e-9, r_clean
+
+    # --- criterion 3: P&L concentration (informational) -----------------------
+    pc = m["pnl_concentration"]
+    def _o(sym, day, usd):
+        return {"event": "outcome", "symbol": sym, "at": f"2026-08-{day:02d}T00:00:00Z",
+                "outcome": {"realized_usd": usd}}
+    # four names, no single one above 40% of $100 realized -> PASS
+    good = [_o("A", 1, 30.0), _o("B", 2, 30.0), _o("C", 3, 25.0), _o("D", 4, 15.0)]
+    r = pnl_concentration(good, "2026-08-09", pc["window_days"],
+                          pc["max_single_share"], pc["min_distinct_names"])
+    assert r["state"] == PASS, r
+    assert abs(r["value"] - 0.30) < 1e-9 and r["distinct_names"] == 4, r
+    # one name carrying 70% of the result -> FAIL
+    hot = [_o("A", 1, 70.0), _o("B", 2, 10.0), _o("C", 3, 10.0), _o("D", 4, 10.0)]
+    assert pnl_concentration(hot, "2026-08-09", 90, 0.40, 4)["state"] == FAIL
+    # too few distinct names -> FAIL even when no single share is too big
+    thin = [_o("A", 1, 30.0), _o("B", 2, 30.0), _o("A", 3, 40.0)]
+    assert pnl_concentration(thin, "2026-08-09", 90, 0.40, 4)["state"] == FAIL
+    # a LOSS-making window has no share-of-profit to test -> INSUFFICIENT, not PASS
+    down = [_o("A", 1, -30.0), _o("B", 2, 10.0)]
+    assert pnl_concentration(down, "2026-08-09", 90, 0.40, 4)["state"] == INSUFFICIENT
+    # records without realized_usd (every record before 2026-08-09) -> INSUFFICIENT
+    legacy = [{"event": "outcome", "symbol": "A", "at": "2026-08-01T00:00:00Z",
+               "outcome": {"pnl_pct": 0.011}}]
+    r = pnl_concentration(legacy, "2026-08-09", 90, 0.40, 4)
+    assert r["state"] == INSUFFICIENT and "realized_usd" in r["reason"], r
+    # nothing closed at all -> INSUFFICIENT
+    assert pnl_concentration([], "2026-08-09", 90, 0.40, 4)["state"] == INSUFFICIENT
+    # outside the window is excluded
+    old = [_o("A", 1, 100.0)]
+    assert pnl_concentration(old, "2026-12-01", 90, 0.40, 4)["state"] == INSUFFICIENT
+
+    # --- non-finite discipline (same trap as drawdown/concentration) -----------
+    # a NaN realized_usd must not silently propagate into the sum: every
+    # comparison against NaN is False, so a NaN could make the FAIL branch
+    # unreachable and read as a confident PASS.
+    nan_rows = [_o("A", 1, float("nan")), _o("B", 2, 10.0),
+                _o("C", 3, 10.0), _o("D", 4, 10.0)]
+    r_nan = pnl_concentration(nan_rows, "2026-08-09", 90, 0.40, 4)
+    assert r_nan["state"] == INSUFFICIENT, r_nan
+    assert "A" in r_nan["reason"], r_nan
+    # a +inf realized_usd is likewise rejected, not coerced into "biggest"
+    inf_rows = [_o("A", 1, float("inf")), _o("B", 2, 10.0),
+                _o("C", 3, 10.0), _o("D", 4, 10.0)]
+    r_inf = pnl_concentration(inf_rows, "2026-08-09", 90, 0.40, 4)
+    assert r_inf["state"] == INSUFFICIENT, r_inf
+    assert "A" in r_inf["reason"], r_inf
+    # a record with an unparseable/missing `at` cannot be placed in-window ->
+    # excluded, must not silently count as in-window
+    bad_at = [{"event": "outcome", "symbol": "A", "at": "not-a-date",
+               "outcome": {"realized_usd": 30.0}},
+              {"event": "outcome", "symbol": "B",
+               "outcome": {"realized_usd": 30.0}}]  # missing `at` entirely
+    r_bad_at = pnl_concentration(bad_at, "2026-08-09", 90, 0.40, 4)
+    assert r_bad_at["state"] == INSUFFICIENT, r_bad_at
+    # a clean set (the "good" case above) is entirely unaffected by the
+    # non-finite / bad-timestamp handling
+    r_clean = pnl_concentration(good, "2026-08-09", pc["window_days"],
+                                pc["max_single_share"], pc["min_distinct_names"])
+    assert r_clean["state"] == PASS, r_clean
+    assert abs(r_clean["value"] - 0.30) < 1e-9 and r_clean["distinct_names"] == 4, r_clean
 
     print("selftest OK: mandate loads, terms match")
 
