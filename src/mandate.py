@@ -324,6 +324,43 @@ def relative_return(equity: list[float], benchmark: list[float],
     return out
 
 
+BLOCKING = ("drawdown", "concentration")
+INFORMATIONAL = ("pnl_concentration", "relative_return")
+
+
+def status(equity: list[float], benchmark: list[float], positions: dict,
+           account_value: float, outcomes: list[dict], asof: str,
+           cfg: dict | None = None) -> dict:
+    """Evaluate all four criteria. THE single entry point -- the MCP tool, the
+    monitor and the dashboard all read this, so there is exactly one answer to
+    "are we passing".
+
+    `tradeable` is False when a BLOCKING criterion fails or cannot be measured.
+    Informational criteria never affect it: they judge whether autonomy is
+    working, not whether an order is safe.
+    """
+    m = cfg or load()
+    crit = {
+        "drawdown": drawdown(equity, m["drawdown"]["max_pct"]),
+        "concentration": concentration(positions, account_value,
+                                       m["concentration"]["max_position_pct"]),
+        "pnl_concentration": pnl_concentration(
+            outcomes, asof, m["pnl_concentration"]["window_days"],
+            m["pnl_concentration"]["max_single_share"],
+            m["pnl_concentration"]["min_distinct_names"]),
+        "relative_return": relative_return(
+            equity, benchmark, m["relative_return"]["window_days"]),
+    }
+    b_fail = [k for k in BLOCKING if crit[k]["state"] == FAIL]
+    b_dark = [k for k in BLOCKING if crit[k]["state"] == INSUFFICIENT]
+    i_fail = [k for k in INFORMATIONAL if crit[k]["state"] == FAIL]
+    return {"asof": asof, "criteria": crit,
+            "blocking_fail": b_fail, "blocking_unmeasurable": b_dark,
+            "informational_fail": i_fail,
+            "tradeable": not (b_fail or b_dark),
+            "degraded": bool(b_dark)}
+
+
 def _selftest() -> None:
     m = load()
     assert m["drawdown"]["max_pct"] == 0.15, m["drawdown"]
@@ -715,7 +752,94 @@ def _selftest() -> None:
     assert abs(r_clean_rr["value"] - 0.10) < 1e-9, r_clean_rr
     assert abs(r_clean_rr["benchmark_return"] - 0.05) < 1e-9, r_clean_rr
 
-    print("selftest OK: mandate loads, terms match")
+    # --- status(): the aggregate ----------------------------------------------
+    healthy = status(equity=[100.0, 101.0], benchmark=[50.0, 50.0],
+                     positions={"AAA": {"value": 10.0}}, account_value=100.0,
+                     outcomes=[], asof="2026-08-09")
+    assert healthy["criteria"]["drawdown"]["state"] == PASS
+    assert healthy["criteria"]["concentration"]["state"] == PASS
+    # informational criteria are immature today and must NOT block trading
+    assert healthy["criteria"]["pnl_concentration"]["state"] == INSUFFICIENT
+    assert healthy["criteria"]["relative_return"]["state"] == INSUFFICIENT
+    assert healthy["informational_fail"] == []
+    assert healthy["blocking_fail"] == [] and healthy["blocking_unmeasurable"] == []
+    assert healthy["tradeable"] is True and healthy["degraded"] is False, healthy
+
+    # a blocking FAIL stops trading
+    breached = status(equity=[100.0, 80.0], benchmark=[50.0, 50.0],
+                      positions={}, account_value=100.0, outcomes=[],
+                      asof="2026-08-09")
+    assert breached["blocking_fail"] == ["drawdown"], breached
+    assert breached["tradeable"] is False
+
+    # a blocking criterion that cannot be MEASURED means degraded mode, not a pass
+    dark = status(equity=[100.0, 99.0], benchmark=[50.0, 50.0],
+                  positions={"AAA": {"value": None}}, account_value=100.0,
+                  outcomes=[], asof="2026-08-09")
+    assert dark["blocking_unmeasurable"] == ["concentration"], dark
+    assert dark["tradeable"] is False and dark["degraded"] is True, dark
+
+    # --- additional coverage beyond the brief -----------------------------
+    # both blocking criteria FAIL at once
+    both_fail = status(
+        equity=[100.0, 80.0], benchmark=[50.0, 50.0],
+        positions={"AAA": {"value": 20.0}}, account_value=100.0,
+        outcomes=[], asof="2026-08-09")
+    assert both_fail["criteria"]["drawdown"]["state"] == FAIL, both_fail
+    assert both_fail["criteria"]["concentration"]["state"] == FAIL, both_fail
+    assert set(both_fail["blocking_fail"]) == {"drawdown", "concentration"}, both_fail
+    assert both_fail["blocking_unmeasurable"] == [], both_fail
+    assert both_fail["tradeable"] is False, both_fail
+    assert both_fail["degraded"] is False, both_fail
+
+    # a blocking FAIL alongside an informational FAIL -- tradeable reflects
+    # ONLY the blocking one, and the informational FAIL still surfaces
+    hot = [_o("A", 1, 70.0), _o("B", 2, 10.0), _o("C", 3, 10.0), _o("D", 4, 10.0)]
+    blocking_and_info_fail = status(
+        equity=[100.0, 80.0], benchmark=[50.0, 50.0],
+        positions={}, account_value=100.0, outcomes=hot, asof="2026-08-09")
+    assert blocking_and_info_fail["criteria"]["drawdown"]["state"] == FAIL, blocking_and_info_fail
+    assert blocking_and_info_fail["criteria"]["pnl_concentration"]["state"] == FAIL, blocking_and_info_fail
+    assert blocking_and_info_fail["blocking_fail"] == ["drawdown"], blocking_and_info_fail
+    assert blocking_and_info_fail["informational_fail"] == ["pnl_concentration"], blocking_and_info_fail
+    assert blocking_and_info_fail["tradeable"] is False, blocking_and_info_fail
+    assert blocking_and_info_fail["degraded"] is False, blocking_and_info_fail
+
+    # both informational criteria FAIL while both blocking ones PASS --
+    # tradeable must stay True; informational failure is visible but non-gating
+    thin = [_o("A", 1, 30.0), _o("B", 2, 30.0), _o("A", 3, 40.0)]
+    lagging_eq = [100.0] * 59 + [102.0]
+    lagging_bm = [50.0] * 58 + [50.0, 60.0]
+    info_only_fail = status(
+        equity=lagging_eq, benchmark=lagging_bm,
+        positions={"AAA": {"value": 10.0}}, account_value=100.0,
+        outcomes=thin, asof="2026-08-09")
+    assert info_only_fail["criteria"]["drawdown"]["state"] == PASS, info_only_fail
+    assert info_only_fail["criteria"]["concentration"]["state"] == PASS, info_only_fail
+    assert info_only_fail["criteria"]["pnl_concentration"]["state"] == FAIL, info_only_fail
+    assert info_only_fail["criteria"]["relative_return"]["state"] == FAIL, info_only_fail
+    assert set(info_only_fail["informational_fail"]) == {"pnl_concentration", "relative_return"}, info_only_fail
+    assert info_only_fail["blocking_fail"] == [] and info_only_fail["blocking_unmeasurable"] == [], info_only_fail
+    assert info_only_fail["tradeable"] is True, info_only_fail
+    assert info_only_fail["degraded"] is False, info_only_fail
+
+    # every criterion simultaneously INSUFFICIENT_DATA
+    all_dark = status(
+        equity=[100.0], benchmark=[50.0],
+        positions={"AAA": {"value": None}}, account_value=100.0,
+        outcomes=[], asof="2026-08-09")
+    assert all_dark["criteria"]["drawdown"]["state"] == INSUFFICIENT, all_dark
+    assert all_dark["criteria"]["concentration"]["state"] == INSUFFICIENT, all_dark
+    assert all_dark["criteria"]["pnl_concentration"]["state"] == INSUFFICIENT, all_dark
+    assert all_dark["criteria"]["relative_return"]["state"] == INSUFFICIENT, all_dark
+    assert set(all_dark["blocking_unmeasurable"]) == {"drawdown", "concentration"}, all_dark
+    assert all_dark["blocking_fail"] == [], all_dark
+    assert all_dark["informational_fail"] == [], all_dark
+    assert all_dark["tradeable"] is False, all_dark
+    assert all_dark["degraded"] is True, all_dark
+
+    print("selftest OK: mandate -- 4 criteria three-state, blocking vs "
+          "informational, unmeasurable never passes")
 
 
 if __name__ == "__main__":
