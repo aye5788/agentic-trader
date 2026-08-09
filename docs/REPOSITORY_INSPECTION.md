@@ -542,6 +542,284 @@ high-level descriptions in the original inspection.
     incomplete exits.
 15. Require sufficient live evidence before adaptive proposals can be promoted.
 
+## 14. Concrete implementation plan
+
+This plan is intentionally sequenced around capital protection and observability.
+Each phase should be a separate, reviewable change. Do not combine strategy
+changes with storage migrations or documentation cleanup.
+
+### Phase 0 — capture invariants and broker fixtures
+
+**Goal:** make current behavior reproducible before changing it.
+
+1. Add sanitized fixtures for account, portfolio, position, quote, order-review,
+   order-state, partial-fill, rejected-order, and realized-P&L responses. Fixtures
+   must contain no real account identifiers, balances, symbols tied to live
+   activity, credentials, or order IDs.
+2. Add an end-to-end test harness that exercises:
+   `ResearchProduct -> positions snapshot -> marks -> order plan -> simulated
+   placement result -> fills -> reconciliation -> outcome`.
+3. Split selftests by runtime:
+   - venv-safe pure tests under Python 3.12;
+   - moomoo adapter/monitor tests under system Python 3.10, using fakes unless a
+     deliberately invoked integration test has OpenD.
+4. Replace the hand-maintained incomplete selftest list with an explicit complete
+   manifest or test discovery that understands the runtime split.
+5. Add CI jobs for pure tests, static repository checks, and fixture-backed
+   integration tests. Live broker and OpenD tests must remain opt-in and must never
+   receive execution credentials in CI.
+
+**Primary files:** `deploy/run_selftests.sh`, a new test directory or harness,
+`.github/workflows/validate.yml`, and fixture documentation.
+
+**Exit gate:** every existing selftest is enumerated and green in its correct
+runtime; the fixture workflow proves that no broker mutation can occur.
+
+### Phase 1 — immutable position and decision identity
+
+**Goal:** separate a position's opening decision from nightly research revisions.
+
+1. Introduce immutable identifiers:
+   - `position_id`: one broker position lifecycle from zero -> nonzero -> zero;
+   - `entry_decision_id`: the thesis standing when that lifecycle opened;
+   - `product_id` or `generation_id`: one complete slow-loop output;
+   - `run_id`: one fast-loop/monitor/risk-review execution.
+2. Persist an entry record on the first confirmed opening fill containing actual
+   fill price/date, original stop/targets/sigma, source product, and order ID.
+3. Treat nightly research as a revision linked to the open position rather than a
+   replacement for its identity. Store proposed current geometry separately from
+   immutable entry geometry.
+4. Change outcome creation to join through `position_id` and actual fills. Holding
+   duration begins at the first opening fill; partial exits accumulate until the
+   position reaches zero.
+5. Provide a one-time migration for existing open positions. Where original entry
+   evidence is unavailable, mark provenance explicitly as reconstructed rather
+   than silently claiming precision.
+
+**Primary files:** `src/research_store/models.py`, `src/research_store/__init__.py`,
+`src/ledger.py`, `scripts/record_fills.py`, `scripts/reconcile_ledger.py`, both
+execution prompts, and Research Store schemas.
+
+**Tests:** multiple nightly revisions of one open position; add/trim cycles;
+partial target followed by final exit; rotation exit; restart/retry idempotency;
+legacy migration with incomplete evidence.
+
+**Exit gate:** every full and partial fill has one stable position lifecycle, and
+outcomes no longer depend on searching for the most recent archived thesis.
+
+### Phase 2 — explicit nightly geometry policy
+
+**Goal:** prevent an incidental nightly recomputation from silently changing live
+risk.
+
+1. Decide the policy before coding. Recommended default:
+   - selection may revise nightly;
+   - entry zones may revise only for positions not yet opened;
+   - an open position's stop may stay unchanged or tighten, never loosen;
+   - targets may stay unchanged or move inward only under an explicitly approved
+     rule;
+   - the weekly rebuild may propose wider geometry but must not apply it to an
+     already-open position without a distinct, reviewed strategy rule.
+2. Add a pure geometry-transition validator shared by slow loop, risk review, and
+   monitor. It should receive prior effective geometry, proposed geometry, position
+   state, and cadence and return accepted/rejected fields with reasons.
+3. Keep immutable entry geometry, latest proposed geometry, and effective enforced
+   geometry as separate fields.
+4. Stop keying monitor fired state solely to product date. Key it to
+   `position_id + level identity`, resetting only when the position or effective
+   level genuinely changes.
+
+**Primary files:** `scripts/slow_loop.py`, `scripts/risk_review.py`,
+`scripts/market_monitor.py`, Research Store models, and `config/strategy.toml`.
+
+**Tests:** a falling market cannot lower an existing stop; a tighter stop survives
+nightly rebuild; a target event cannot refire solely because `as_of` changed; a
+new position receives fresh geometry; weekly and nightly cadence behave as
+specified.
+
+**Rollout:** shadow-log proposed vs accepted geometry for at least one full weekly
+cycle before enforcing it. Review every difference manually, then arm enforcement.
+
+### Phase 3 — make actual holdings the protection authority
+
+**Goal:** ensure every actual broker holding is protected or visibly quarantined.
+
+1. Build a deterministic reconciliation view:
+   `actual holdings - protected position records - target book`.
+2. Classify every actual position as:
+   - protected and on-book;
+   - protected but pending rotation/settlement;
+   - off-book with recoverable entry geometry;
+   - unknown/unprotected.
+3. Monitor every actual positive quantity. If no valid stop exists, do not invent
+   one; raise a high-priority unprotected-position condition and require an
+   explicit operator/strategy decision.
+4. Present the same reconciled set to risk review and dashboard. Eliminate separate
+   ad hoc intersections in monitor and risk review.
+5. Add snapshot freshness and account-match requirements. A stale or mismatched
+   snapshot must never be treated as proof that a target is not held.
+6. Remove the hardcoded account identifier from monitor output; derive it from a
+   recently validated, account-scoped snapshot and require the exit executor to
+   revalidate it as it does today.
+
+**Primary files:** a new pure holdings-reconciliation module,
+`scripts/market_monitor.py`, `scripts/risk_review.py`, `dashboard/app.py`,
+`src/marks.py`, and execution prompts.
+
+**Tests:** dust position, manual position, failed full exit, stale snapshot,
+account mismatch, zero quantity, partial fill, target-without-position, and
+position-without-target.
+
+**Exit gate:** the invariant “every actual positive quantity is protected or
+loudly flagged unprotected” is checked every monitor cycle and in daily health.
+
+### Phase 4 — freshness, generations, and degraded-mode policy
+
+**Goal:** prevent cross-generation or missing-input combinations from authorizing
+new risk while preserving safe exits.
+
+1. Add generation metadata to products, price panels, snapshots, quotes, plans,
+   order dumps, and journal events: `run_id`, generation time, source timestamp,
+   account scope, and schema version.
+2. Define separate gates:
+   - **new buys/adds:** fail closed on stale product, stale/missing broker snapshot,
+     missing required quote, account mismatch, or incompatible generation;
+   - **risk-reducing sells:** remain available where identity and quantity are
+     trustworthy, even when research inputs are stale;
+   - **unknown state:** place nothing automatically and alert with the exact missing
+     evidence.
+3. Replace lexicographic timestamp comparisons with parsed timezone-aware
+   datetimes.
+4. Split governance outcomes into `block_all`, `block_risk_increase`, and
+   `allow_risk_reduction`. Decide explicitly whether the kill switch is intended
+   to stop all broker interaction or only automation that increases risk; document
+   a separate emergency-exit procedure either way.
+5. Centralize degraded-data evaluation so VIX, no-chase quotes, cooldown, earnings,
+   volatility, and moving-average failures produce one auditable system state
+   rather than independent silent fail-open decisions.
+
+**Primary files:** `src/governance.py`, `src/marks.py`, `scripts/fast_loop.py`,
+`scripts/market_monitor.py`, `scripts/risk_review.py`, Research Store models, and
+prompts.
+
+**Tests:** stale product with required exit; stale snapshot with proposed buy;
+missing no-chase quote; VIX outage; mixed generations; malformed timestamps;
+kill-switch and drawdown behavior for buys versus sells.
+
+**Exit gate:** no new exposure can be authorized from stale or internally
+inconsistent state, and an explicitly permitted de-risking path remains testable.
+
+### Phase 5 — authoritative, idempotent broker reconciliation
+
+**Goal:** make the ledger a provable projection of broker activity rather than a
+projection of whichever orders an agent chose to dump.
+
+1. Require each execution run to write a fresh manifest before placement and a
+   completion record afterward. Include run ID, account, intended orders, reviewed
+   orders, broker order IDs, and terminal/nonterminal state.
+2. Make `record_fills.py` idempotent by broker order ID plus execution/fill ID.
+   Atomic append alone is insufficient; use a lock and durable deduplication index
+   or move the ledger to SQLite with transactions and unique constraints.
+3. Query the broker for all orders in a bounded time window/account, not merely
+   those touched in the current prompt. Compare the complete broker result against
+   the ledger.
+4. Treat a missing, stale, wrong-account, or incomplete order dump as a failed
+   reconciliation—not a successful skip—after distinguishing a run that truly
+   placed no orders.
+5. Model partial fills, multiple executions per order, cancelled remainders,
+   pending orders, settlement, and average-cost changes explicitly.
+6. Record outcomes incrementally for partial exits and finalize them only when
+   actual quantity reaches zero.
+
+**Primary files:** `scripts/record_fills.py`, `scripts/reconcile_ledger.py`,
+`src/ledger.py`, Research Store persistence, `prompts/fast_loop.md`, and
+`prompts/exit.md`.
+
+**Tests:** repeated recorder invocation; duplicate broker response; partial fill
+then completion; missing dump; stale dump; wrong account; order without ID;
+cancelled remainder; concurrent journal writers.
+
+**Rollout:** dual-write old JSONL and the new authoritative representation, compare
+them daily, then switch readers only after a defined period with zero unexplained
+divergence. Preserve an export back to plain JSONL for auditability.
+
+### Phase 6 — bind configuration and control telemetry
+
+**Goal:** make configuration authoritative and prove every guard can operate.
+
+1. Produce a machine-readable registry mapping every strategy key to:
+   consumer symbol, default, expected evidence, and whether changing it is a
+   strategy change or operational change.
+2. Pass configured lookback and trend values explicitly into signal functions, or
+   remove unsupported knobs. Do not leave duplicate sources such as
+   `sleeve_hold`/`hold_top`.
+3. Honor or remove `etf_sleeve.enabled`, `risk_review.enabled`,
+   `entry_cadence`, and `agent_overlay` after an explicit behavior decision.
+4. Resolve the moving-average contradiction: either implement it as a deterministic
+   exit with backtest and approval, or rewrite strategy documentation/configuration
+   so it is clearly advisory.
+5. Complete `src/controls.py` gathering. Feed it journal/plan/monitor evidence and
+   include it in health and dashboard output.
+6. Extend `repo_checks.py` to flag configured keys with no registered consumer and
+   duplicated authoritative settings.
+
+**Tests:** every registered config key reaches its consumer; disabled ETF/risk
+review paths do not run; config changes alter only their declared behavior;
+control evidence distinguishes young, binding, silent, never, and unmeasured.
+
+**Exit gate:** no production configuration key exists without an explicit
+consumer or an explicit documentation-only designation.
+
+### Phase 7 — transactional state and operational hardening
+
+**Goal:** remove torn cross-process state and reduce deployment risk.
+
+1. Prefer a transactional local store such as SQLite in WAL mode for coordinated
+   operational state, or implement atomic file replacement plus locks and shared
+   generation manifests consistently. Keep large price panels in Parquet but write
+   them into a versioned generation directory and atomically switch a manifest
+   only after every field succeeds.
+2. Add file locking or a single-writer service for journal/state mutation.
+3. Add exchange-calendar support for holidays and early closes.
+4. Reduce dashboard and monitor service privileges; define filesystem ownership
+   and the minimum access each process needs.
+5. Pin Python dependencies, moomoo SDK compatibility, Claude CLI expectations, and
+   GitHub Actions to reproducible versions/commit SHAs.
+6. Add backup restore tests, not only backup push checks. Verify that open-position
+   identity, ledger, and current protection state can be reconstructed.
+7. Correct monitor health so intentional idle states are distinct from successful
+   polling, and shorten outage detection without creating weekend false alarms.
+
+**Tests:** process killed between state writes; concurrent append attempts;
+mid-OHLC-write failure; database recovery; holiday/half-day schedule; least-
+privilege service startup; restore into an empty test workspace.
+
+### Phase 8 — documentation and controlled rollout
+
+**Goal:** make the operator-facing system match the implemented one.
+
+1. Update `README.md`, `docs/DESIGN.md`, `docs/DEPLOY.md`, strategy comments,
+   prompts, and source docstrings together after behavior is settled. Remove all
+   Schwab-era commands and remedies.
+2. Document exact regime-off behavior, ETF behavior, alert-only firing semantics,
+   kill-switch sell behavior, and the distinction between target, actual,
+   protected, and pending holdings.
+3. For every live-path phase, use this rollout sequence:
+   - pure/fixture tests;
+   - dry-run or shadow output;
+   - side-by-side comparison against current behavior;
+   - explicit human review;
+   - alert-only/canary operation where applicable;
+   - live enablement through box-local configuration;
+   - defined rollback trigger and one-step rollback procedure.
+4. Never combine rollout of a storage migration, strategy-rule change, and broker
+   execution change in one deployment.
+
+**Completion criteria:** documentation, configuration, code, tests, health
+evidence, and operator runbooks describe the same behavior; every actual holding
+has a stable identity and protection status; stale or incomplete state cannot add
+risk; and broker fills reconcile idempotently to outcomes.
+
 ## Inspection limits
 
 The inspection did not read or expose secret values, raw account balances, full
