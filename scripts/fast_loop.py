@@ -349,16 +349,26 @@ def main() -> None:
                                    "approved": approved, "review": review or [],
                                    "blocked": blocked}, indent=2))
 
-    # ---- governance: global halts, then per-order vetting ----
-    halts = gov.preflight(acct, cfg)
-    if halts:
+    # ---- governance: two-tier halts, then per-order vetting ----
+    # block_all (kill switch)          -> place NOTHING, buy or sell.
+    # block_entries (HALT_ENTRIES, dd) -> refuse buys, let exits through.
+    # The split exists because stops here are SOFTWARE-ONLY: blocking a sell does
+    # not pause risk, it removes an open position's only protection.
+    gv = gov.gates(acct, cfg)
+    if gv["block_all"]:
         print("\n⛔ TRADING HALTED — place NOTHING:")
-        for h in halts:
+        for h in gv["block_all"]:
             print(f"   - {h}")
-        write_plan([], [], False, halted=halts)
+        write_plan([], [], False, halted=gv["block_all"])
         print(f"empty plan -> {out}")
         return
     approved, blocked = gov.vet_plan(plan, acct, cfg)
+    if gv["block_entries"]:
+        print("\n⛔ NEW ENTRIES HALTED — exits still allowed:")
+        for h in gv["block_entries"]:
+            print(f"   - {h}")
+        approved, eblocked = gov.apply_entry_halts(approved, gv["block_entries"])
+        blocked += eblocked
 
     # ---- stop-out cooldown: never rebuy a name the monitor just stopped ----
     # The book won't drop a stopped name until the weekly rebuild, so without this

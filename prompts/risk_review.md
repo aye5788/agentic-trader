@@ -12,7 +12,11 @@ HARD RULES (CLAUDE.md overrides everything):
 
 PROCEDURE — follow exactly:
 
-1. Kill-switch: if research_store/HALT exists → STOP, do nothing.
+1. Kill-switch: if research_store/HALT exists → place NOTHING (not even a
+   de-risking trim or exit) and report "halted by kill-switch". While HALT is on,
+   stop protection is off and the human is exiting by hand — do not add orders to
+   that. `research_store/HALT_ENTRIES` is NOT a stop for you: it blocks new buys,
+   and this review never opens entries anyway, so proceed normally.
 2. Build facts: run `/usr/bin/python3 scripts/risk_review.py --facts` (system
    python3, not .venv — today's session high comes from moomoo, whose SDK is not
    in the venv; under .venv the high-water mark silently omits today). Read

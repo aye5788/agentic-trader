@@ -154,8 +154,17 @@ allow_half      = true    # the downsize option in the agent's menu
 # The [risk] mandate validates the research PRODUCT on write; these validate
 # EXECUTION at trade time. Enforced by src/governance.py in the fast loop.
 [governance]
-kill_switch_file = "research_store/HALT"  # if this file exists -> trade NOTHING (touch to stop, rm to resume)
+# TWO SWITCHES (2026-08-09). Stops here are SOFTWARE-ONLY — the monitor process
+# IS the stop — so a gate that blocks sells does not pause risk, it removes an
+# open position's only protection. Hence the split:
+#   HALT         the machine places NO order, buy or sell. It keeps WATCHING and
+#                phones you on every breach; you place the exit by hand.
+#   HALT_ENTRIES no new buys. Stop/target exits stay fully armed. Use this one
+#                when the market scares you; use HALT when the CODE scares you.
+kill_switch_file  = "research_store/HALT"          # touch to stop, rm to resume
+halt_entries_file = "research_store/HALT_ENTRIES"  # touch to stop BUYING only
 max_drawdown     = 0.25                    # halt new buys if account down >25% from its tracked peak
+                                           #   (blocks entries only — never an exit)
 max_order_pct    = 0.15                    # reject any single order > 15% of account value
 require_whitelist = true                   # only ever trade names in config/universe.csv + etf_universe.csv
 

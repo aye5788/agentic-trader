@@ -11,17 +11,38 @@ itself on cron; this is the short list of things that need *you*. Keep this hand
 
 ## 0. The safety switches — know these before anything else
 
-**Stop ALL trading instantly (kill switch):**
+There are **two** stop switches. Which one you want depends on whether the
+**market** scares you or the **code** scares you.
+
+**A. Stop BUYING, keep protection (usually the one you want):**
 ```
 cd /opt/agentic-trader
-touch research_store/HALT        # from now on the system trades NOTHING
+touch research_store/HALT_ENTRIES   # no new buys; stops + take-profits still fire
+rm research_store/HALT_ENTRIES      # resume
 ```
-Resume:
+The book stops growing, but the monitor still sells anything that breaches its
+stop. Use this when you don't like the market.
+
+**B. Stop EVERYTHING, take the wheel yourself (kill switch):**
 ```
-rm research_store/HALT
+touch research_store/HALT           # the system places NO order, buy or sell
+rm research_store/HALT              # resume
 ```
-That's it. While `HALT` exists, no orders are placed by anything. Use it if
-something looks wrong and you want to freeze the book.
+Use this when you think the *system* is misbehaving and you don't want it
+touching the account at all.
+
+> ⚠️ **`HALT` means your stops stop firing.** The stops in this system are
+> software — the monitor process *is* the stop; there is no stop order sitting at
+> Robinhood. So while `HALT` exists, **every open position is unprotected and you
+> must sell by hand.**
+>
+> The monitor knows this and will not go quiet on you: it keeps watching and
+> phones you on every breach with "MANUAL EXIT NEEDED … UNPROTECTED", repeating
+> until you act. But nothing will sell for you. If you only wanted to stop
+> *buying*, use `HALT_ENTRIES` instead.
+
+The drawdown halt (account >25% below its peak) behaves like `HALT_ENTRIES`: it
+blocks new buys and never blocks an exit.
 
 **Disarm live order-placement (softer than HALT):** live trading is gated by a
 master switch. In `config/strategy.local.toml`:
@@ -295,21 +316,32 @@ this setup is the pull request:
 
 ## 7. Emergency: something's wrong, stop everything
 
-1. **Freeze trading:** `touch /opt/agentic-trader/research_store/HALT`
+**First decide which of these you actually mean:**
+
+- *"The market looks bad, stop buying"* → `touch research_store/HALT_ENTRIES`.
+  Stops and take-profits keep working. This is the safe default.
+- *"The system is misbehaving, hands off my account"* → `touch research_store/HALT`.
+  **This also switches off your stops** — see below.
+
+1. **Freeze:** `touch /opt/agentic-trader/research_store/HALT_ENTRIES` (or
+   `HALT` for a full stop).
 2. If you want it disarmed longer-term: set `[proof] live_approved = false` in
    `config/strategy.local.toml`.
-3. Nothing will place orders until you `rm research_store/HALT` (and re-arm
-   `live_approved = true`). Existing positions are untouched — the freeze only stops
-   *new* orders; sell manually in Robinhood if you need to exit.
+3. Nothing will place orders until you remove the file (and re-arm
+   `live_approved = true`).
+4. ⚠️ **If you used `HALT`: your open positions now have no stop.** The monitor
+   will keep phoning you on each breach ("MANUAL EXIT NEEDED"), but you must sell
+   in Robinhood yourself. To hand exits back to the monitor:
+   `rm research_store/HALT`.
 
 ---
 
 ## Cheat sheet
 
 ```
-STOP TRADING NOW        touch research_store/HALT          (rm to resume)
-Schwab re-auth (weekly) .venv/bin/python scripts/schwab_auth.py   (SSH, paste URL)
-Check Schwab token      .venv/bin/python scripts/schwab_status.py
+STOP BUYING             touch research_store/HALT_ENTRIES  (stops STILL fire)
+STOP EVERYTHING         touch research_store/HALT          (⚠ stops STOP firing —
+                                                            sell by hand; rm to resume)
 Review stop proposal    .venv/bin/python scripts/promote_proposal.py
 Apply a stop value      .venv/bin/python scripts/promote_proposal.py --set 2.5
 Rebuild prices          .venv/bin/python scripts/fetch_prices.py --force

@@ -56,6 +56,7 @@ ET = ZoneInfo("America/New_York")
 # Remembers the last-logged "not held" set so we log it once per change, not every
 # 15s poll (the set is static all day — logging it each tick just floods journald).
 _LAST_DROPPED: frozenset | None = None
+_LAST_HALTED: bool | None = None      # log kill-switch mode on transition, not every tick
 
 
 def _now_et():
@@ -341,9 +342,20 @@ def check_once(cfg, client) -> int:
     if not prod:
         return 0
     armed = gov.live_approved(cfg) and not m.get("alert_only", False)
-    if gov.kill_switch_active(cfg):
-        print("  kill-switch active — idle")
-        return 0
+    # The kill switch means the machine places no ORDER — NOT that it stops
+    # LOOKING. Until 2026-08-09 this returned 0 here, so touching HALT left every
+    # open position unprotected AND unwatched at the exact moment the operator
+    # believed they had made things safe (stops are software-only — this process
+    # IS the stop). Now it degrades to the alert-only path: keep polling, keep
+    # journalling, keep phoning; the human places the exit by hand.
+    halted = gov.kill_switch_active(cfg)
+    if halted:
+        armed = False
+    global _LAST_HALTED
+    if halted != _LAST_HALTED:
+        print("  kill-switch active — WATCHING ONLY, exits must be placed BY HAND"
+              if halted else "  kill-switch cleared — resuming normal mode")
+        _LAST_HALTED = halted
 
     held = {t.symbol: t for t in prod.theses if t.target_weight > 0 and t.stop}
     try:                                     # watch only names we ACTUALLY hold
@@ -426,18 +438,26 @@ def check_once(cfg, client) -> int:
         return 0
     fresh = [t for t in act if t["symbol"] not in unresolved]   # first alert only
 
+    mode = "EXECUTE" if armed else ("HALTED" if halted else "ALERT-ONLY")
+    verb = "selling" if armed else "NEEDS MANUAL SELL OF"
+    unarmed_note = ("\n⛔ KILL-SWITCH (HALT) active: no order will be placed and this "
+                    "position is UNPROTECTED. Sell BY HAND, or `rm research_store/HALT` "
+                    "to hand the exit back to the monitor."
+                    if halted else
+                    "\nALERT-ONLY (not armed): no order will be placed")
     for t in act:
         print(f"  ⚠ {t['reason'].upper()} {t['symbol']} @ {t['price']} "
-              f"(level {t['level']}) — {'EXECUTE' if armed else 'ALERT-ONLY'}")
+              f"(level {t['level']}) — {mode}")
     store.append_journal({"event": "exit_signal", "ts": ts, "armed": armed,
-                          "triggers": act})
+                          "halted": halted, "triggers": act})
     if fresh:                                        # routine alert: fresh breaches only
-        notify(f"{'Executing' if armed else 'Alert'}: "
+        notify(f"{'Executing' if armed else 'MANUAL EXIT NEEDED' if halted else 'Alert'}: "
                + ", ".join(f"{t['reason'].upper()} {t['symbol']}" for t in fresh),
                "\n".join(f"{t['symbol']} {t['reason']} @ {t['price']} (level {t['level']}) "
-                         f"— selling {int(t['fraction'] * 100)}%" for t in fresh)
-               + ("" if armed else "\nALERT-ONLY (not armed): no order will be placed"),
-               tags="chart_with_downwards_trend" if any(t["reason"] == "stop" for t in fresh)
+                         f"— {verb} {int(t['fraction'] * 100)}%" for t in fresh)
+               + ("" if armed else unarmed_note),
+               tags="rotating_light" if halted
+               else "chart_with_downwards_trend" if any(t["reason"] == "stop" for t in fresh)
                else "moneybag")
 
     if armed:
@@ -466,6 +486,27 @@ def check_once(cfg, client) -> int:
                    f"{', '.join(sorted(escalate))} breached its stop but the exit "
                    f"executor has failed {escalate_n}+ times — position(s) UNPROTECTED. "
                    f"Sell manually in the Agentic account (948184924).",
+                   tags="rotating_light")
+    elif halted:
+        # HALT: nothing was sold and nothing is "seen". Do NOT mark these fired —
+        # that would suppress every later alert and leave an unprotected position
+        # silent. A halted breach is the same situation as an exit that keeps
+        # failing, so it goes through the SAME unresolved/backoff/escalation path:
+        # re-alert on the retry cadence, then one loud manual-intervention push.
+        sold = set()
+        for t in act:
+            u = unresolved.setdefault(t["symbol"],
+                                      {"fails": 0, "last_try_ts": ts, "escalated": False})
+            u["fails"] += 1
+            u["last_try_ts"] = ts
+            if t["symbol"] in escalate:
+                u["escalated"] = True
+        if escalate:
+            notify("🚨 MANUAL INTERVENTION — HALT active, position unprotected",
+                   f"{', '.join(sorted(escalate))} breached its stop while the "
+                   f"kill-switch (research_store/HALT) is active, so NO exit was "
+                   f"placed. Sell manually, or `rm research_store/HALT` to let the "
+                   f"monitor handle it.",
                    tags="rotating_light")
     else:
         sold = {t["symbol"] for t in act}            # alert-only: mark seen, don't sell

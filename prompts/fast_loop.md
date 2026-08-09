@@ -15,7 +15,11 @@ HARD RULES (CLAUDE.md overrides everything):
 PROCEDURE — follow exactly, stop the moment any gate fails:
 
 1. **Kill-switch.** If the file `research_store/HALT` exists → STOP. Place
-   nothing. Report "halted by kill-switch".
+   nothing — not even a sell. Report "halted by kill-switch".
+   ⚠️ Do NOT treat `research_store/HALT_ENTRIES` this way. That is the softer
+   switch: it blocks new buys only, and exits must still go through. The plan
+   already reflects it (buys arrive pre-blocked), so continue the procedure
+   normally and place the sells.
 2. **Account.** `get_accounts`. Select the single account with
    `agentic_allowed=true`. If zero or more than one → ABORT, place nothing,
    report the ambiguity.
@@ -37,7 +41,10 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    writes `research_store/rh/order_plan.json` with `approved`, `blocked`, and the
    `live_approved` flag.
 6. **Gate.** Read `order_plan.json`.
-   - If a preflight halt fired (script printed "TRADING HALTED") → STOP.
+   - If the script printed "TRADING HALTED" → STOP. Place NOTHING.
+   - If it printed "NEW ENTRIES HALTED" that is **not** a stop: buys were blocked
+     (drawdown or `HALT_ENTRIES`) but the sells in `approved` must still be placed.
+     Exits are how risk goes down; refusing them is the unsafe direction.
    - If `live_approved` is `false` → STOP. Report the plan. Place NOTHING.
 7. **Place** (only if `live_approved` is true): for each order in `approved`,
    sells first, then buys: `review_equity_order` → on a clean review →

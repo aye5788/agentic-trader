@@ -96,10 +96,16 @@ before this touches money:
 
 1. `config/strategy.toml` → `[proof] live_approved = true`.
 2. That's the whole gate. Governance still applies every run:
-   - **Kill-switch:** `touch research_store/HALT` stops all trading instantly;
-     `rm` resumes. (Your panic button.)
+   - **Kill-switch:** `touch research_store/HALT` — the system places NO order,
+     buy or sell; `rm` resumes. ⚠️ Stops are software-only, so this also switches
+     off stop protection: the monitor keeps watching and phones every breach, but
+     you must sell by hand. (Your panic button — for when the *code* looks wrong.)
+   - **Halt entries:** `touch research_store/HALT_ENTRIES` — blocks new buys while
+     leaving stops and take-profits fully armed. The one to reach for when the
+     *market* looks wrong.
    - **Drawdown halt:** auto-stops new buys if the account falls >25% from its
-     tracked peak (`[governance] max_drawdown`).
+     tracked peak (`[governance] max_drawdown`). Blocks entries only — it can
+     never block an exit.
    - **Order cap:** rejects any single order >15% of account value.
    - **Whitelist:** only names in `config/universe.csv` + `etf_universe.csv`.
 
@@ -221,8 +227,11 @@ journalctl -u agentic-monitor -n 50           # monitor: silent unless a stop/ta
   redirects (broke heredocs, printf, and nano YAML). Prefer short single-line
   commands or type into an editor; fix stray YAML indent with `sed '2,$ s/^  //'`.
 
-**Kill switch:** `touch research_store/HALT` stops the monitor and fast loop
-instantly; `rm` resumes. **Pause new buys:** set `live_approved=false` in
+**Kill switch:** `touch research_store/HALT` — fast loop and monitor place
+nothing; `rm` resumes. The monitor keeps watching and alerting, but ⚠️ **your
+stops no longer fire — sell by hand while this is on.**
+**Pause new buys only (stops stay armed):** `touch research_store/HALT_ENTRIES`.
+**Disarm placement entirely:** set `live_approved=false` in
 `config/strategy.local.toml` (or delete that file to fully disarm).
 
 ## What is NOT yet automated (know before unattended live)

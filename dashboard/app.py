@@ -151,6 +151,9 @@ def build_data() -> dict:
         "regime": regime,
         "flags": {"live_approved": bool(cfg.get("proof", {}).get("live_approved")),
                   "kill_switch": (RS / "HALT").exists(),
+                  # a forgotten HALT_ENTRIES silently stops the book growing —
+                  # it has to be visible somewhere standing, not just in a log
+                  "halt_entries": (RS / "HALT_ENTRIES").exists(),
                   "monitor_book": mstate.get("book_asof")},
         "holdings": holdings,
         "plan": {
