@@ -9,7 +9,6 @@ Run the tests:  .venv/bin/python src/mandate.py --selftest
 """
 from __future__ import annotations
 
-import json
 import sys
 import tomllib
 from pathlib import Path
@@ -40,7 +39,10 @@ def _selftest() -> None:
     assert m["pnl_concentration"]["min_distinct_names"] == 4
     assert m["relative_return"]["window_days"] == 60
     assert m["relative_return"]["benchmark"] == "SPY"
-    assert PASS != FAIL != INSUFFICIENT
+    # Pairwise, not chained: `PASS != FAIL != INSUFFICIENT` reads as a three-way
+    # check but only asserts the two adjacent pairs, never PASS vs INSUFFICIENT.
+    # These three being distinguishable IS the module's central safety property.
+    assert PASS != FAIL and FAIL != INSUFFICIENT and PASS != INSUFFICIENT
     print("selftest OK: mandate loads, terms match")
 
 

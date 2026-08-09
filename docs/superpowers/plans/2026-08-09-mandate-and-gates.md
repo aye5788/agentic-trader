@@ -100,7 +100,6 @@ Run the tests:  .venv/bin/python src/mandate.py --selftest
 """
 from __future__ import annotations
 
-import json
 import sys
 import tomllib
 from pathlib import Path
@@ -131,7 +130,8 @@ def _selftest() -> None:
     assert m["pnl_concentration"]["min_distinct_names"] == 4
     assert m["relative_return"]["window_days"] == 60
     assert m["relative_return"]["benchmark"] == "SPY"
-    assert PASS != FAIL != INSUFFICIENT
+    # Pairwise, not chained: the chained form only asserts adjacent pairs.
+    assert PASS != FAIL and FAIL != INSUFFICIENT and PASS != INSUFFICIENT
     print("selftest OK: mandate loads, terms match")
 
 
