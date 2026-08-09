@@ -106,6 +106,56 @@ def drawdown(equity: list[float], max_pct: float) -> dict:
     return out
 
 
+def concentration(positions: dict, account_value: float, max_pct: float) -> dict:
+    """Criterion 2 (BLOCKING). Largest single position as a share of equity.
+
+    A position carrying no usable mark returns INSUFFICIENT rather than being
+    skipped: an unmeasurable position is exactly the one most likely to be the
+    concentrated one.
+
+    Same non-finite trap as `drawdown()`: NaN and +/-Infinity are valid Python
+    floats, so `isinstance(v, (int, float))` alone would let them through --
+    and because every comparison against NaN is False, the FAIL branch would
+    then be unreachable and this would report a confident PASS. Both a
+    position's `value` and `account_value` are validated with
+    `math.isfinite()`, not just a type check.
+    """
+    out = {"criterion": "concentration", "state": INSUFFICIENT, "value": None,
+           "limit": max_pct, "room": None, "worst_symbol": None, "reason": ""}
+    try:
+        av = float(account_value)
+    except (TypeError, ValueError):
+        out["reason"] = "account value unusable; concentration undefined"
+        return out
+    if not math.isfinite(av) or av <= 0:
+        out["reason"] = "account value unusable; concentration undefined"
+        return out
+    shares = {}
+    for sym, p in (positions or {}).items():
+        v = p.get("value")
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            out["reason"] = f"{sym} has no usable mark; concentration unmeasurable"
+            return out
+        if not math.isfinite(fv):
+            out["reason"] = f"{sym} has a non-finite mark; concentration unmeasurable"
+            return out
+        shares[sym] = fv / av
+    if not shares:
+        out.update(state=PASS, value=0.0, room=abs(max_pct),
+                   reason="no positions held")
+        return out
+    worst = max(shares, key=lambda s: shares[s])
+    out["worst_symbol"] = worst
+    out["value"] = shares[worst]
+    out["room"] = abs(max_pct) - shares[worst]
+    out["state"] = FAIL if shares[worst] > abs(max_pct) else PASS
+    out["reason"] = (f"{worst} at {shares[worst]:.1%} of equity "
+                     f"(limit {abs(max_pct):.0%})")
+    return out
+
+
 def _selftest() -> None:
     m = load()
     assert m["drawdown"]["max_pct"] == 0.15, m["drawdown"]
@@ -209,6 +259,46 @@ def _selftest() -> None:
     assert abs(r_finite_unaffected["value"] + 0.05) < 1e-9, r_finite_unaffected
     assert abs(r_finite_unaffected["room"] - 0.10) < 1e-9, r_finite_unaffected
     assert r_finite_unaffected["nulls_dropped"] == 0, r_finite_unaffected
+
+    # --- criterion 2: concentration -------------------------------------------
+    mc = m["concentration"]["max_position_pct"]
+    pos = {"AAA": {"value": 10.0}, "BBB": {"value": 5.0}}
+    r = concentration(pos, 100.0, mc)          # worst is 10% against a 15% limit
+    assert r["state"] == PASS, r
+    assert r["worst_symbol"] == "AAA" and abs(r["value"] - 0.10) < 1e-9, r
+    assert abs(r["room"] - 0.05) < 1e-9, r
+    # 20% of equity in one name breaches
+    r = concentration({"AAA": {"value": 20.0}}, 100.0, mc)
+    assert r["state"] == FAIL and r["worst_symbol"] == "AAA", r
+    # exactly at the limit is not a breach
+    assert concentration({"AAA": {"value": 15.0}}, 100.0, mc)["state"] == PASS
+    # a flat book trivially passes
+    assert concentration({}, 100.0, mc)["state"] == PASS
+    # unusable account value is undefined, not a pass
+    assert concentration(pos, 0.0, mc)["state"] == INSUFFICIENT
+    # a position with no mark cannot be assessed -- must not be silently skipped
+    assert concentration({"AAA": {"value": None}}, 100.0, mc)["state"] == INSUFFICIENT
+
+    # --- non-finite discipline (same trap as drawdown's review findings) -------
+    # NaN/inf are valid Python floats and pass an isinstance(float) check, so a
+    # bad mark must be caught by math.isfinite(), not just a type check -- else
+    # the FAIL comparison silently evaluates False and this reads as a PASS.
+    r_nan_pos = concentration({"AAA": {"value": float("nan")}}, 100.0, mc)
+    assert r_nan_pos["state"] == INSUFFICIENT, r_nan_pos
+    assert "AAA" in r_nan_pos["reason"], r_nan_pos
+    r_inf_pos = concentration({"AAA": {"value": float("inf")}}, 100.0, mc)
+    assert r_inf_pos["state"] == INSUFFICIENT, r_inf_pos
+    assert "AAA" in r_inf_pos["reason"], r_inf_pos
+    # a non-finite account_value must not be silently coerced/compared away
+    r_nan_av = concentration(pos, float("nan"), mc)
+    assert r_nan_av["state"] == INSUFFICIENT, r_nan_av
+    r_inf_av = concentration(pos, float("inf"), mc)
+    assert r_inf_av["state"] == INSUFFICIENT, r_inf_av
+    # an ordinary book with finite marks is entirely unaffected by the isfinite check
+    r_ord = concentration(pos, 100.0, mc)
+    assert r_ord["state"] == PASS, r_ord
+    assert r_ord["worst_symbol"] == "AAA" and abs(r_ord["value"] - 0.10) < 1e-9, r_ord
+    assert abs(r_ord["room"] - 0.05) < 1e-9, r_ord
 
     print("selftest OK: mandate loads, terms match")
 
