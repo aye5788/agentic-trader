@@ -126,11 +126,17 @@ def append_intent(intent: dict, *, path: Path = INTENTS) -> None:
 
 
 def build_facts(valued, theses, cfg, *, highs, spy_ret, cur_sigma, entry_sigma,
-                vix, regime_on, now_iso) -> dict:
+                vix, regime_on, now_iso, ma=None) -> dict:
     """Per-name risk readout. Flags are attention hints for the agent, not
     triggers — the agent judges every held name each pass. `spy_ret` = recent
     return minus SPY's (spec §5 #1); `cur_sigma` = current trailing daily sigma
-    (spec §5 #5), compared against `entry_sigma` for vol expansion."""
+    (spec §5 #5), compared against `entry_sigma` for vol expansion. `ma` = the
+    trailing `ma_break_days` moving average per symbol (spec §5 #4).
+
+    Every input here is best-effort: a missing measurement leaves its flag OFF.
+    That is deliberate — a flag must mean "measured and breached", never
+    "guessed". It is also why each flag needs binding telemetry (src/controls.py)
+    to prove it can still fire at all."""
     by_sym = {t.symbol: t for t in theses}
     out = []
     for sym, p in (valued.get("positions") or {}).items():
@@ -150,16 +156,28 @@ def build_facts(valued, theses, cfg, *, highs, spy_ret, cur_sigma, entry_sigma,
         cs = cur_sigma.get(sym)
         if es and cs and cs > cfg["vol_expansion_mult"] * es:
             flags.append("vol_expansion")
-        rb = (th.review_by or "")[:10]
-        if rb and rb <= _days_ahead_iso(now_iso, cfg["earnings_window_days"]):
+        # Earnings proximity reads the REAL report date (Thesis.earnings_date,
+        # stamped by slow_loop from event_calendar). It deliberately does NOT read
+        # review_by: that is always "<date> (weekly rebalance)" in production, so
+        # the old wiring could never fire. No date = no flag, never a guess.
+        ed = (th.earnings_date or "")[:10]
+        today = now_iso[:10]
+        if ed and today <= ed <= _days_ahead_iso(now_iso, cfg["earnings_window_days"]):
             flags.append("earnings_soon")
+        # 21-day MA break (cfg["ma_break_days"]) — the [trade_management].ma_exit_days
+        # line that had no live consumer anywhere. Surfaced as a flag, NOT an exit:
+        # turning it into an automatic sell is a strategy change, not a bug fix.
+        mval = (ma or {}).get(sym)
+        if mval and mark and mark < mval:
+            flags.append("ma_break")
         out.append({
             "symbol": sym, "mark": round(float(mark), 4), "stop": th.stop,
             "targets": th.targets, "pnl_pct": p.get("pnl"),
             "dist_to_stop_pct": round(dist_to_stop, 4) if dist_to_stop is not None else None,
             "giveback_from_high_pct": round(giveback, 4) if giveback is not None else None,
             "rel_return_vs_spy": spy_ret.get(sym), "rank": th.rank,
-            "review_by": th.review_by, "flags": flags,
+            "review_by": th.review_by, "earnings_date": th.earnings_date,
+            "ma": (ma or {}).get(sym), "flags": flags,
         })
     return {"generated": now_iso,
             "backdrop": {"vix": vix, "vix_ceiling": 28.0, "regime_on": regime_on},
@@ -327,6 +345,25 @@ def _gather_cur_sigma(prod) -> dict:
         return {}
 
 
+def _gather_ma(prod, days: int) -> dict:
+    """Trailing `days`-session moving average per held name, from the cached
+    closes panel. Feeds the ma_break flag. Best-effort: no panel, or too little
+    history for a name, simply leaves that name unmeasured (no flag)."""
+    try:
+        import pandas as pd
+        closes = pd.read_parquet(REPO / "research_store" / "prices" / "closes.parquet")
+        out = {}
+        for t in _held(prod):
+            if t.symbol not in closes.columns:
+                continue
+            s = closes[t.symbol].dropna()
+            if len(s) >= days:
+                out[t.symbol] = round(float(s.iloc[-days:].mean()), 4)
+        return out
+    except Exception:
+        return {}
+
+
 def _gather_entry_sigma(prod) -> dict:
     return {t.symbol: (t.signals or {}).get("sigma") for t in prod.theses
             if (t.signals or {}).get("sigma")}
@@ -437,6 +474,59 @@ def _selftest() -> None:
     assert pos["rel_return_vs_spy"] == -0.04                   # lagging SPY
     assert facts["backdrop"]["vix"] == 22.0
 
+    # --- CONTRACT: build_facts against a REAL produced book ------------------
+    # 2026-08-05: `earnings_soon` had fired ZERO times in production because it
+    # read Thesis.review_by, and slow_loop.py writes that unconditionally as
+    # "<date> (weekly rebalance)" — never an earnings date. The old fixture above
+    # hand-built review_by="... (next earnings)", a shape production cannot emit,
+    # so a green selftest certified a control that could never bind.
+    # Rule this encodes: a consumer's test input must come from the real producer.
+    from research_store.models import ResearchProduct
+    arch = REPO / "research_store" / "archive" / "2026-08-04.json"
+    if arch.exists():
+        prod = ResearchProduct.from_dict(json.loads(arch.read_text()))
+        real = prod.by_symbol().get("WDC")
+        assert real is not None, "expected WDC in the archived 2026-08-04 book"
+        assert "weekly rebalance" in (real.review_by or ""), \
+            "producer no longer writes a rebalance review_by — revisit this contract"
+        real.earnings_date = "2026-08-05"        # WDC really did report that night
+        rv = {"positions": {"WDC": {"qty": 1.0, "avg_cost": 542.78, "mark": 550.52,
+                                    "value": 550.52, "pnl": 0.014}}}
+        rf = build_facts(rv, [real], cfg, highs={"WDC": 560.0}, spy_ret={"WDC": 0.0},
+                         cur_sigma={"WDC": 0.048}, entry_sigma={"WDC": 0.048},
+                         vix=15.9, regime_on=True, now_iso="2026-08-05T14:00:00+00:00")
+        rp = rf["positions"][0]
+        assert "earnings_soon" in rp["flags"], \
+            f"earnings_soon must bind on a REAL thesis; got {rp['flags']}"
+        assert rp["earnings_date"] == "2026-08-05"
+        # ...and must NOT fire off the rebalance date when there is no earnings date
+        real.earnings_date = None
+        rf2 = build_facts(rv, [real], cfg, highs={"WDC": 560.0}, spy_ret={"WDC": 0.0},
+                          cur_sigma={"WDC": 0.048}, entry_sigma={"WDC": 0.048},
+                          vix=15.9, regime_on=True, now_iso="2026-08-05T14:00:00+00:00")
+        assert "earnings_soon" not in rf2["positions"][0]["flags"], \
+            "earnings_soon fired without an earnings date — it is reading the wrong field"
+
+    # --- ma_break: cfg["ma_break_days"] was accepted and never read ----------
+    # strategy.toml claims it "revives the specced-but-dead ma_exit line". It
+    # revived nothing: build_facts took the key and dropped it on the floor.
+    mv = {"positions": {"BE": {"qty": 1.0, "avg_cost": 200.0, "mark": 210.0,
+                               "value": 210.0, "pnl": 0.05}}}
+    mt = [Thesis(symbol="BE", rank=3, verdict="buy", stop=190.0,
+                 targets=[230.0, 260.0], target_weight=0.07)]
+    kw = dict(highs={"BE": 250.0}, spy_ret={"BE": 0.0}, cur_sigma={"BE": 0.03},
+              entry_sigma={"BE": 0.03}, vix=15.0, regime_on=True,
+              now_iso="2026-08-05T14:00:00+00:00")
+    # below the 21-day MA -> flagged
+    f_lo = build_facts(mv, mt, cfg, ma={"BE": 220.0}, **kw)
+    assert "ma_break" in f_lo["positions"][0]["flags"], f_lo["positions"][0]["flags"]
+    # above it -> not flagged
+    f_hi = build_facts(mv, mt, cfg, ma={"BE": 205.0}, **kw)
+    assert "ma_break" not in f_hi["positions"][0]["flags"], f_hi["positions"][0]["flags"]
+    # MA unavailable -> no flag and no crash (best-effort, never fabricate)
+    f_none = build_facts(mv, mt, cfg, **kw)
+    assert "ma_break" not in f_none["positions"][0]["flags"]
+
     with tempfile.TemporaryDirectory() as d:
         ovp, dp = Path(d) / "ov.json", Path(d) / "dec.json"
         dp.write_text(json.dumps([
@@ -516,6 +606,7 @@ def main() -> None:
         facts = build_facts(valued, prod.theses, rc, highs=_gather_highs(prod),
                             spy_ret=_gather_rel_strength(prod), cur_sigma=_gather_cur_sigma(prod),
                             entry_sigma=_gather_entry_sigma(prod),
+                            ma=_gather_ma(prod, int(rc.get("ma_break_days", 21))),
                             vix=_gather_vix(), regime_on=((prod.regime or {}).get("status") == "on"),
                             now_iso=datetime.now(timezone.utc).isoformat(timespec="seconds"))
         FACTS.parent.mkdir(parents=True, exist_ok=True)

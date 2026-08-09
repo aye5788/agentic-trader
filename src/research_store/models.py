@@ -34,7 +34,11 @@ class Thesis:
     confidence: float = 0.0                           # 0..1
     signals: dict = field(default_factory=dict)       # evidence + provenance
     as_of: str | None = None
-    review_by: str | None = None                      # e.g. "2026-07-30 (next earnings)"
+    review_by: str | None = None                      # e.g. "2026-07-30 (weekly rebalance)"
+    earnings_date: str | None = None                  # "YYYY-MM-DD" next confirmed/est.
+                                                      #   report, stamped by slow_loop from
+                                                      #   event_calendar. None = unknown, and
+                                                      #   unknown NEVER fabricates a flag.
     outcome: dict | None = None                       # set on close: {status, pnl_pct, ...}
     decision_id: str | None = None                    # "<SYMBOL>:<as_of>" join key
 

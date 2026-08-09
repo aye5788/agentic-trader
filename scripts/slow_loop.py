@@ -112,6 +112,31 @@ SECTOR_ETFS = ["XLE", "XLF", "XLK", "XLV", "XLI", "XLP",
                "XLY", "XLU", "XLB", "XLRE", "XLC"]
 
 
+def stamp_earnings(theses, lookup) -> int:
+    """Stamp each thesis with its next real report date. Returns how many bound.
+
+    Split out and injected (`lookup(symbol) -> "YYYY-MM-DD" | None`) so the
+    binding is testable without Finnhub. Fails OPEN by design: a lookup that
+    raises or returns nothing leaves `earnings_date=None`, which downstream
+    means "unknown", never "no earnings". A guard must never invent certainty.
+
+    Before 2026-08-05 nothing populated this at all, and `risk_review`'s
+    earnings flag read `review_by` — which this loop always writes as
+    "(weekly rebalance)". The flag therefore fired zero times in production
+    while its selftest passed green. See src/controls.py.
+    """
+    n = 0
+    for t in theses:
+        try:
+            d = lookup(t.symbol)
+        except Exception:
+            d = None
+        if d:
+            t.earnings_date = str(d)[:10]
+            n += 1
+    return n
+
+
 def residual_kwargs(cfg, closes, spy):
     """Build the BOOK-compute residual kwargs from [signal] config.
 
@@ -138,10 +163,44 @@ def residual_kwargs(cfg, closes, spy):
     return {}
 
 
+def _selftest() -> None:
+    """Covers stamp_earnings' binding + its fail-open contract."""
+    from research_store.models import Thesis
+    ts = [Thesis(symbol="WDC", rank=1, verdict="buy"),
+          Thesis(symbol="MU", rank=2, verdict="buy")]
+
+    # a real lookup binds only the names it knows; the rest stay None (unknown)
+    n = stamp_earnings(ts, {"WDC": "2026-08-05"}.get)
+    assert n == 1, n
+    assert ts[0].earnings_date == "2026-08-05", ts[0]
+    assert ts[1].earnings_date is None, "unknown must stay unknown, not be invented"
+
+    # a lookup that BLOWS UP must not take the book down, and must not fabricate
+    def boom(_sym):
+        raise RuntimeError("finnhub down")
+    ts2 = [Thesis(symbol="AMD", rank=1, verdict="buy")]
+    assert stamp_earnings(ts2, boom) == 0
+    assert ts2[0].earnings_date is None
+
+    # the stamped field must survive the store round-trip, or risk_review
+    # reads None off disk and the flag silently dies again
+    from research_store.models import ResearchProduct
+    rp = ResearchProduct.from_dict(
+        ResearchProduct(as_of="2026-08-05", theses=ts).to_dict())
+    assert rp.by_symbol()["WDC"].earnings_date == "2026-08-05", \
+        "earnings_date did not survive to_dict/from_dict"
+
+    print("selftest OK: earnings stamping binds, fails open, and round-trips")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true", help="print, don't write the store")
+    ap.add_argument("--selftest", action="store_true", help="logic tests, no I/O")
     args = ap.parse_args()
+    if args.selftest:
+        _selftest()
+        return
 
     if not PANEL.exists():
         sys.exit("no price cache — run scripts/fetch_prices.py first")
@@ -205,6 +264,25 @@ def main() -> None:
     etf_held, etf_drop = build_theses(etf_sel, etf_scored, closes, asof, per_etf, TM, 100)
 
     theses = book_held + etf_held
+
+    # ---- stamp real earnings dates onto the book ----------------------------
+    # The book is the ONLY place this can live: risk_review runs at 12:00/15:45
+    # ET, and nothing that exists only during RTH can see an overnight gap. The
+    # date rides the thesis so the monitor, the fast loop and the ledger all read
+    # the same number. Whole step is fail-open — no calendar, no flag, no crash.
+    n_stamped = 0
+    try:
+        import event_calendar as evcal                       # noqa: E402
+        today = str(asof.date())
+        cal = evcal.compiler.compile_calendar(
+            [t.symbol for t in theses], as_of=today, from_date=today,
+            to_date=str((asof + pd.Timedelta(days=45)).date()))
+        n_stamped = stamp_earnings(
+            theses, lambda s: (cal.get(s.upper()) or {}).get("report_date"))
+    except Exception as e:                                   # noqa: BLE001
+        print(f"  !! earnings calendar unavailable ({type(e).__name__}: {e}) — "
+              f"theses carry earnings_date=None (unknown, not 'no earnings')")
+
     product = ResearchProduct(
         as_of=str(asof.date()), theses=theses,
         regime={"status": "on" if regime else "off",
@@ -219,6 +297,10 @@ def main() -> None:
     print(f"as_of {asof.date()} | regime {'ON' if regime else 'OFF (cash)'} "
           f"(trend={trend}, vix={f'{vix:.1f}' if vix is not None else 'n/a'}/{ceiling:g}) | "
           f"book {len(book_held)}/{P['book_hold']} held, sleeve {len(etf_held)}/{P['sleeve_hold']} held")
+    _soon = [t.symbol for t in theses if t.earnings_date
+             and t.earnings_date <= str((asof + pd.Timedelta(days=5)).date())]
+    print(f"earnings: {n_stamped}/{len(theses)} dated"
+          + (f" | REPORTING WITHIN 5d: {', '.join(sorted(_soon))}" if _soon else ""))
     print(f"\n{'BOOK (top-10, R:R>=2 gated)':40}{'weight':>8}{'entry':>9}{'stop':>9}{'R:R':>6}")
     for t in book_held:
         print(f"  {t.symbol:<8}{t.thesis[:28]:<30}{t.target_weight:>8.2%}"
