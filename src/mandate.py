@@ -30,6 +30,31 @@ def load(path: str = "config/mandate.toml") -> dict:
         return tomllib.load(fh)
 
 
+def drawdown(equity: list[float], max_pct: float) -> dict:
+    """Criterion 1 (BLOCKING). Close-to-close drawdown from the all-time high-water
+    mark. `equity` is the ordered daily close series, oldest first.
+
+    Never measured intraday: an intraday measure fires the flatten on noise.
+    """
+    out = {"criterion": "drawdown", "state": INSUFFICIENT, "value": None,
+           "limit": max_pct, "room": None, "reason": ""}
+    vals = [float(v) for v in equity if v is not None]
+    if len(vals) < 2:
+        out["reason"] = f"need 2+ daily closes, have {len(vals)}"
+        return out
+    peak = max(vals)
+    if peak <= 0:
+        out["reason"] = "non-positive peak equity; drawdown undefined"
+        return out
+    dd = vals[-1] / peak - 1.0
+    out["value"] = dd
+    out["room"] = abs(max_pct) + dd          # how much further it may fall
+    out["state"] = FAIL if dd < (-abs(max_pct) - 1e-9) else PASS
+    out["reason"] = (f"{dd:.2%} from peak {peak:.2f} "
+                     f"(limit {abs(max_pct):.0%})")
+    return out
+
+
 def _selftest() -> None:
     m = load()
     assert m["drawdown"]["max_pct"] == 0.15, m["drawdown"]
@@ -43,6 +68,25 @@ def _selftest() -> None:
     # check but only asserts the two adjacent pairs, never PASS vs INSUFFICIENT.
     # These three being distinguishable IS the module's central safety property.
     assert PASS != FAIL and FAIL != INSUFFICIENT and PASS != INSUFFICIENT
+
+    # --- criterion 1: drawdown ------------------------------------------------
+    md = m["drawdown"]["max_pct"]
+    # peak 100 -> 95 is a 5% drawdown against a 15% limit: PASS, 10% of room left
+    r = drawdown([80.0, 100.0, 95.0], md)
+    assert r["state"] == PASS, r
+    assert abs(r["value"] + 0.05) < 1e-9, r
+    assert abs(r["room"] - 0.10) < 1e-9, r
+    # peak 100 -> 84 breaches 15%
+    assert drawdown([100.0, 84.0], md)["state"] == FAIL
+    # exactly at the limit is NOT a breach (breach is strictly worse than the limit)
+    assert drawdown([100.0, 85.0], md)["state"] == PASS
+    # the peak is all-time and does not follow the book down
+    assert abs(drawdown([100.0, 90.0, 92.0], md)["value"] + 0.08) < 1e-9
+    # fewer than two points cannot express a drawdown
+    assert drawdown([100.0], md)["state"] == INSUFFICIENT
+    assert drawdown([], md)["state"] == INSUFFICIENT
+    # a non-positive peak is undefined, not a pass
+    assert drawdown([0.0, 0.0], md)["state"] == INSUFFICIENT
     print("selftest OK: mandate loads, terms match")
 
 
