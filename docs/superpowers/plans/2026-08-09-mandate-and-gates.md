@@ -195,6 +195,13 @@ defaulting: an unstated mandate must never silently become a permissive one."
 Run: `.venv/bin/python src/mandate.py --selftest`
 Expected: FAIL with `NameError: name 'drawdown' is not defined`
 
+> ⚠️ **SUPERSEDED 2026-08-09.** The implementation below shipped and then took two fix
+> waves in review. It silently dropped `None` (letting a missing latest point promote a
+> stale value to "current") and let `NaN`/`±Inf` through the numeric guard, where a NaN
+> returned a confident `PASS` because every NaN comparison is False. **Read the shipped
+> `drawdown()` in `src/mandate.py` as the reference, not this block** — it is kept here
+> only to show what the task started from.
+
 - [ ] **Step 3: Implement — add above `_selftest()`**
 
 ```python
