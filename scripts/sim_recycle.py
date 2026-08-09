@@ -52,7 +52,15 @@ sys.path.insert(0, str(REPO / "src"))
 PRICES = REPO / "research_store" / "prices"
 LOOKBACK = 252
 HOLD_N = 10
-COST_BPS = 5.0            # per side, on notional
+# Per side, on notional. NOT commission — Robinhood charges none on stocks. This
+# is bid/ask spread + slippage, which is real because both the fast loop and the
+# exit executor place MARKET orders, so every entry and exit crosses the spread.
+# 1bp is defensible for the mega-cap liquidity this universe holds. An earlier
+# run used 5bps, which was never justified and was NOT neutral: the tight-target
+# variants trade ~10x more often, so a per-trade cost penalises exactly the
+# hypothesis under test. Verified at 0/1/5 — the ranking is identical at all
+# three and 0.5-sigma is negative even frictionless. Override with --cost-bps N.
+COST_BPS = 1.0
 TARGETS = [0.5, 1.0, 2.0, 3.0, 5.5, None]   # None = no target at all
 STOP_MULT = 2.5
 
@@ -153,7 +161,7 @@ def simulate(close, high, low, sigma, ranks, tgt_mult, stop_mult=STOP_MULT,
     return pd.Series(curve, index=dates), trades
 
 
-def run(same_day: bool = False) -> dict:
+def run(same_day: bool = False, cost_bps: float = COST_BPS) -> dict:
     import momentum
     close = pd.read_parquet(PRICES / "closes.parquet")
     high = pd.read_parquet(PRICES / "highs.parquet")
@@ -167,7 +175,7 @@ def run(same_day: bool = False) -> dict:
 
     rebal = close.index[LOOKBACK::5]                       # weekly rebuild
     print(f"universe {len(cols)} names | {close.index[0].date()} -> {close.index[-1].date()} "
-          f"| {len(rebal)} weekly rebuilds | cost {COST_BPS}bps/side "
+          f"| {len(rebal)} weekly rebuilds | spread/slippage {cost_bps}bps/side "
           f"| redeploy {'SAME-DAY' if same_day else 'T+1'}")
 
     rows = {}
@@ -181,7 +189,7 @@ def run(same_day: bool = False) -> dict:
     print("  -------+---------+---------+---------+--------+--------")
     for t in TARGETS:
         curve, tr = simulate(close, high, low, sigma, ranks, t, same_day=same_day,
-                             rebal_dates=frozenset(rebal))
+                             cost_bps=cost_bps, rebal_dates=frozenset(rebal))
         m = _metrics(curve, tr)
         lbl = "none" if t is None else f"{t:.1f}s"
         out[lbl], curves[lbl] = m, curve
@@ -259,7 +267,9 @@ if __name__ == "__main__":
         _selftest()
     else:
         same = "--same-day" in sys.argv
-        res = run(same_day=same)
+        cb = float(sys.argv[sys.argv.index("--cost-bps") + 1]) \
+            if "--cost-bps" in sys.argv else COST_BPS
+        res = run(same_day=same, cost_bps=cb)
         p = REPO / "research_store" / ("recycle_sim_sameday.json" if same
                                        else "recycle_sim.json")
         p.write_text(json.dumps(res, indent=2))
