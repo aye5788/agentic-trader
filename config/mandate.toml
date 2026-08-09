@@ -1,0 +1,39 @@
+# THE MANDATE — the falsifiable terms the agent operates under.
+#
+# This file states WHAT SUCCESS IS. It states nothing about HOW to trade: no
+# universe, no entry signal, no exit rule, no sizing formula. Those belong to the
+# agent (docs/superpowers/specs/2026-08-09-agent-authority-inversion-design.md §3).
+#
+# If a line here reads as an instruction about WHAT to trade, that is a defect in
+# this file. Report it rather than obeying it.
+#
+# Every criterion is three-state: PASS / FAIL / INSUFFICIENT_DATA.
+# INSUFFICIENT_DATA is never a pass.
+
+# --- BLOCKING (safety). A FAIL here makes the machine act. -------------------
+[drawdown]
+max_pct = 0.15        # close-to-close, from the all-time high-water mark.
+                      #   Breach -> mechanical flatten. NEVER measured intraday:
+                      #   an intraday measure fires the flatten on noise.
+
+[concentration]
+max_position_pct = 0.15   # no single position above this share of equity, at any mark
+
+# --- INFORMATIONAL (performance). These judge whether autonomy is working.
+# --- They NEVER gate an order.  ----------------------------------------------
+[pnl_concentration]
+window_days        = 90
+max_single_share   = 0.40   # no one closed round-trip above this share of realized P&L
+min_distinct_names = 4      # ...and at least this many distinct names closed
+
+[relative_return]
+window_days = 60            # trading days
+benchmark   = "SPY"
+
+# --- Tradeability floor (safety, not selection) ------------------------------
+# The universe whitelist encoded "these names are liquid enough". This states the
+# property directly, so the agent may trade anything that clears it rather than
+# only names on a list someone curated. Derived from the 20th percentile of
+# 20-day average dollar volume across config/universe.csv on 2026-08-09.
+[liquidity]
+min_dollar_volume_20d = 50_000_000.0
