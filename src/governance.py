@@ -42,6 +42,7 @@ Run the tests:  .venv/bin/python src/governance.py --selftest
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -80,7 +81,19 @@ def update_peak(account_value: float) -> dict:
 
 
 def drawdown_halt(account_value: float, cfg) -> tuple[bool, float]:
-    """(halted?, current_drawdown). Updates the peak as a side effect."""
+    """(halted?, current_drawdown). Updates the peak as a side effect.
+
+    FAILS CLOSED on a non-finite account_value (NaN/+inf/-inf): every direct
+    comparison against NaN evaluates False, so `dd < -abs(max_drawdown)` would
+    silently read as "not halted" for a corrupted reading — the exact opposite
+    of what a corrupted number should produce. A non-finite value is therefore
+    treated as an automatic halt (of ENTRIES — see gates()), and it is NEVER
+    passed to update_peak(): `max(stored_peak, nan)` happens to return the
+    first argument today, but that is luck, not a guarantee, and a poisoned
+    peak would corrupt every future drawdown measurement permanently.
+    """
+    if not math.isfinite(account_value):
+        return True, float("nan")
     peak = update_peak(account_value)["peak_value"] or float(account_value)
     dd = 0.0 if peak <= 0 else (float(account_value) / peak - 1.0)
     return dd < -abs(cfg["governance"]["max_drawdown"]), dd
@@ -117,7 +130,18 @@ def gates(account_value: float, cfg) -> dict:
         block_entries.append(
             f"HALT-ENTRIES active ({g.get('halt_entries_file', HALT_ENTRIES_DEFAULT)}"
             " present) — no new buys; stop/target exits stay armed.")
-    if halted:
+    if not math.isfinite(account_value):
+        # A corrupted (NaN/inf) account_value cannot be compared against the
+        # drawdown limit at all, so it must surface as its OWN blocking
+        # condition rather than silently falling through drawdown_halt's
+        # "not halted" branch. Entries only — see drawdown_halt() docstring
+        # for why an exit must never be blocked by this.
+        block_entries.append(
+            f"ACCOUNT VALUE INVALID ({account_value!r}) — a corrupted/non-finite "
+            "account value cannot be used to measure drawdown or size an order; "
+            "refusing new buys until a trustworthy value is available. "
+            "Stop/target exits stay armed.")
+    elif halted:
         block_entries.append(
             f"DRAWDOWN halt: {dd:.1%} from peak (limit {g['max_drawdown']:.0%}) — "
             "no new buys; stop/target exits stay armed.")
@@ -127,7 +151,15 @@ def gates(account_value: float, cfg) -> dict:
 
 def apply_entry_halts(plan: list[dict], reasons: list[str]) -> tuple[list[dict], list[dict]]:
     """Split a plan when risk-INCREASING orders are halted: buys are blocked,
-    every sell passes through untouched. Pure. No reasons -> plan unchanged."""
+    every sell passes through untouched. Pure. No reasons -> plan unchanged.
+
+    Safe against a malformed order: this only ever branches on `o["side"]`
+    (a string equality check), never on `o["amount"]`, so a NaN/inf/missing
+    amount cannot flip a comparison here the way it can in drawdown_halt/
+    vet_plan. Amount validity is vet_plan's job and runs before this in the
+    fast loop (gates -> vet_plan -> apply_entry_halts), so a malformed BUY
+    should already be gone by the time it would reach here.
+    """
     if not reasons:
         return list(plan), []
     why = "; ".join(reasons)
@@ -136,18 +168,39 @@ def apply_entry_halts(plan: list[dict], reasons: list[str]) -> tuple[list[dict],
     return approved, blocked
 
 
+def _amount_invalid(amount) -> bool:
+    """True if `amount` cannot be trusted to size an order or compare against a
+    cap: missing, not a number at all, or non-finite (NaN/+inf/-inf). Every
+    direct comparison against NaN is False, so `amount > max_order` silently
+    APPROVES a NaN order unless this is checked first."""
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        return True
+    return not math.isfinite(amount)
+
+
 def vet_plan(plan: list[dict], account_value: float, cfg) -> tuple[list[dict], list[dict]]:
     """Split a plan into (approved, blocked). Each blocked order carries a reason.
     Only BUYS are capped by max_order_pct — capping a sell would strand a position
-    the system is trying to exit."""
+    the system is trying to exit. For the same reason, a corrupted/missing
+    `amount` or a non-finite `account_value` (which makes the cap itself
+    meaningless — max_order would be NaN) ONLY ever blocks a BUY here; a SELL
+    is never refused for this reason, so a bad mark can never trap an open
+    position."""
     g = cfg["governance"]
     wl = whitelist(cfg) if g.get("require_whitelist") else None
-    max_order = g["max_order_pct"] * float(account_value)
+    account_value_bad = not math.isfinite(account_value)
+    max_order = None if account_value_bad else g["max_order_pct"] * float(account_value)
     approved, blocked = [], []
     for o in plan:
         why = None
         if wl is not None and o["symbol"] not in wl:
             why = "not in whitelist universe"
+        elif o["side"] == "buy" and _amount_invalid(o.get("amount")):
+            why = (f"order amount is invalid ({o.get('amount')!r}) — must be a "
+                   "finite number; refusing to size this buy")
+        elif o["side"] == "buy" and account_value_bad:
+            why = (f"account value is invalid ({account_value!r}) — the order "
+                   "cap cannot be computed; refusing this buy")
         elif o["side"] == "buy" and o["amount"] > max_order + 1e-9:
             why = f"${o['amount']:.2f} exceeds max order ${max_order:.2f} ({g['max_order_pct']:.0%})"
         (blocked if why else approved).append({**o, "blocked": why} if why else o)
@@ -231,8 +284,64 @@ def _selftest() -> None:
             assert "not in whitelist" in blkd[0]["blocked"]
             assert "exceeds max order" in blkd[1]["blocked"]
 
+            # 8. NaN/CORRUPTED-VALUE REGRESSION: a non-finite account_value must
+            #    fail CLOSED through drawdown_halt (not silently "not halted",
+            #    which is what every direct NaN comparison produces), and must
+            #    NEVER poison the persisted peak.
+            seed_peak = _load_state()["peak_value"]
+            assert seed_peak == 100.0, seed_peak
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                halted, dd = drawdown_halt(bad, cfg)
+                assert halted is True, (bad, halted, "must fail CLOSED, not open")
+                assert math.isnan(dd), (bad, dd)
+                assert _load_state()["peak_value"] == seed_peak, (
+                    "non-finite account_value must NEVER reach update_peak()")
+
+            # 9. gates() must surface a non-finite account_value as its own
+            #    blocking condition, and it must be entries-only (never a sell).
+            g = gates(float("nan"), cfg)
+            assert g["block_all"] == [], "invalid account value must NOT block a sell/all"
+            assert len(g["block_entries"]) == 1, g
+            assert "ACCOUNT VALUE INVALID" in g["block_entries"][0], g
+            appr, blkd = apply_entry_halts([buy, sell], g["block_entries"])
+            assert appr == [sell], "sell must still pass with a corrupted account value"
+            assert len(blkd) == 1 and blkd[0]["symbol"] == "AAPL"
+            assert _load_state()["peak_value"] == seed_peak, "gates() must not poison the peak either"
+
+            for bad in (float("inf"), float("-inf")):
+                g = gates(bad, cfg)
+                assert g["block_all"] == [], bad
+                assert "ACCOUNT VALUE INVALID" in g["block_entries"][0], (bad, g)
+
+            # 10. vet_plan: a malformed order amount must BLOCK a buy — never
+            #     approve it — and must NEVER block a sell (same "don't trap an
+            #     open position" rule as the halt tier).
+            bad_amounts = [float("nan"), float("inf"), float("-inf"), None, "not-a-number"]
+            buy_plan = [{"symbol": "AAPL", "side": "buy", "amount": a} for a in bad_amounts]
+            buy_plan.append({"symbol": "AAPL", "side": "buy"})            # amount missing entirely
+            appr, blkd = vet_plan(buy_plan, 100.0, cfg)
+            assert appr == [], "no buy with a malformed amount may ever be approved"
+            assert len(blkd) == len(buy_plan), blkd
+            assert all("invalid" in b["blocked"] for b in blkd), blkd
+
+            sell_plan = [{"symbol": "AAPL", "side": "sell", "amount": a} for a in bad_amounts]
+            appr, blkd = vet_plan(sell_plan, 100.0, cfg)
+            assert blkd == [], "a malformed amount must NEVER block a sell"
+            assert len(appr) == len(sell_plan)
+
+            # 11. vet_plan: a non-finite account_value makes the cap itself
+            #     meaningless -> blocks buys, never sells.
+            appr, blkd = vet_plan([buy, sell], float("nan"), cfg)
+            assert appr == [sell], "invalid account value must never block a SELL"
+            assert len(blkd) == 1 and "account value is invalid" in blkd[0]["blocked"], blkd
+            for bad in (float("inf"), float("-inf")):
+                appr, blkd = vet_plan([buy, sell], bad, cfg)
+                assert appr == [sell], bad
+                assert len(blkd) == 1 and "account value is invalid" in blkd[0]["blocked"]
+
         print("selftest OK: governance two-tier gates "
-              "(only the kill switch blocks a sell), peak, whitelist, order cap")
+              "(only the kill switch blocks a sell), peak, whitelist, order cap, "
+              "NaN/inf account_value and order-amount fail-closed handling")
     finally:
         REPO, STATE = _repo, _state
 
