@@ -285,6 +285,12 @@ by a bad stretch."
 Run: `.venv/bin/python src/mandate.py --selftest`
 Expected: FAIL with `NameError: name 'concentration' is not defined`
 
+> ⚠️ **SUPERSEDED 2026-08-09.** The implementation below shipped and then took a fix wave.
+> `isinstance(v, (int, float))` admits `NaN`/`±inf` (they ARE floats), and
+> `max(shares, key=signed)` let a negative value read as a confident PASS or be shadowed by
+> a smaller positive one. **Read the shipped `concentration()` in `src/mandate.py` as the
+> reference, not this block.**
+
 - [ ] **Step 3: Implement — add above `_selftest()`**
 
 ```python
