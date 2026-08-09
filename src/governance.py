@@ -123,9 +123,26 @@ def assert_agentic_account(accounts, snapshot_account: str | None = None) -> str
     vet_plan) where a loosely-typed value must never slide through the
     permissive branch of the ONE guard standing between the agent and every
     other account the user owns.
+
+    `accounts` must be a list of dicts, or this raises PermissionError rather
+    than crashing: a malformed element is NEVER skipped and scanning continued,
+    because a skipped element could have been the one authorised account, and
+    silently dropping it would turn "I cannot parse this" into "I found exactly
+    one account" -- the exact failure this function exists to prevent.
     """
+    if accounts is not None and not isinstance(accounts, list):
+        raise PermissionError(
+            f"accounts must be a list, got {type(accounts).__name__}; "
+            "cannot know what is in it, placing nothing")
+    for a in (accounts or []):
+        if not isinstance(a, dict):
+            raise PermissionError(
+                f"account list could not be parsed: element {a!r} is not an "
+                f"account record ({type(a).__name__}, not dict); cannot know "
+                "what is in it, placing nothing")
     allowed = [a for a in (accounts or [])
-               if a.get("agentic_allowed") is True and a.get("account_number")]
+               if a.get("agentic_allowed") is True
+               and str(a.get("account_number") or "").strip()]
     if not allowed:
         raise PermissionError(
             "no account with agentic_allowed=true; placing nothing")
@@ -133,7 +150,7 @@ def assert_agentic_account(accounts, snapshot_account: str | None = None) -> str
         raise PermissionError(
             f"expected exactly one agentic_allowed account, found {len(allowed)}: "
             f"{sorted(str(a['account_number']) for a in allowed)}; placing nothing")
-    acct = str(allowed[0]["account_number"])
+    acct = str(allowed[0]["account_number"]).strip()
     if snapshot_account is not None and str(snapshot_account) != acct:
         raise PermissionError(
             f"account mismatch: snapshot is from {snapshot_account!r} but the "
@@ -438,6 +455,18 @@ def _selftest() -> None:
                     raise AssertionError(f"empty/None account_number ({bad_num!r}) must not authorise")
                 except PermissionError as e:
                     assert "no account" in str(e).lower(), e
+            # whitespace-only account_number is truthy but nameless -- must be
+            # treated exactly like "" or None, not accepted as an identifier
+            for bad_num in ("   ", "\t\n", "\t \n "):
+                try:
+                    assert_agentic_account([{"account_number": bad_num, "agentic_allowed": True}])
+                    raise AssertionError(f"whitespace-only account_number ({bad_num!r}) must not authorise")
+                except PermissionError as e:
+                    assert "no account" in str(e).lower(), e
+            # a valid but padded account_number must resolve to the STRIPPED
+            # value -- padding is cosmetic, not part of the account's identity
+            assert assert_agentic_account(
+                [{"account_number": "  111  ", "agentic_allowed": True}]) == "111"
             # snapshot_account as an int must match an account_number stored as a
             # string, and vice versa. DECISION: this SHOULD match. Account
             # numbers cross several boundaries in this repo (RH MCP JSON, the
@@ -456,6 +485,41 @@ def _selftest() -> None:
             assert assert_agentic_account(
                 [{"account_number": 222, "agentic_allowed": True}],
                 snapshot_account="222") == "222"
+
+            # a malformed `accounts` container must raise PermissionError with a
+            # message naming the real problem, never crash with AttributeError --
+            # every other refusal path in this function fails closed this way.
+            try:
+                assert_agentic_account({"account_number": "1", "agentic_allowed": True})
+                raise AssertionError("a dict (not a list) must raise, not silently authorise")
+            except PermissionError as e:
+                assert "list" in str(e).lower(), e
+            except AttributeError:
+                raise AssertionError("must raise PermissionError, not AttributeError, on a dict container")
+            try:
+                assert_agentic_account([None])
+                raise AssertionError("a list containing None must raise")
+            except PermissionError as e:
+                assert "parsed" in str(e).lower(), e
+            except AttributeError:
+                raise AssertionError("must raise PermissionError, not AttributeError, on a None element")
+            try:
+                assert_agentic_account(["not a dict"])
+                raise AssertionError("a list containing a string must raise")
+            except PermissionError as e:
+                assert "parsed" in str(e).lower(), e
+            except AttributeError:
+                raise AssertionError("must raise PermissionError, not AttributeError, on a string element")
+            # a valid authorised account ALONGSIDE a malformed element must
+            # still raise -- the malformed element must never be silently
+            # skipped, because it could have been the real authorised account
+            # and skipping it would turn "cannot parse this" into "found
+            # exactly one", the exact failure this function exists to prevent.
+            try:
+                assert_agentic_account([{"account_number": "222", "agentic_allowed": True}, None])
+                raise AssertionError("a malformed element alongside a valid account must still raise")
+            except PermissionError as e:
+                assert "parsed" in str(e).lower(), e
 
         print("selftest OK: governance two-tier gates "
               "(only the kill switch blocks a sell), peak, whitelist, order cap, "
