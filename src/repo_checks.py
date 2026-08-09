@@ -906,6 +906,59 @@ def check_no_api_key(root: pathlib.Path) -> list[str]:
     return failures
 
 
+_TOPLEVEL_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*\s*:")
+
+
+def check_workflow_toplevel_indent(root: pathlib.Path) -> list[str]:
+    """No workflow may carry a column-1 line that is not a top-level YAML key.
+
+    The failure this exists for (adaptive-tune.yml, 2026-08-04 -> 2026-08-09):
+    a `run: |` block scalar whose echo used a `\\` shell line-continuation, with
+    the continuation dedented to column 1. The backslash is a SHELL device and
+    YAML never sees it — YAML parses first, a column-1 line ends the block
+    scalar, and the shell fragment then has to be read as a new top-level
+    mapping key. The file became unparseable:
+
+        ScannerError: while scanning a simple key ... could not find expected ':'
+
+    Consequence, and why a static check earns its place here: an unparseable
+    workflow does not run on its cron AT ALL, and it never reports a job
+    failure — GitHub emits a *startup failure* with no jobs, named for the file
+    path because it could not read `name:`. Nothing throws. It looks like
+    silence, and silence is what a scheduled job looks like when it is healthy.
+
+    At column 1 a workflow can only legally hold a top-level key (`name:`,
+    `on:`, `jobs:`, ...), a document marker, or a comment. Anything else is
+    either this bug or an equivalent dedent, so the rule is exact rather than
+    heuristic, and needs no PyYAML (this module is stdlib-only by contract —
+    see the module docstring).
+
+    Reports the LOCATION only, never the offending text: a dedented `run:`
+    fragment can carry a token, and this output is filed verbatim into a public
+    issue. See "the publishing rule" above.
+    """
+    failures: list[str] = []
+    wf_dir = root / ".github" / "workflows"
+    if not wf_dir.is_dir():
+        return failures
+    for path in sorted(wf_dir.glob("*.yml")) + sorted(wf_dir.glob("*.yaml")):
+        for lineno, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
+            stripped = line.strip()
+            if not stripped or line[:1].isspace():
+                continue
+            if stripped.startswith("#") or stripped in ("---", "..."):
+                continue
+            if _TOPLEVEL_KEY_RE.match(line):
+                continue
+            failures.append(
+                f".github/workflows/{path.name}:{lineno} column-1 line is not a "
+                f"top-level YAML key — likely a dedented block-scalar/shell "
+                f"continuation; the workflow will not parse and will not run on "
+                f"its schedule (text withheld: may contain a credential)"
+            )
+    return failures
+
+
 # ---------------------------------------------------------------- driver
 
 CHECKS = (
@@ -913,6 +966,7 @@ CHECKS = (
     check_scheduled_jobs_armed,
     check_workflow_failure_exits,
     check_workflow_swallowed_failures,
+    check_workflow_toplevel_indent,
     check_no_api_key,
 )
 
@@ -1641,6 +1695,59 @@ Some prose about the footgun, then an actual pasted key:
         bad = check_no_api_key(root)
         assert len(bad) == 1, bad
         assert "repo_checks.py:1" in bad[0], bad
+
+    # -------------------- check_workflow_toplevel_indent ---------------
+    # The dirty fixture is the REAL 2026-08-04 regression, byte-for-byte: the
+    # `\` continuation dedented to column 1 out of a `run: |` block. Proven to
+    # be genuinely unparseable, not merely ugly — see the check's docstring.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, ".github/workflows/dedent.yml", """\
+name: adaptive-tune
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch
+        run: |
+          echo "ledger mirror: $(ls archive/*.json | wc -l) archived books, \\
+$(wc -l < journal.jsonl || echo 0) journal lines"
+""")
+        bad = check_workflow_toplevel_indent(root)
+        assert len(bad) == 1, bad
+        assert "dedent.yml:12" in bad[0], bad
+        # location only — the offending shell text must never be echoed
+        assert "wc -l" not in bad[0], f"check leaked scanned file content: {bad[0]}"
+
+    # clean input: top-level keys, comments, document markers, indented body
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, ".github/workflows/ok.yml", """\
+---
+# a comment at column 1 is prose, not a key
+name: fine
+on:
+  workflow_dispatch: {}
+jobs:
+  j:
+    steps:
+      - run: |
+          echo "one"
+          echo "two"
+""")
+        assert check_workflow_toplevel_indent(root) == [], \
+            check_workflow_toplevel_indent(root)
+
+    # no workflows dir at all -> clean, not a crash
+    with tempfile.TemporaryDirectory() as td:
+        assert check_workflow_toplevel_indent(pathlib.Path(td)) == []
+
+    # and the REAL repo must be clean (this is the fix being verified)
+    assert check_workflow_toplevel_indent(REPO) == [], \
+        check_workflow_toplevel_indent(REPO)
 
     # -------------------- checks() aggregator + main() plumbing --------
     with tempfile.TemporaryDirectory() as td:

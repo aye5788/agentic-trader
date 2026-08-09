@@ -226,24 +226,39 @@ def _newest_in_dir(d: pathlib.Path, pattern: str = "*") -> dt.datetime | None:
 
 
 def _last_actions_run(workflow: str = "adaptive-tune") -> dt.datetime | None:
-    """Newest run of a workflow, via the already-authenticated `gh` CLI.
+    """Newest SUCCESSFUL run of a workflow, via the already-authenticated `gh` CLI.
 
     Uses gh rather than a fresh PAT precisely so this adds no new credential:
     the box is already logged in for ordinary repo work. Any failure (gh missing,
     logged out, network) returns None -> reported as "never", which is honest:
     we genuinely do not know that it ran.
+
+    ⚠️ `conclusion == "success"` is the whole point, and it was missing until
+    2026-08-09. This probe read only `createdAt` off `--limit 1`, so ANY run
+    counted as liveness — including a startup failure, which GitHub creates on
+    every push to the default branch when the workflow file will not parse.
+    That inverts the monitor: a workflow broken by bad YAML (adaptive-tune.yml,
+    2026-08-04) generates a fresh failed run per push and thereby reports itself
+    healthy — "last ran 2m ago" for a job structurally incapable of running.
+    The failure was feeding its own alarm. Freshness of an ATTEMPT is not
+    evidence of work; only a successful conclusion is.
+
+    `--limit 20` because the startup-failure runs pile up in front of the last
+    real one; the newest success can be well down the list.
     """
     try:
         out = subprocess.run(
             ["gh", "run", "list", "--workflow", f"{workflow}.yml",
-             "--limit", "1", "--json", "createdAt"],
+             "--limit", "20", "--json", "createdAt,conclusion"],
             capture_output=True, text=True, timeout=30, cwd=REPO)
         if out.returncode != 0:
             return None
         runs = json.loads(out.stdout or "[]")
-        if not runs:
+        ok = [r for r in runs if r.get("conclusion") == "success"]
+        if not ok:
             return None
-        return dt.datetime.fromisoformat(runs[0]["createdAt"].replace("Z", "+00:00"))
+        newest = max(r["createdAt"] for r in ok)
+        return dt.datetime.fromisoformat(newest.replace("Z", "+00:00"))
     except Exception:
         return None
 

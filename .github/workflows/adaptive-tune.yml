@@ -71,8 +71,13 @@ jobs:
           cp _ledger/archive/*.json        research_store/archive/ 2>/dev/null || true
           # Echo the counts: with zero stop-outs the proposal looks identical whether
           # or not the archive arrived, so the copy needs its own evidence in the log.
-          echo "ledger mirror: $(ls research_store/archive/*.json 2>/dev/null | wc -l) archived books, \
-$(wc -l < research_store/journal.jsonl 2>/dev/null || echo 0) journal lines"
+          # Kept on separate assignments deliberately: a `\` shell continuation here
+          # is a YAML hazard, not a formatting choice — the continuation line must
+          # still be indented INSIDE this block scalar, and dedenting it to column 1
+          # ends the block and makes the whole workflow unparseable (2026-08-04).
+          n_books=$(ls research_store/archive/*.json 2>/dev/null | wc -l)
+          n_journal=$(wc -l < research_store/journal.jsonl 2>/dev/null || echo 0)
+          echo "ledger mirror: $n_books archived books, $n_journal journal lines"
 
       - name: Run the tuner
         run: |
