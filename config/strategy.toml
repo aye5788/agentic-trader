@@ -110,17 +110,23 @@ vix_ceiling    = 28.0    # no NEW entries if VIX above this
 agent_overlay  = false   # v1 = deterministic-only; qualitative veto in v2
 
 # --- Intraday exit monitor — the always-on stop-loss / take-profit watcher ----
-# Part 1 (scripts/market_monitor.py) polls Schwab quotes during market hours and
+# Part 1 (scripts/market_monitor.py) polls moomoo quotes during market hours and
 # fires the executor (prompts/exit.md) on a breach. Enforces the per-name stops
 # the daily loops only STORE. See docs/DESIGN.md → "Intraday exit monitor".
 [monitor]
-poll_secs      = 15       # seconds between quote polls (14 names = 1 Schwab call)
+poll_secs      = 15       # seconds between quote polls (whole book = 1 moomoo call)
 enable_stops   = true     # sell a full position when price <= its stored stop
 enable_targets = true     # scale out at the take-profit tiers (t1 half, t2 rest)
                           #   NOTE: take-profits cap momentum winners — set false
                           #   to "let winners run" and rely on rank rotation instead.
 cooldown_days  = 5        # a stopped-out name is excluded from the book this long
                           #   (stop vs. momentum-rank rebuy-churn guard)
+executor_timeout_secs = 300  # wall clock for the headless exit executor. The SELL is
+                          #   step 4 of 8 and the tail is bookkeeping, so a kill after
+                          #   the sell is survivable (run_executor reads the result
+                          #   FILE, not the exit code, and exit.md writes it after each
+                          #   placement). Was 180; the 2026-08-06 WDC stop used all of
+                          #   it on post-sale reconciliation.
 refire_retry_secs = 120   # if an exit sell FAILS, back off this long before retrying
                           #   (a failing breach re-spawns the Claude executor + re-
                           #   alerts; without backoff it storms every 15s poll)
@@ -128,7 +134,7 @@ refire_escalate_n = 3     # after this many consecutive failed exits, send ONE l
                           #   "manual intervention — position unprotected" phone push
 feed_fail_alert = 4       # consecutive quote-poll failures (~1 min @15s) before ONE
                           #   "feed down — stops unwatched" phone push. Each failing
-                          #   tick rebuilds the Schwab client, so transients self-heal
+                          #   tick rebuilds the moomoo client, so transients self-heal
                           #   long before this (guards the 2026-07-22 stale-token hang).
 feed_fail_exit  = 12      # consecutive failures (~3 min) → monitor exits nonzero so
                           #   systemd (Restart=always) restarts it with a clean client.

@@ -102,8 +102,12 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    "trades":<number_of_trades>} for buckets with number_of_trades > 0]}`.
 9. **Journal.** Write the placed fills AND any skipped orders to
    `research_store/rh/fills.json` (a JSON array of
-   `{symbol, side, amount, order_id, status, avg_price, note}` — status and
-   avg_price from step 8's order check; `note` is ≤15 words on WHY (e.g.
+   `{symbol, side, amount, quantity, order_id, status, avg_price, note}` — status,
+   avg_price and **quantity** from step 8's order check. `quantity` is the
+   EXECUTED SHARE COUNT from the broker's order record — required on anything that
+   executed, and never computed as `amount / avg_price`. Without it the ledger
+   cannot tell how many shares actually moved, so a position's zero-crossing (and
+   therefore its holding period) is unrecoverable. `note` is ≤15 words on WHY (e.g.
    `"open: momentum rank 1"`, `"rebalance trim"`, `"stop breach"`) — the
    joinable rationale, not prose; skips instead carry `"status":"skipped"` and
    `"reason"`, no order_id), then run `.venv/bin/python scripts/record_fills.py`.

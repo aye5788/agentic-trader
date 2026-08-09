@@ -1,152 +1,112 @@
 # agentic-trader
 
-An agentic trading research → execution system. Deployable to a VPS.
+A **live-money** agentic trading system: deterministic research and portfolio
+construction in Python, with a headless Claude agent as the execution hands.
+Deployed on a VPS.
 
-**Layering** (see the architecture diagram we sketched):
+> ⚠️ This trades real money through Robinhood. If you are an agent working in this
+> repo, read **[`CLAUDE.md`](CLAUDE.md)** first — it carries the hard safety rules —
+> then [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture.
 
-- **Sensing** — market/research data adapters (Schwab, Alpaca, web, …)
-- **Slow loop** — deep research → verify → synthesize a ranked conviction list
-- **Research store** — the handoff (watchlist + theses + target weights)
-- **Fast loop** — read theses → live quotes → size → execute
+**Layering:**
+
+- **Sensing** — market/research data adapters (moomoo, FRED, Finnhub, Alpaca)
+- **Slow loop** — momentum signal → ranked book + trade geometry (no LLM, no trading)
+- **Research store** — the validated handoff (theses + target weights + journal)
+- **Fast loop** — stored targets vs. live holdings → order plan
 - **Execution** — Robinhood MCP (the thin "hands"); the Agentic account only
-- **Governance / Orchestration** — mandate, journal, guardrails, kill-switch, cadence
+- **Governance** — mandate, journal, guardrails, kill switches, cadence
 
-This repo currently implements the **Schwab research adapter** (first sensing source).
+📐 **Full architecture & rationale: [`docs/DESIGN.md`](docs/DESIGN.md).**
+📈 **The strategy itself: [`docs/STRATEGY.md`](docs/STRATEGY.md).**
+🛠 **If you operate it: [`docs/OPERATOR_MANUAL.md`](docs/OPERATOR_MANUAL.md).**
 
-📐 **Full architecture & rationale: [`docs/DESIGN.md`](docs/DESIGN.md)** (with diagram).
+## Data sources
 
-## Schwab adapter — scope
+Full detail (including the verified moomoo surface) in
+[`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md).
 
-The Schwab **developer** API exposes:
+| Source | Role | Key |
+| --- | --- | --- |
+| **moomoo** (via local OpenD) | **THE market feed** — daily OHLC panel, intraday quotes for the stop watcher, turnover/market-cap, capital flow, short interest, options | none — authenticates through OpenD |
+| **FRED** | Macro regime: VIX, 10y-2y curve, HY spread. Deep history, backtestable. Sole VIX source. | `FRED_API_KEY` |
+| **Finnhub** | Earnings spine for the event calendar; analyst trends, surprises, basic financials | `FINNHUB_API_KEY` |
+| **Alpaca** | Symbol-tagged news; IEX close + $-vol for the survivorship-free point-in-time pool | `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` |
+| **Robinhood** (MCP) | **Execution** — the only trading venue, Agentic account only | one-time OAuth |
 
-| Available (Market Data API)                    | NOT available                       |
-| ---------------------------------------------- | ----------------------------------- |
-| `quotes`, `price_history`, `option_chains`     | ❌ analyst ratings / price targets   |
-| `movers`, `market_hours`                       | ❌ research reports                  |
-| `instruments` + `fundamental` projection       | (UI-only, not in the public API)    |
+Everything except Robinhood is **read-only data**. No other provider has a trading
+surface wired, by design.
 
-So Schwab's role here is **fundamentals**, not analysts.
+> ~~**Schwab**~~ was the primary feed until **2026-07-29**. Its 7-day OAuth token
+> was the only recurring human chore in the system, and the signal consumed nothing
+> from it but daily closes — so it was replaced wholesale by moomoo. The adapter,
+> auth scripts, `SCHWAB_*` keys and `schwabdev` are deleted; **do not reintroduce
+> them.** Migration + equivalence proof: `docs/OPSLOG.md` 2026-07-29.
 
-## Finnhub adapter — the analyst slice
+## ⚠️ Two Python runtimes
 
-Schwab has no analyst data, so **Finnhub** (free tier) fills it. Verified live:
+This trips everyone, including agents:
 
-| Available (free tier)                                   | Premium-only        |
-| ------------------------------------------------------- | ------------------- |
-| recommendation *trends* (strongBuy…strongSell by month) | ❌ price targets     |
-| earnings *surprises* (actual vs estimate, % beat/miss)  | ❌ forward EPS est.  |
-| basic financials (133 metrics)                          |                     |
+- Most code runs under the repo **`.venv` (Python 3.12)**.
+- The **moomoo SDK is installed only in system `/usr/bin/python3` (3.10)**.
 
-Slow-loop only (~60 calls/min). Get a free key at
-[finnhub.io/register](https://finnhub.io/register), put it in `.env` as
-`FINNHUB_API_KEY`, then confirm your plan's access with:
+So anything importing `moomoo` — `fetch_prices.py`, `market_monitor.py`,
+`fast_loop.py`, `risk_review.py` — **must** run under `/usr/bin/python3`. Under
+`.venv` the import fails, and because some guards deliberately fail open, a run can
+proceed with a safety check silently skipped. That exact mistake cost real money on
+2026-07-23.
 
-```bash
-python scripts/finnhub_scope.py AAPL
-```
-
-## Alpaca adapter — the news slice
-
-Schwab and Finnhub give hard numbers; **Alpaca** (free tier) gives the live
-narrative — symbol-tagged market news. Verified live:
-
-| Available (free tier)                                   | Not used here        |
-| ------------------------------------------------------- | -------------------- |
-| symbol news (`get_news("AAPL")`) — headline, summary, url | ❌ quotes (IEX-only)  |
-| market-wide news feed (`get_news()`)                    | ❌ execution          |
-| transparent paging past the 50-article/request cap      |                      |
-
-Data-only by design — this adapter points at Alpaca's *data* host and has no
-order surface. Get a free key pair at
-[app.alpaca.markets](https://app.alpaca.markets/) → **Home → API Keys**, put them
-in `.env` as `ALPACA_API_KEY` / `ALPACA_SECRET_KEY`, then confirm with:
-
-```bash
-python scripts/alpaca_scope.py AAPL
-```
+moomoo data flows through an **OpenD** gateway on `127.0.0.1:11111`, **shared with
+the sibling repo `moomoo-vol-desk`**. Never start a second one.
 
 ## Setup
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env      # then fill in SCHWAB_APP_KEY / SCHWAB_APP_SECRET
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cp .env.example .env      # then fill in the keys from the table above
 ```
 
-Your Schwab developer app must have the **Market Data Production** product enabled,
-status **Ready For Use**, and its registered **callback URL** must match
-`SCHWAB_CALLBACK_URL` in `.env`.
+Market data needs no key — moomoo authenticates through OpenD. There is **no
+recurring credential chore** in this system.
 
-## One-time (and weekly) login
-
-Schwab refresh tokens **expire every 7 days** — the single biggest operational
-constraint for unattended running. Re-run this weekly:
+Check the feed is alive:
 
 ```bash
-.venv/bin/python scripts/schwab_auth.py   # prints a URL; log in, paste the redirected URL back
+systemctl status opend
+/usr/bin/python3 scripts/fetch_prices.py     # appends today's OHLC row
 ```
 
-There is no bare `python` on the box and `schwabdev` is installed **only** in the
-`.venv` — always spell out `.venv/bin/python`. The script forces a brand-new
-refresh token and then verifies `refresh_token_issued` actually advanced, so it
-can no longer report success without renewing anything (it used to: see
-`docs/OPSLOG.md` 2026-07-29). Exit 0 + a printed issue/expiry date is proof.
+## Safety switches
 
-The login is headless-friendly (no local browser server needed): you open the URL
-yourself and paste the redirect URL back — which is what makes VPS deployment viable.
-
-**Check status any time** with:
+Two, and the difference matters — stops here are **software-only** (the monitor
+process *is* the stop; Robinhood has no native stop for fractional shares).
 
 ```bash
-.venv/bin/python scripts/schwab_status.py   # issued/expiry + days left + a live API call
+touch research_store/HALT_ENTRIES   # stop BUYING. Stops + take-profits still fire.
+touch research_store/HALT           # place NO order at all, buy or sell.
 ```
 
-Use this, **not** the `secrets/tokens.db` file date — the db is WAL-mode, so a fresh
-re-auth lands in the `-wal` sidecar and the main file's mtime lags (it can read as a
-week old while the token is minutes old). `schwab_status.py` checkpoints the WAL and
-reports the real issue time plus a live pass/fail.
+⚠️ Under `HALT` your open positions have **no stop**. The monitor keeps watching
+and phones you on every breach ("MANUAL EXIT NEEDED … UNPROTECTED"), but you must
+sell by hand. Use `HALT_ENTRIES` if you only meant to stop buying.
 
-### Re-auth: which method, and the 30-second window
+Placement is additionally gated by `[proof] live_approved`, which ships `false`.
 
-Schwab's authorization **code expires in ~30 seconds** and is single-use, so how
-you paste matters:
+## Tests
 
-- **A real SSH terminal (most reliable):** run `.venv/bin/python
-  scripts/schwab_auth.py`. It blocks at `paste the address bar url here:` — paste
-  the FULL redirect URL (`https://127.0.0.1:8182/?code=…&session=…`, everything,
-  not just the code) right at that prompt. Same-process, so the whole 30s budget
-  goes to the browser→paste hop.
-- **Claude Code `!` (two-step, race-prone):** `schwab_auth.py`'s `input()` EOFs
-  under `!`, so use the split flow — `! .venv/bin/python scripts/schwab_auth.py`
-  prints the URL, then reports `❌ RE-AUTH DID NOT TAKE` and exits 1 (expected —
-  the prompt got no input; your existing token is untouched). Follow with
-  `! .venv/bin/python scripts/schwab_finish_auth.py "<full redirect url>"`. The
-  chat round-trip often blows the 30s window; prefer the SSH method.
-
-### Troubleshooting `invalid_grant` ("Authorization code is invalid, expired or revoked")
-
-This is Schwab rejecting the **code**, not your credentials (a bad secret returns
-`invalid_client`). The scripts + schwabdev are correct; the exchange sends the
-matching `redirect_uri` and Basic key:secret auth. When it fails on a fresh code,
-check in order:
-
-1. **Complete the FULL consent** — Schwab's flow is login → *select account(s) to
-   link* → *final Allow*. The `127.0.0.1:8182` redirect is only valid if you
-   reached it via that last button; grabbing the URL early yields a dead code.
-2. **Beat the 30s window** — use the SSH-interactive method above.
-3. **Clock** — `timedatectl` must show `System clock synchronized: yes` (skew
-   makes every code look expired). Ours is NTP-synced.
-4. **Config** — `SCHWAB_APP_KEY` must equal the authorize URL's `client_id`, and
-   `SCHWAB_CALLBACK_URL` must be exactly `https://127.0.0.1:8182` (matches the app
-   registration). Both verified correct as of 2026-07-23.
-5. **Schwab-side** — if 1–4 are clean and it still fails on fresh codes, it's
-   Schwab (often paired with a "we can't log you in right now" page). Wait
-   30–60 min, confirm the app is **"Ready For Use"** at developer.schwab.com, and
-   as a last resort regenerate the app secret there and update `.env`.
-
-## Scope the data
+Module-local, assertion-based, no pytest:
 
 ```bash
-python scripts/schwab_scope.py AAPL
+.venv/bin/python src/momentum.py --selftest
+.venv/bin/python src/governance.py --selftest
+/usr/bin/python3 scripts/market_monitor.py --selftest    # system python — imports moomoo
+python3 src/repo_checks.py                               # static repo/CI drift checks
 ```
 
-Dumps the fundamentals payload + full field list to confirm exactly what's available.
+## Confirm a provider's scope
+
+```bash
+.venv/bin/python scripts/finnhub_scope.py AAPL
+.venv/bin/python scripts/alpaca_scope.py AAPL
+.venv/bin/python scripts/fred_scope.py
+```

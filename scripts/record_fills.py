@@ -7,11 +7,25 @@ file and appends exactly one journal event via store.append_journal().
 
 Agent contract:
   1. write research_store/rh/fills.json = a JSON array of objects, e.g.
-       [{"symbol":"EEM","side":"buy","amount":3.00,"order_id":"...","status":"unconfirmed"}, ...]
+       [{"symbol":"EEM","side":"buy","amount":3.00,"quantity":0.0421,
+         "order_id":"...","status":"filled","avg_price":71.25}, ...]
      Orders the agent SKIPPED (review rejection, unsettled-cash deferral,
      re-entry veto) go in the same array with status "skipped" and a short
      "reason" — so deferred legs are journaled, not just narrated in the report.
   2. run:  .venv/bin/python scripts/record_fills.py
+
+`quantity` is REQUIRED on anything that actually executed (added 2026-08-09).
+It is the EXECUTED SHARE COUNT from the broker's order record — not the dollar
+notional, and not `amount / avg_price`. Without it no position lifecycle can be
+reconstructed: `amount` is the notional we ASKED for, which after partial fills,
+adds and trims does not tell you how many shares actually moved, so
+zero-crossings (the boundary of a position's life) are unrecoverable. A ledger
+missing it can never answer "how long was this position held" — and that loss is
+permanent, because the broker record is not re-derivable from our side later.
+
+A filled order arriving without `quantity` is journaled anyway (never drop real
+execution evidence) but is flagged `quantity_missing` on the event and warned
+about on stdout, so the gap is visible instead of silent.
 
 Append-only; safe to run once per fast-loop execution. Also pushes a phone
 notification (ntfy) summarizing what was placed/skipped — without this, the
@@ -43,6 +57,16 @@ def main() -> None:
         "n": len(fills),
         "fills": fills,
     }
+    # Executed share count is what makes a position lifecycle reconstructable.
+    # Never DROP an execution for lacking it — that would lose real evidence to
+    # protect a schema — but never let the gap be silent either: flag it on the
+    # event so the ledger itself records which rows can't support a lifecycle.
+    missing = missing_quantity(fills)
+    if missing:
+        entry["quantity_missing"] = missing
+        print(f"⚠ {len(missing)} executed fill(s) have no `quantity` "
+              f"({', '.join(missing)}) — journaled, but these rows cannot support "
+              f"position-lifecycle reconstruction. See the module docstring.")
     # post-take-profit re-entry judgments, if the agent made any this run
     # (prompts/fast_loop.md step 7b) — journaled alongside the fills, then
     # consumed so a later run can't re-journal stale decisions
@@ -70,6 +94,42 @@ def _expected_skip(reason) -> bool:
     return any(k in r for k in _EXPECTED_SKIP)
 
 
+def missing_quantity(fills: list) -> list:
+    """Symbols of orders that EXECUTED but carry no usable share quantity. Pure.
+    A skipped order legitimately has none — nothing moved."""
+    out = []
+    for f in fills:
+        if f.get("status") == "skipped":
+            continue
+        q = f.get("quantity")
+        if q is None or not isinstance(q, (int, float)) or q <= 0:
+            out.append(str(f.get("symbol", "?")))
+    return out
+
+
+def _selftest() -> None:
+    ok = {"symbol": "AAA", "side": "buy", "amount": 5.0, "quantity": 0.07,
+          "status": "filled"}
+    assert missing_quantity([ok]) == []
+    # skipped orders never moved shares — not a gap
+    assert missing_quantity([{"symbol": "BBB", "status": "skipped",
+                              "reason": "unsettled cash"}]) == []
+    # executed-but-unquantified is a gap, in every shape it can arrive in
+    assert missing_quantity([{"symbol": "CCC", "status": "filled"}]) == ["CCC"]
+    assert missing_quantity([{"symbol": "DDD", "status": "filled",
+                              "quantity": 0}]) == ["DDD"]
+    assert missing_quantity([{"symbol": "EEE", "status": "filled",
+                              "quantity": None}]) == ["EEE"]
+    assert missing_quantity([{"symbol": "FFF", "status": "unconfirmed"}]) == ["FFF"]
+    # the real 2026-08-07 fills.json shape, which predates the field
+    legacy = [{"symbol": "XLE", "side": "buy", "amount": 5.22, "status": "filled",
+               "avg_price": 57.3479}]
+    assert missing_quantity(legacy) == ["XLE"], "must flag the legacy shape"
+    assert missing_quantity([ok, *legacy]) == ["XLE"], "must flag only the gap"
+    print("selftest OK: missing_quantity flags executed-without-shares, "
+          "ignores skips, catches the legacy shape")
+
+
 def _push_summary(fills: list, reentry: list | None) -> None:
     """Phone push: one line per order. push() never raises, so neither do we.
     Routine settlement/buying-power deferrals are suppressed (see _EXPECTED_SKIP)
@@ -94,4 +154,7 @@ def _push_summary(fills: list, reentry: list | None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if "--selftest" in sys.argv:
+        _selftest()
+    else:
+        main()

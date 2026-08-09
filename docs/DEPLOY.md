@@ -38,8 +38,8 @@ python3.12 -m venv .venv
 
 ```bash
 # From your machine — these are NOT in the repo:
-scp .env        droplet:/opt/agentic-trader/.env          # Schwab/Finnhub/Alpaca/FRED keys
-scp -r secrets/ droplet:/opt/agentic-trader/secrets/       # Schwab OAuth token store
+scp .env        droplet:/opt/agentic-trader/.env          # Finnhub/Alpaca/FRED keys
+scp -r secrets/ droplet:/opt/agentic-trader/secrets/       # OAuth token store
 
 # On the droplet — subscription auth + the footgun check:
 export CLAUDE_CODE_OAUTH_TOKEN=<from phase 0>
@@ -50,15 +50,23 @@ claude mcp add robinhood-trading --transport http https://agent.robinhood.com/mc
 claude -p "call get_accounts and report which are agentic_allowed"   # smoke test
 ```
 
-## Phase 3 — Schwab login (and the weekly wart)
+## Phase 3 — market feed (OpenD)
+
+Market data is moomoo via the local **OpenD** gateway. There is **no API key and
+no periodic re-auth** — this phase used to be a weekly Schwab OAuth chore and was
+removed with the adapter on 2026-07-29.
 
 ```bash
-.venv/bin/python scripts/schwab_auth.py    # prints a URL; log in, paste redirect back
+systemctl status opend                     # must be up on 127.0.0.1:11111
+/usr/bin/python3 -c "import moomoo; print('moomoo SDK OK')"   # system py3.10 ONLY
+/usr/bin/python3 scripts/fetch_prices.py   # smoke test: appends today's OHLC row
 ```
 
-⚠️ **Schwab's refresh token expires every 7 days and cannot be renewed
-unattended.** Re-run this weekly or the price feed dies. The crontab logs a loud
-reminder every Monday.
+⚠️ Two things that are easy to get wrong:
+- The moomoo SDK is installed **only in system `/usr/bin/python3` (3.10)**, not
+  the `.venv` (3.12). Anything importing `moomoo` must run under system python.
+- OpenD is **shared with the sibling repo `moomoo-vol-desk`**, which owns the
+  login. Never start a second instance.
 
 ## Phase 4 — dry run, THEN schedule
 
@@ -216,8 +224,9 @@ journalctl -u agentic-monitor -n 50           # monitor: silent unless a stop/ta
   `config/strategy.local.toml` (`[proof] live_approved = true`), which
   `src/strategy.py` deep-merges over the base. Pause new buys: edit the local
   file, or delete it to fully disarm. `git pull` never conflicts on this.
-- **Schwab price feed dies weekly** — the 7-day OAuth token. Re-run
-  `scripts/schwab_auth.py` (paste flow). If the slow loop errors on quotes/history, this is why.
+- **Price feed dies when OpenD does** — no token to expire any more, but OpenD is
+  a single point of failure and is shared with `moomoo-vol-desk`. If the slow loop
+  errors on quotes/history, check `systemctl status opend` first.
 - **RH blocks the 2nd trade** — one-time "investor profile" KYC on the Agentic
   account; complete it in the RH app. Non-recurring.
 - **No native stop orders** — RH rejects stops on sub-1-share fractional positions
@@ -239,8 +248,9 @@ stops no longer fire — sell by hand while this is on.**
 - **Nightly *exits-only* mode** — the slow loop still re-ranks fully each run,
   but since 2026-07-09 the banded holds engage (held names kept until below
   rank `book_band`), so nightly runs no longer churn on small rank slips.
-- **Schwab weekly re-auth** — inherently manual (see Phase 3). Monday's cron
-  now pushes the reminder to the phone (ntfy) as well as the log.
+- ~~**Schwab weekly re-auth**~~ — gone. The adapter was removed 2026-07-29 and
+  moomoo/OpenD needs no scheduled credential step. There is now **no recurring
+  human credential chore in the system**.
 
 Done since this list was written (2026-07-09): fill reconciliation + realized
 P&L journaling (fast_loop/exit prompts reconcile positions and snapshot

@@ -293,14 +293,24 @@ def add_reentry_review(symbol: str, tier: str, exit_price: float, days: int):
     _save(REENTRY, rv)
 
 
-def run_executor() -> dict:
-    """Fire the headless exit executor and return its result file ([] on failure)."""
+def run_executor(timeout_secs: int = 300) -> dict:
+    """Fire the headless exit executor and return its result file ([] on failure).
+
+    Deliberately reads the RESULT FILE rather than trusting the subprocess exit
+    code: the sell is step 4 of an 8-step prompt and the tail is bookkeeping, so a
+    run that placed its orders and then died still reports correctly. exit.md is
+    instructed to rewrite that file after EACH placement so the lossy window is a
+    single MCP call wide.
+
+    Raised 180 -> 300 on 2026-08-09: the 2026-08-06 WDC stop consumed the entire
+    180s on post-sale reconciliation. That is survivable now, but a timeout that
+    routinely fires is a timeout carrying no information."""
     try:
         # model pinned (see run_fast_loop.sh) — the exit path must never break
         # because a default model was retired
         subprocess.run(["claude", "-p", "--model", "claude-opus-4-8",
                         (REPO / "prompts" / "exit.md").read_text()],
-                       cwd=str(REPO), timeout=180, check=False)
+                       cwd=str(REPO), timeout=timeout_secs, check=False)
     except Exception as e:                            # never let execution crash the monitor
         print(f"  executor error: {e}")
     return _load(EXIT_RES, {"sold": []})
@@ -464,7 +474,7 @@ def check_once(cfg, client) -> int:
         _save(EXIT_REQ, {"ts": ts, "account": "948184924", "exits": act})
         if EXIT_RES.exists():
             EXIT_RES.unlink()
-        result = run_executor()
+        result = run_executor(int(m.get("executor_timeout_secs", 300)))
         sold = {s["symbol"] for s in result.get("sold", [])}
         failed = {t["symbol"] for t in act} - sold
         if failed:

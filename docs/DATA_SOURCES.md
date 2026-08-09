@@ -22,14 +22,22 @@ summary; this is the detail.
 
 ---
 
-## 1. Schwab (`src/adapters/schwab/`) — PRIMARY market data
+## 1. ~~Schwab~~ — REMOVED 2026-07-29
 
-`get_price_history`, `get_quote(s)`, `get_fundamentals`, `get_option_chain`,
-`get_movers`, `get_market_hours`. OHLC price history is the backbone (10y daily via
-`scripts/fetch_prices.py` → `research_store/prices/{closes,highs,lows,opens}.parquet`).
-OAuth refresh token **expires every 7 days** — `scripts/schwab_auth.py` (interactive)
-or `scripts/schwab_finish_auth.py "<redirect-url>"`; check freshness with
-`scripts/schwab_status.py`. Data-only by credential (trading API returns 401).
+Was the primary market-data feed. Its 7-day OAuth refresh token was the only
+recurring human chore in the whole system, and the signal consumed nothing from it
+but daily closes — so it was replaced wholesale by moomoo (§0 above). The adapter,
+the auth scripts (`schwab_auth.py`, `schwab_finish_auth.py`, `schwab_status.py`),
+the `SCHWAB_*` keys and the `schwabdev` dependency are all **deleted — do not
+reintroduce**. Migration and the equivalence proof: `docs/OPSLOG.md` 2026-07-29.
+
+Two things it left behind that still matter:
+- `research_store/prices/{closes,highs,lows,opens}.parquet` holds ~10y of daily
+  OHLC that is **non-regenerable** — moomoo history is shallow (~1–2 yr) and its
+  history API is capped at 100 distinct stocks account-wide, so a full re-pull
+  cannot succeed. Hence `research_store/prices/backup/`.
+- Backtests run on that deep panel; anything moomoo-only is **forward-logged**,
+  never backtested.
 
 ## 2. FRED (`src/adapters/fred/`) — macro regime, DEEP history
 
@@ -38,7 +46,8 @@ or `scripts/schwab_finish_auth.py "<redirect-url>"`; check freshness with
 `FRED_API_KEY`. Decades of daily history via `series/observations` (the adapter's
 `series_latest` only pulls the latest, but the API has full history). Deep history
 makes FRED **backtestable** — good for a momentum-crash regime overlay (VIX + curve
-+ credit stress). Currently only *confirms* the Schwab `SPY>50DMA` regime gate.
++ credit stress). Currently only *confirms* the `SPY>50DMA` regime gate computed
+from the cached price panel. Also the **sole VIX source** since Schwab's removal.
 
 ## 3. Finnhub (`src/adapters/finnhub/`) — analyst/earnings, NOT retired
 
@@ -238,7 +247,7 @@ V2's rate limit is documented as **10 requests / 30 s**.
 **Momentum-relevant methods still unwired** (no adapter fn):
 `get_period_change_rank` returns 5d/10d/20d/60d/120d/250d/YTD change **plus**
 market cap and PE in ONE market-wide ranked call — overlapping what
-`src/momentum.py` computes from Schwab history, and usable as an independent
+`src/momentum.py` computes from the cached panel, and usable as an independent
 cross-check. Also `get_top_movers_rank`, `get_short_selling_rank`, `get_hot_list`
 (trade/search/news heat + ranks), `get_rise_fall_distribution` (breadth).
 Remember §5a: moomoo history is shallow — these are **forward-log** inputs, never

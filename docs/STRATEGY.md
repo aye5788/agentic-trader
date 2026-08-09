@@ -43,7 +43,9 @@ Both are ranked by the *identical* signal in §3; they are just two lists.
 
 ## 3. The signal — compute this exactly (both engines)
 
-Inputs: daily closes from Schwab price history (~13 months / ≥260 trading days).
+Inputs: daily closes from the cached OHLC panel in `research_store/prices/`
+(~13 months / ≥260 trading days needed). The panel is appended to daily from
+moomoo; its deep history is Schwab-era and non-regenerable.
 
 For each ticker:
 1. **12-month return** `R = close_today / close_[252 trading days ago] − 1`.
@@ -106,7 +108,8 @@ excluded from the held set (it can still be computed, but never held).
 ## 7. Regime gate & the off-switch
 
 - **Mechanical floor (ON switch):** new entries allowed only if **$SPX > its
-  50-day MA** and **VIX ≤ 28** (computed from Schwab; FRED is supplementary).
+  50-day MA** (computed from the cached panel) and **VIX ≤ 28** (from FRED
+  `VIXCLS`, which is now the only VIX source).
 - **Off = cash.** When the floor is risk-off, or nothing passes the absolute
   gate: **hold nothing. Standing aside is a valid, intended state.** There is no
   hedge and no inverse ETF — cash is the position. (In the sleeve, the defensive

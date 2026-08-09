@@ -24,12 +24,28 @@ PROCEDURE — follow exactly:
    - Use a **market**, dollar-or-fractional-quantity sell in regular hours
      (fractional sells are allowed). `review_equity_order` → on a clean review →
      `place_equity_order`. If the position is already gone/zero, skip it.
-5. Write `research_store/monitor/exit_result.json`:
+   - ⛔ **Rewrite `exit_result.json` immediately after EACH placement**, before
+     moving to the next symbol — do not batch it to the end. You are on a wall-
+     clock timeout and can be killed at any moment. That file is the ONLY thing
+     the monitor reads to learn what sold; if you are killed holding an unwritten
+     result, a sale that actually completed is read as a failure, the monitor
+     retries it and can phone a false "position UNPROTECTED" alarm. Writing after
+     each order makes that window essentially zero. (2026-08-06: a WDC stop hit
+     the full 180s timeout — it survived only because the write had already
+     happened.)
+5. `research_store/monitor/exit_result.json` accumulates:
    `{"ts":"<iso>","sold":[{"symbol","reason","quantity_or_amount","order_id","status"}]}`
    Include ONLY the symbols you actually sold (the monitor keys off this to mark
-   the trigger fired — omit failures so they retry).
+   the trigger fired — omit failures so they retry). By this step it should
+   already be complete from step 4; confirm it rather than writing it fresh.
+   Everything after this point is bookkeeping — if you run out of time here, the
+   trade is still correctly recorded.
 6. Also write those same fills to `research_store/rh/fills.json` and run
-   `.venv/bin/python scripts/record_fills.py` to journal them.
+   `.venv/bin/python scripts/record_fills.py` to journal them. Each entry needs
+   `quantity` — the EXECUTED SHARE COUNT from the broker's order record, not the
+   dollar notional and not `amount / avg_price`. A sell without it leaves the
+   ledger unable to see the position reach zero, which is exactly the event that
+   closes its lifecycle.
 7. **Reconcile.** If you sold anything: re-fetch `get_equity_positions` and
    `get_portfolio`, and rewrite `research_store/rh/positions.json` — shares and
    cost, NOT dollar values:

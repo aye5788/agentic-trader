@@ -146,7 +146,9 @@ review_by, outcome`.
 > endpoints are premium-only; we deliberately skip the price-target *level* (weak,
 > biased signal) and treat forward consensus estimates as a deferred maybe.
 
-### Schwab scope (verified empirically — see `scripts/schwab_scope_full.py`)
+### Schwab scope (HISTORICAL — adapter removed 2026-07-29; kept as the record of
+### what the feed provided and why moomoo could replace it. The scope script is
+### deleted; do not try to run it.)
 
 **Available (Market Data API, HTTP 200):**
 `quotes`/`quote` (realtime NBBO + field groups: quote, fundamental, extended,
@@ -291,10 +293,10 @@ on a timer, with nobody watching**. Three things make that work:
   complete the OAuth paste flow (verify on the RH mobile app). After that,
   ongoing operation is headless. Token lifetime / re-auth cadence is **not
   documented by RH — treat as unknown and watch for it** (like Schwab's 7 days).
-- **Schwab headless auth**: OAuth 2.0 manual paste flow (no local browser
-  server) — see `scripts/schwab_auth.py`.
-- **⚠️ Schwab 7-day token expiry**: Schwab refresh tokens expire every 7 days;
-  re-run the auth script weekly to keep an unattended deployment alive.
+- ~~**Schwab headless auth**~~ and ~~**the 7-day token expiry**~~: both gone with
+  the adapter on 2026-07-29. moomoo authenticates through the local OpenD gateway,
+  so an unattended deployment now has **no scheduled credential step at all**. The
+  auth scripts are deleted — do not reintroduce them.
 - **Fair use**: RH explicitly supports automation, and Anthropic is an official
   launch partner for exactly this — so *policy* is not the concern. Plan
   *rate limits* (throughput per window) are real but a pacing problem: space the

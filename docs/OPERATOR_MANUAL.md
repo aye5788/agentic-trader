@@ -55,54 +55,26 @@ risk-review overlay is also forced to alert-only automatically.
 
 ---
 
-## 1. WEEKLY — refresh the Schwab login  ⏰ your #1 recurring job
+## 1. There is no weekly credential chore any more
 
-Schwab's token **expires every 7 days**. If you skip it, the price feed dies and
-the book goes stale.
+This used to be your #1 recurring job: Schwab's OAuth token expired every 7 days
+and the price feed died if you missed it. **Schwab was removed on 2026-07-29** and
+the market feed is now moomoo via the local OpenD gateway, which needs no
+scheduled re-auth from you. `scripts/schwab_auth.py` and `schwab_status.py` no
+longer exist — if you find a reference to either anywhere, it is stale.
 
-**The reminder is now smart, not calendar-based.** A daily 08:00 check reads the
-token's *actual* age and phones you when you're inside 3 days of expiry — so it
-stays silent on weeks you've already re-authed, and it escalates to "EXPIRED" if
-you run out. (It replaced a blind Monday nag that fired regardless and never
-followed up.) You'll get **one** push per expiry cycle; the dashboard's
-"Scheduled jobs" card shows days-remaining continuously if you want to check
-deliberately.
+**You now have no recurring credential task at all.** Every remaining health check
+asks "did this job leave evidence it ran", not "is a token about to expire".
 
-**Do this (in a real SSH terminal, not through chat — the prompt needs to block):**
-```
-cd /opt/agentic-trader
-.venv/bin/python scripts/schwab_auth.py
-```
-1. It prints an authorization URL. Open it in a browser.
-2. Log in → **click through every screen to the final "Allow"** (this matters).
-3. The browser lands on a `https://127.0.0.1:8182/?code=…` page that **fails to
-   load — that's normal**. Copy the **full** URL from the address bar.
-4. Paste it at the `paste the address bar url here:` prompt, hit Enter.
-5. You should see `✅ Auth complete — refresh token issued <today>, good until
-   <today+7>`. **The dates are the proof.** If it instead prints `❌ RE-AUTH DID
-   NOT TAKE` and exits 1, nothing was renewed — your old token is untouched, so
-   just retry (fastest cause: the ~30s code window lapsed).
+What replaced the failure mode: if the feed does break, you learn from the daily
+08:00 health check (`scripts/health_check.py`, pushed to the OPS ntfy topic) or
+from the monitor's "feed down — stops unwatched" alert, rather than from a
+calendar. See §5 for what the alerts mean.
 
-   Until 2026-07-29 this script printed a bare `✅ Auth complete` *unconditionally*
-   and renewed nothing unless the token was already inside its last hour — so a
-   dead re-auth looked exactly like a good one. It now forces the renewal and
-   verifies the stored issue date advanced before claiming anything. Details:
-   `docs/OPSLOG.md` 2026-07-29.
-
-**Confirm it worked:**
-```
-.venv/bin/python scripts/schwab_status.py
-```
-Expect `Schwab refresh token: OK … (7.0 days left) … live check: OK`.
-(Don't judge freshness by the `secrets/tokens.db` file date — WAL mode makes it
-lag. Trust `schwab_status.py`.)
-
-**If it fails with `invalid_grant` ("code invalid/expired"):** it's almost always
-one of these (in order): (a) you didn't click all the way to the final Allow;
-(b) the paste took longer than ~30 seconds — Schwab codes expire that fast, so use
-the SSH method above, not the chat `!` two-step; (c) Schwab is having a moment —
-wait 30–60 min and retry; (d) check the app is "Ready For Use" at
-developer.schwab.com. Full checklist: `README.md` → "Troubleshooting invalid_grant".
+The one thing worth knowing: moomoo data flows through **OpenD** on
+`127.0.0.1:11111`, which is **shared with the sibling repo `moomoo-vol-desk`**.
+Never start a second one. If prices go stale, check OpenD is up before anything
+else: `systemctl status opend`.
 
 ---
 
@@ -149,12 +121,12 @@ read access to your book. Subscribe to both in the ntfy app.
 
 | Alert | Meaning | What to do |
 | --- | --- | --- |
-| **"Schwab token — N days left"** | inside 3 days of expiry | Do §1. Silent if you're current. |
+| **"MANUAL EXIT NEEDED … UNPROTECTED"** | a stop or target was breached while `research_store/HALT` is active, so nothing was sold | **Act now.** HALT means the machine places no orders; the position has no stop. Sell in Robinhood, or `rm research_store/HALT` to hand exits back to the monitor. |
 | **"stop-loss proposal waiting"** | the weekly tuner recommends a *change* | Do §2. Silent on "keep current setting" weeks. |
 | **"weekly tuner FAILED"** | the off-box tuner errored | Usually the `LEDGER_TOKEN` PAT expired → §4. Nothing unsafe; it just stops learning. |
 | **"<job> — NEVER RAN / STALE"** | a scheduled job stopped leaving evidence | "NEVER RAN" = probably not scheduled, check `crontab -l`. "STALE" = it ran before and stopped; check that job's log. |
-| **cron failure** (ERR-trap) | a scheduled job errored | Check the log it names in `logs/`; usually a stale Schwab token → do §1. |
-| **"feed down — stops unwatched"** | the intraday monitor can't get quotes | Schwab feed is down → do §1. Until fixed, your stops aren't auto-watched; eyeball positions if you care. |
+| **cron failure** (ERR-trap) | a scheduled job errored | Check the log it names in `logs/`. Most often OpenD is down or logged out — `systemctl status opend`. |
+| **"feed down — stops unwatched"** | the intraday monitor can't get quotes | The moomoo feed is down — check OpenD (`systemctl status opend`; it's shared with `moomoo-vol-desk`). Until fixed your stops aren't auto-watched; eyeball positions if you care. |
 | **"ledger backup FAILED"** | off-box backup push failed | Usually transient (network). If it repeats, check the box has push access to `agentic-trader-ledger`. |
 | **"signal panel gap"** | the moomoo panel couldn't collect | OpenD (moomoo) likely logged out — see §4. Non-urgent: it just skips that week's data. |
 
@@ -173,12 +145,17 @@ Push = something changed. Dashboard = current state.
 
 ## 4. Occasional tasks
 
-**Rebuild the price cache** (needed if prices look stale, or after a long Schwab
-outage — the Sunday slow loop does this automatically, but you can force it):
+**Gap-fill the price cache** (needed if prices look stale after a feed outage):
 ```
 cd /opt/agentic-trader
-.venv/bin/python scripts/fetch_prices.py --force      # ~2 min
+/usr/bin/python3 scripts/fetch_prices.py --backfill 10    # system python3, NOT .venv
 ```
+⚠️ There is no `--force` any more, and no way to re-pull the whole panel: moomoo
+caps history at **100 distinct stocks account-wide**, so a full 168-name re-pull
+cannot succeed. The panel is **appended to, never rebuilt**, which makes the deep
+Schwab-era history on disk **non-regenerable** — that is why
+`research_store/prices/backup/` exists. `--backfill N` fills the last N sessions
+through the metered history API; keep N small.
 
 **moomoo / OpenD re-login** (if you got a "signal panel gap" alert): the moomoo
 session is shared with the `moomoo-vol-desk` project and needs a one-time SMS code
@@ -235,8 +212,8 @@ it already pushes to your phone, instead of only pushing.
 (`claude.yml`) watches for these issues and, when one appears, reads it and
 decides whether it's worth a fix:
 
-- **Most of the time there's nothing to fix in code.** A stale Schwab token,
-  the moomoo OpenD gateway logged out, a cron line never actually added to the
+- **Most of the time there's nothing to fix in code.** The moomoo OpenD gateway
+  logged out, a cron line never actually added to the
   box, an expired GitHub token, the droplet being down — these are all things
   *you* fix on the droplet (this manual tells you how), not bugs in the code.
   When that's the case, Claude just leaves a plain-language **comment** on the
@@ -306,7 +283,9 @@ this setup is the pull request:
 
 ## 6. Checking that everything's healthy
 
-- **Schwab token:** `.venv/bin/python scripts/schwab_status.py`
+- **Market feed:** `systemctl status opend` — OpenD is the moomoo gateway and the
+  single point of failure for prices and intraday quotes. Shared with
+  `moomoo-vol-desk`; never start a second instance.
 - **Dashboard** (portfolio, equity curve): **dash.ethobs.uk** (login = `DASH_USER`/
   `DASH_PASS` from `.env`). Locally: `.venv/bin/python dashboard/app.py` → 127.0.0.1:8787.
 - **Recent cron activity:** `tail logs/slow.log logs/fast.log logs/signals.log`
@@ -344,11 +323,12 @@ STOP EVERYTHING         touch research_store/HALT          (⚠ stops STOP firin
                                                             sell by hand; rm to resume)
 Review stop proposal    .venv/bin/python scripts/promote_proposal.py
 Apply a stop value      .venv/bin/python scripts/promote_proposal.py --set 2.5
-Rebuild prices          .venv/bin/python scripts/fetch_prices.py --force
+Gap-fill prices         /usr/bin/python3 scripts/fetch_prices.py --backfill 10
+Check the market feed   systemctl status opend
 Dashboard               dash.ethobs.uk
 Adaptive proposals      github.com/aye5788/agentic-trader  → Actions → adaptive-tune
 ```
 
 *Deeper detail: `CLAUDE.md` (system overview), `docs/DESIGN.md` (architecture),
 `docs/DATA_SOURCES.md` (data), `docs/STRATEGY.md` (the trading strategy),
-`README.md` (Schwab auth troubleshooting).*
+`docs/DATA_SOURCES.md` (what each feed provides).*

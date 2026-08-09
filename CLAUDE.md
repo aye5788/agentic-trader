@@ -317,8 +317,8 @@ secrets/                OAuth token store (git-ignored)
 ## Setup / env
 
 Copy `.env.example` → `.env` and fill in credentials. Keys:
-`SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, `SCHWAB_CALLBACK_URL`, `FINNHUB_API_KEY`,
-`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `FRED_API_KEY`.
+`FINNHUB_API_KEY`, `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `FRED_API_KEY`.
+(The `SCHWAB_*` keys are **gone** — removed with the adapter 2026-07-29.)
 - **moomoo** has **no `.env` key** — it authenticates through the running **OpenD**
   gateway (`OpenD.xml`, gitignored, on the box); import needs `/usr/bin/python3`.
 - **GitHub Actions** (adaptive tuner) uses repo secret **`LEDGER_TOKEN`** (a
