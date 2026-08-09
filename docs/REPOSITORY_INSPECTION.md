@@ -166,7 +166,9 @@ enforces position weight, total weight, holdings count, and reward/risk geometry
 5. SPY's 50-day trend and FRED VIX determine the regime.
 6. Stocks are ranked with the configured sector-residual tilt; ETFs use the base
    momentum signal.
-7. The previous product is read so banded retention can operate.
+7. The previous **target product** is read so banded retention can operate. This
+   is not a read of actual Robinhood holdings: a target whose order failed or was
+   skipped can still be treated as "held" by the selector.
 8. A regime-off decision clears the single-name target list; the ETF sleeve is
    still independently selected.
 9. Each target receives entry zone, volatility-scaled stop, and R-multiple
@@ -174,6 +176,11 @@ enforces position weight, total weight, holdings count, and reward/risk geometry
 10. The event-calendar layer attempts to stamp earnings dates.
 11. The validated product becomes current belief, archive, and journal evidence.
 12. Sunday rebuilds clear intraweek risk-review overrides and deferred intents.
+
+Although portfolio membership is described as weekly, the same full slow loop
+runs after every weekday close. It reconstructs each selected thesis's entry zone,
+stop, targets, `as_of`, and `decision_id` every night. Membership is banded, but
+trade geometry and decision identity are not preserved for the life of a position.
 
 Important inconsistency: documentation commonly says regime-off blocks "new
 entries," but `scripts/slow_loop.py:258` clears all stock targets. The fast loop
@@ -195,6 +202,10 @@ will therefore plan exits for existing stock holdings.
 `scripts/fast_loop.py:321` checks only whether a product exists. An old product
 can therefore generate an execution plan.
 
+When the snapshot contains cash, `marks.load()` ignores the snapshot's supplied
+account total and reconstructs account value as cash plus locally marked positions.
+That reconstructed value drives target sizing, drawdown state, and order caps.
+
 ### Intraday exit path
 
 1. `agentic-monitor.service` runs continuously under systemd.
@@ -209,6 +220,11 @@ can therefore generate an execution plan.
 8. Failed exits back off and eventually escalate.
 9. Repeated feed failures alert, then terminate the monitor so systemd restarts
    it.
+
+Monitor state is keyed to the product's `as_of`. Each nightly product date resets
+the fired stop/target flags. In alert-only mode, the monitor treats a signalled
+breach as acted upon and marks it fired even though no sale occurred, suppressing
+repeat alerts for that level until the next product generation.
 
 ## 5. Agent and prompt system
 
@@ -350,23 +366,114 @@ expected firing evidence. However, its non-selftest entry point currently exits
 with "live roll-call not wired yet" (`src/controls.py:174`). It is a registry and
 test harness, not yet operational telemetry.
 
-## 10. Prioritized risks, gaps, and technical debt
+## 10. Implementation re-audit
+
+A second pass traced the production paths more narrowly and corrected several
+high-level descriptions in the original inspection.
+
+### Corrections and important omitted mechanics
+
+- **Banded retention follows prior targets, not broker holdings.** The slow loop's
+  `held_book` and `held_etf` sets come from `read_current()`. A target that failed
+  to fill can be retained as held, while an actual off-book position cannot
+  participate in the band.
+- **Nightly geometry is mutable.** A continuously held position receives a new
+  stop, targets, entry zone, `as_of`, and `decision_id` after every close. Only
+  risk-review overrides are constrained to become stricter; the base slow-loop
+  stop may move down as well as up.
+- **Thesis rank has two meanings.** `Thesis.rank` is assigned as a sequential
+  portfolio-slot marker (stocks from 1, ETFs from 100). The true cross-sectional
+  signal rank lives in `Thesis.signals["rank"]`. Risk-review facts expose the
+  synthetic field, so a band-retained stock actually ranked 14th may appear as a
+  top-ten slot.
+- **Actual positions are filtered through current theses.** Risk review iterates
+  snapshot positions but discards any symbol lacking a current thesis and stop.
+  The monitor similarly begins with weighted current theses and intersects them
+  with the snapshot. Neither system tends an off-book holding.
+- **Global halts suppress exits as well as entries.** Fast-loop kill-switch and
+  drawdown preflight return an empty plan before per-order handling. The monitor
+  and risk-review prompt also idle on the kill switch. This is a true stop-all
+  switch, not merely a stop-buying switch.
+- **Fill recording is not idempotent.** Re-running `record_fills.py` with the same
+  `fills.json` appends a duplicate execution event. The separate reconciler is
+  idempotent only for fills carrying an order ID.
+- **Outcome labels do not identify an immutable entry decision.** Rotation
+  outcomes locate the most recent archived held thesis. Because theses are
+  regenerated nightly, reported holding days and stop/target geometry may be
+  anchored to the latest nightly plan rather than the actual position opening.
+- **The journal is not bounded in code.** `read_journal()` loads the complete
+  JSONL file, and outcome idempotency scans it. The documented bounded-context
+  property is a usage aspiration, not an enforced storage/query behavior.
+- **Ledger reconciliation is conditional evidence.** It checks only the
+  agent-written `orders_dump.json`; no dump is a successful no-op, and no run ID,
+  freshness requirement, or broker-wide completeness check exists.
+- **OHLC persistence is not transactional across fields.** Open, high, low, and
+  close Parquet files are written sequentially. A mid-sequence failure can leave
+  panels from different generations.
+- **Health detection has deliberate blind periods.** Monitor staleness allows four
+  days to avoid weekend/holiday false alarms. This can delay detection of a
+  midweek monitor outage. The health module also hardcodes the kill-switch path
+  separately from strategy configuration.
+
+### Code, documentation, test, and configuration contradictions
+
+- **Weekly book vs nightly thesis replacement:** documentation describes weekly
+  portfolio rebuilding and nightly risk exits, while cron invokes the full
+  thesis-producing slow loop nightly.
+- **No-new-entry regime wording vs target liquidation:** code clears all stock
+  targets when regime is off. Existing stocks consequently become sell plans.
+- **`OFF (cash)` vs ETF exposure:** slow-loop output says cash while the ETF sleeve
+  can remain invested up to its configured allocation.
+- **Configured signal parameters vs hardcoded implementation:** production code
+  does not consume `[signal].lookback_days`, `skip_recent_days`, `rank_method`, or
+  `absolute_gate`; `momentum.py` defaults and formulas govern them.
+- **ETF switches and counts:** `[etf_sleeve].enabled` and `hold_top` are not used by
+  the slow loop. ETF selection is unconditional and uses
+  `[portfolio].sleeve_hold`.
+- **Risk-review switch:** `[risk_review].enabled` is not checked by the risk-review
+  script or wrapper; cron scheduling and alert/live gates control behavior.
+- **Other descriptive-only keys:** `[proof].entry_cadence` and
+  `[regime].agent_overlay` have no production consumer.
+- **Moving-average exit:** strategy prose describes an exit below the 21-day mean;
+  implementation supplies only an advisory `ma_break` flag.
+- **Fast-loop freshness contract:** Research Store documentation presents
+  `is_stale()` as a fast-loop guard, but the fast loop never calls it.
+- **Ledger completeness claim:** reconciliation documentation says silent
+  incompleteness is impossible, while missing or incomplete agent dumps are not
+  independently detectable.
+- **Selftest runner claim:** `run_selftests.sh` says it runs every selftest in the
+  venv, but omits most selftests and fails on the monitor's system-only moomoo
+  import.
+- **Monitor evidence:** health documentation treats monitor state as proof of a
+  poll, but the monitor can return without updating state when no product, no held
+  thesis, or a kill switch is present.
+- **Alert-only meaning:** alert-only mode does more than avoid selling; it marks a
+  breach fired and suppresses repeat alerts for that product generation.
+- **Broker total vs local valuation:** snapshots contain broker account value, but
+  sizing and governance use cash plus locally marked positions whenever cash is
+  present.
+- **Removed Schwab paths:** README, DESIGN, DEPLOY, strategy comments, source
+  docstrings, and some remedies still describe removed commands or data paths.
+
+## 11. Prioritized risks, gaps, and technical debt
 
 ### High
 
-1. **Stale research may reach execution.** The fast loop does not call the
-   existing freshness check.
-2. **Software-only stops have a long dependency chain.** Protection requires a
-   thesis, current snapshot, monitor, OpenD, quote access, Claude authentication,
-   Robinhood MCP authentication, and successful order placement.
-3. **Off-book holdings may be unprotected.** Monitor and risk review begin with
-   current theses. Dust, incomplete exits, manual holdings, or state mismatches can
-   sit outside both.
-4. **Missing evidence often fails open.** VIX, no-chase quotes, cooldown parsing,
-   earnings dates, highs, moving averages, and volatility flags can disappear
-   independently while trading continues with fewer protections.
-5. **Regime behavior and prose disagree.** Code liquidates the stock target book;
-   documentation often describes only blocking new entries.
+1. **Nightly thesis identity and geometry drift.** A continuously held position
+   receives a new entry zone, stop, targets, date, and decision ID every night.
+   This can loosen stops, reset monitor state, and misattribute outcomes.
+2. **Protection coverage for actual holdings.** Monitor and risk review are
+   thesis-first. Dust, incomplete exits, skipped rotations, manual activity, and
+   stale-snapshot mismatches can create actual positions outside both systems.
+3. **Execution freshness and cross-file consistency.** There is no product-age
+   gate or shared generation identifier across product, snapshot, quotes, plan,
+   governance, broker dumps, and OHLC panels.
+4. **Broker reconciliation and outcome correctness.** Reconciliation trusts a
+   partial agent-produced dump; fill recording can duplicate; outcome identity
+   follows nightly regenerated theses; partial exits are not outcome-labeled.
+5. **Unbound or degraded guardrails.** Multiple config keys have no consumer,
+   control-binding telemetry is not operational, and missing data can remove
+   protections without a unified degraded-mode decision.
 
 ### Medium
 
@@ -397,7 +504,7 @@ test harness, not yet operational telemetry.
 - Historical plans and SDD artifacts contain useful provenance but can be confused
   with current behavior.
 
-## 11. Questions and unresolved unknowns
+## 12. Questions and unresolved unknowns
 
 1. What freshness limit should execution enforce, and should stale data permit
    exits while blocking buys?
@@ -415,7 +522,7 @@ test harness, not yet operational telemetry.
 11. Should control-binding telemetry be completed before new guards are added?
 12. What at-rest protection and process privilege model is required for live state?
 
-## 12. Recommended next steps
+## 13. Recommended next steps
 
 1. Enforce research freshness in fast-loop preflight, with distinct buy/exit rules.
 2. Reconcile actual holdings against watched holdings and alarm on any unprotected
@@ -456,3 +563,41 @@ and targets; a twice-daily reviewer can only reduce risk. JSON, JSONL, and Parqu
 are shared memory between processes. Operational correctness depends on freshness,
 cross-process file coherence, OpenD availability, prompt adherence, and keeping
 every actual holding inside the protection envelope.
+
+## Context brief for future development prompts
+
+This is a live-money, long-only Robinhood system. Read `CLAUDE.md` first. Trade
+only the single account whose live response says `agentic_allowed=true`; every
+other account and every non-Robinhood provider is read-only. The signal is
+deterministic dual momentum over a 150-stock universe plus an ETF sleeve. moomoo
+via OpenD supplies prices and quotes, FRED supplies VIX, Finnhub supplies earnings,
+and Alpaca supplies news and point-in-time research data. Most code uses the
+Python 3.12 `.venv`; anything importing moomoo must use system Python 3.10.
+
+The slow loop runs Sunday and every weekday evening. It rebuilds entry zones,
+stops, targets, dates, and decision IDs nightly, even when banding preserves
+membership. Its held set comes from the previous target product, not the broker.
+Regime-off clears stock targets while leaving the ETF sleeve active. Several
+strategy keys are descriptive rather than bound to production code.
+
+The fast loop requires Claude because Robinhood is MCP-only. Python creates
+`order_plan.json`; Claude fetches broker state, reviews, places, and records
+orders. There is no fast-loop research-age check. Global kill-switch and drawdown
+halts suppress sells as well as buys. Full exits must use exact share quantity.
+
+The monitor polls moomoo during weekday RTH and watches only actual snapshot
+positions that also have current weighted theses. Stops are software-only, and
+off-book holdings are not protected. Risk review is defensive-only and normally
+alert-only; it likewise omits positions without current theses. Overrides can
+only tighten, but the next nightly base geometry can move in either direction.
+The 21-day moving-average rule is a flag, not an automatic exit.
+
+The JSONL ledger has no inter-process lock. Reconciliation sees only the
+agent-written order dump, and a missing dump is not an error. Fill recording is
+not idempotent. Outcome labels currently attach to regenerated nightly theses
+rather than an immutable entry record.
+
+Before changing a trading path, trace its producer and every consumer, verify that
+each configuration key is actually read, distinguish target holdings from broker
+holdings, preserve intended exit ability during safety halts, test under the
+correct Python runtime, and judge risk by mechanism rather than account size.
