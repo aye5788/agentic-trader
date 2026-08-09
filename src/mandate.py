@@ -9,6 +9,7 @@ Run the tests:  .venv/bin/python src/mandate.py --selftest
 """
 from __future__ import annotations
 
+import math
 import sys
 import tomllib
 from pathlib import Path
@@ -57,9 +58,13 @@ def drawdown(equity: list[float], max_pct: float) -> dict:
         out["reason"] = "most recent equity value is missing; current equity is unknown"
         return out
     try:
-        float(last_raw)
+        last_val = float(last_raw)
     except (TypeError, ValueError):
         out["reason"] = (f"most recent equity value is non-numeric ({last_raw!r}); "
+                          f"current equity is unknown")
+        return out
+    if not math.isfinite(last_val):
+        out["reason"] = (f"most recent equity value is non-finite ({last_raw!r}); "
                           f"current equity is unknown")
         return out
 
@@ -70,10 +75,16 @@ def drawdown(equity: list[float], max_pct: float) -> dict:
             nulls_dropped += 1
             continue
         try:
-            vals.append(float(v))
+            fv = float(v)
         except (TypeError, ValueError):
             out["reason"] = f"non-numeric equity value ({v!r}) in series"
+            out["nulls_dropped"] = nulls_dropped
             return out
+        if not math.isfinite(fv):
+            out["reason"] = f"non-finite equity value ({v!r}) in series"
+            out["nulls_dropped"] = nulls_dropped
+            return out
+        vals.append(fv)
 
     if len(vals) < 2:
         out["reason"] = f"need 2+ daily closes, have {len(vals)}"
@@ -155,6 +166,49 @@ def _selftest() -> None:
     r_bad_interior = drawdown([100.0, "oops", 95.0], md)
     assert r_bad_interior["state"] == INSUFFICIENT, r_bad_interior
     assert "non-numeric" in r_bad_interior["reason"], r_bad_interior
+
+    # --- non-finite discipline (review finding) --------------------------------
+    # a NaN/inf equity reading must NEVER read as a PASS on the criterion that
+    # authorises a mechanical flatten of the book.
+    nan = float("nan")
+    pos_inf = float("inf")
+    neg_inf = float("-inf")
+    # NaN as the MOST RECENT point -> current equity is unknown, same treatment
+    # as a missing/non-numeric trailing value
+    r_nan_last = drawdown([100.0, 95.0, nan], md)
+    assert r_nan_last["state"] == INSUFFICIENT, r_nan_last
+    assert "non-finite" in r_nan_last["reason"], r_nan_last
+    assert "current equity is unknown" in r_nan_last["reason"], r_nan_last
+    # NaN in an interior slot -> INSUFFICIENT, never a silently-false comparison
+    # that lets the FAIL branch go unreached
+    r_nan_interior = drawdown([100.0, nan, 95.0], md)
+    assert r_nan_interior["state"] == INSUFFICIENT, r_nan_interior
+    assert "non-finite" in r_nan_interior["reason"], r_nan_interior
+    # +inf anywhere -> INSUFFICIENT, not a PASS from a NaN-valued drawdown
+    r_pos_inf = drawdown([100.0, 95.0, pos_inf], md)
+    assert r_pos_inf["state"] == INSUFFICIENT, r_pos_inf
+    assert "non-finite" in r_pos_inf["reason"], r_pos_inf
+    # -inf anywhere -> INSUFFICIENT, not a FAIL with a nonsensical room/reason
+    r_neg_inf = drawdown([100.0, 95.0, neg_inf], md)
+    assert r_neg_inf["state"] == INSUFFICIENT, r_neg_inf
+    assert "non-finite" in r_neg_inf["reason"], r_neg_inf
+    r_neg_inf_interior = drawdown([100.0, neg_inf, 95.0], md)
+    assert r_neg_inf_interior["state"] == INSUFFICIENT, r_neg_inf_interior
+    assert "non-finite" in r_neg_inf_interior["reason"], r_neg_inf_interior
+    # a dropped None BEFORE a later non-finite value must still be reflected in
+    # nulls_dropped on the early-return path (the reporting bug in the finding)
+    r_null_then_nan = drawdown([100.0, None, nan, 95.0], md)
+    assert r_null_then_nan["state"] == INSUFFICIENT, r_null_then_nan
+    assert r_null_then_nan["nulls_dropped"] == 1, r_null_then_nan
+    r_null_then_bad = drawdown([100.0, None, "oops", 95.0], md)
+    assert r_null_then_bad["state"] == INSUFFICIENT, r_null_then_bad
+    assert r_null_then_bad["nulls_dropped"] == 1, r_null_then_bad
+    # ordinary finite values are entirely unaffected by the isfinite check
+    r_finite_unaffected = drawdown([80.0, 100.0, 95.0], md)
+    assert r_finite_unaffected["state"] == PASS, r_finite_unaffected
+    assert abs(r_finite_unaffected["value"] + 0.05) < 1e-9, r_finite_unaffected
+    assert abs(r_finite_unaffected["room"] - 0.10) < 1e-9, r_finite_unaffected
+    assert r_finite_unaffected["nulls_dropped"] == 0, r_finite_unaffected
 
     print("selftest OK: mandate loads, terms match")
 
