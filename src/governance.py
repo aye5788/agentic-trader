@@ -230,6 +230,50 @@ def _amount_invalid(amount) -> bool:
     return not math.isfinite(amount)
 
 
+def liquidity_ok(symbol: str, dollar_volume: float | None,
+                 min_dollar_volume: float) -> tuple[bool, str]:
+    """Tradeability floor. Returns (ok, reason_if_not).
+
+    This is the property config/universe.csv was standing in for. Stating it
+    directly means the gate constrains SAFETY without constraining SELECTION —
+    the agent may trade anything that clears the floor.
+
+    FAILS CLOSED on unknown liquidity: a name we cannot measure is not a name we
+    have shown to be tradeable. "Unknown" covers None, a non-numeric value
+    (including a non-numeric string), and any non-finite float (NaN/+inf/-inf)
+    — every direct comparison against NaN is False, so `dollar_volume < min`
+    would silently treat a NaN reading as "not below the floor" unless this is
+    checked first. A `bool` is deliberately treated as unknown too: Python
+    makes `isinstance(True, int)` True and `True == 1`, but a bool can never be
+    a genuine dollar-volume reading, so letting it through as $1/$0 of
+    liquidity would be a type-confusion bug wearing a pass. A negative
+    dollar_volume is impossible for a real reading — that is corrupt data, not
+    a merely-illiquid name — so it fails the same way. Zero is a legitimate
+    (if bad) reading and is left to the floor comparison below, not treated as
+    unknown.
+
+    The threshold itself is validated too: a non-finite or non-positive
+    min_dollar_volume is a malformed config, and a malformed config must never
+    silently authorise everything.
+    """
+    if (not isinstance(min_dollar_volume, (int, float))
+            or isinstance(min_dollar_volume, bool)
+            or not math.isfinite(min_dollar_volume)
+            or min_dollar_volume <= 0):
+        return False, (f"{symbol}: liquidity floor is misconfigured "
+                       f"({min_dollar_volume!r}); refusing to treat this as tradeable")
+    if (dollar_volume is None
+            or isinstance(dollar_volume, bool)
+            or not isinstance(dollar_volume, (int, float))
+            or not math.isfinite(dollar_volume)
+            or dollar_volume < 0):
+        return False, f"{symbol}: liquidity unknown; cannot show it clears the floor"
+    if float(dollar_volume) < float(min_dollar_volume):
+        return False, (f"{symbol}: 20d $-volume {float(dollar_volume):,.0f} is below "
+                       f"the {float(min_dollar_volume):,.0f} floor")
+    return True, ""
+
+
 def vet_plan(plan: list[dict], account_value: float, cfg) -> tuple[list[dict], list[dict]]:
     """Split a plan into (approved, blocked). Each blocked order carries a reason.
     Only BUYS are capped by max_order_pct — capping a sell would strand a position
@@ -390,6 +434,57 @@ def _selftest() -> None:
                 appr, blkd = vet_plan([buy, sell], bad, cfg)
                 assert appr == [sell], bad
                 assert len(blkd) == 1 and "account value is invalid" in blkd[0]["blocked"]
+
+            # --- liquidity: the property the whitelist was standing in for ---
+            ok, why = liquidity_ok("AAA", 100_000_000.0, 50_000_000.0)
+            assert ok and why == "", (ok, why)
+            ok, why = liquidity_ok("BBB", 10_000_000.0, 50_000_000.0)
+            assert not ok and "below the" in why, (ok, why)
+            # exactly at the floor is acceptable
+            assert liquidity_ok("CCC", 50_000_000.0, 50_000_000.0)[0]
+            # UNKNOWN liquidity fails CLOSED -- never assume a name is tradeable
+            ok, why = liquidity_ok("DDD", None, 50_000_000.0)
+            assert not ok and "unknown" in why.lower(), (ok, why)
+
+            # NaN/+inf/-inf dollar_volume: every direct comparison against NaN
+            # is False, so `dollar_volume < min` would silently pass a NaN
+            # through as "not below the floor" unless isfinite is checked
+            # first. +inf/-inf are equally untrustworthy readings, not
+            # legitimate liquidity.
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                ok, why = liquidity_ok("EEE", bad, 50_000_000.0)
+                assert not ok and "unknown" in why.lower(), (bad, ok, why)
+
+            # a negative dollar volume is impossible -- corrupt data, not a
+            # low-liquidity name -- and must fail closed the same way.
+            ok, why = liquidity_ok("FFF", -1_000_000.0, 50_000_000.0)
+            assert not ok and "unknown" in why.lower(), (ok, why)
+
+            # a non-numeric string must not slide through Python's loose
+            # comparison operators
+            ok, why = liquidity_ok("GGG", "not-a-number", 50_000_000.0)
+            assert not ok and "unknown" in why.lower(), (ok, why)
+
+            # bool IS numeric in Python (True == 1, isinstance(True, int) is
+            # True) -- but a bool can never be a real dollar-volume reading,
+            # so it must be rejected as unknown rather than silently treated
+            # as $1 or $0 of liquidity.
+            for bad in (True, False):
+                ok, why = liquidity_ok("HHH", bad, 50_000_000.0)
+                assert not ok and "unknown" in why.lower(), (bad, ok, why)
+
+            # zero dollar volume is a legitimate (if bad) reading, not
+            # "unknown" -- it must fail on the floor comparison, not the
+            # unknown-liquidity branch.
+            ok, why = liquidity_ok("III", 0.0, 50_000_000.0)
+            assert not ok and "below the" in why, (ok, why)
+
+            # a malformed threshold (non-finite or non-positive) must not
+            # silently authorise everything -- a config bug should never
+            # look like "this name is liquid enough".
+            for bad_floor in (float("nan"), float("inf"), float("-inf"), 0.0, -1.0):
+                ok, why = liquidity_ok("JJJ", 100_000_000.0, bad_floor)
+                assert not ok and "floor" in why.lower(), (bad_floor, ok, why)
 
             # --- account scoping: OUR layer 1, since no paper endpoint exists ---
             accts = [{"account_number": "111", "agentic_allowed": False},
