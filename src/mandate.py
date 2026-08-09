@@ -514,6 +514,75 @@ def _selftest() -> None:
     assert r_clean["state"] == PASS, r_clean
     assert abs(r_clean["value"] - 0.30) < 1e-9 and r_clean["distinct_names"] == 4, r_clean
 
+    # --- six review-verified boundary cases (now permanent assertions) -----------
+    # 1. -inf realized_usd -> INSUFFICIENT, naming the offending symbol.
+    # (NaN and +inf are already covered above; -inf was not tested)
+    neg_inf_rows = [_o("A", 1, float("-inf")), _o("B", 2, 10.0),
+                    _o("C", 3, 10.0), _o("D", 4, 10.0)]
+    r_neg_inf = pnl_concentration(neg_inf_rows, "2026-08-09", 90, 0.40, 4)
+    assert r_neg_inf["state"] == INSUFFICIENT, r_neg_inf
+    assert "A" in r_neg_inf["reason"], r_neg_inf
+
+    # 2. Total realized P&L exactly 0.0 -> INSUFFICIENT.
+    # (Negative total already covered by the "down" test; exactly zero was untested)
+    zero_total = [_o("A", 1, 50.0), _o("B", 2, -50.0)]
+    r_zero = pnl_concentration(zero_total, "2026-08-09", 90, 0.40, 4)
+    assert r_zero["state"] == INSUFFICIENT, r_zero
+    assert "profit" in r_zero["reason"], r_zero
+
+    # 3. max_single_share boundary: exactly 40.0% of total -> PASS.
+    # Construct: A=$40, B=$30, C=$20, D=$10 (total=$100, A=40%)
+    exactly_40pct = [_o("A", 1, 40.0), _o("B", 2, 30.0), _o("C", 3, 20.0), _o("D", 4, 10.0)]
+    r_40 = pnl_concentration(exactly_40pct, "2026-08-09", 90, 0.40, 4)
+    assert r_40["state"] == PASS, r_40
+    assert abs(r_40["value"] - 0.40) < 1e-9, r_40
+    # 40.0009% -> FAIL. Construct: A=$40.0009, B=$30, C=$20, D=$9.9991 (total=$100)
+    over_40pct = [_o("A", 1, 40.0009), _o("B", 2, 30.0), _o("C", 3, 20.0), _o("D", 4, 9.9991)]
+    r_over = pnl_concentration(over_40pct, "2026-08-09", 90, 0.40, 4)
+    assert r_over["state"] == FAIL, r_over
+    assert r_over["value"] > 0.40, r_over
+
+    # 4. min_distinct_names boundary: exactly 4 distinct names passes;
+    # exactly 3 fails. Share test is comfortably passing in both cases.
+    four_names = [_o("A", 1, 30.0), _o("B", 2, 30.0), _o("C", 3, 25.0), _o("D", 4, 15.0)]
+    r_four = pnl_concentration(four_names, "2026-08-09", 90, 0.40, 4)
+    assert r_four["state"] == PASS, r_four
+    assert r_four["distinct_names"] == 4, r_four
+    # three distinct names with no concentration issue still fails on name count
+    three_names = [_o("A", 1, 30.0), _o("B", 2, 30.0), _o("C", 3, 40.0)]
+    r_three = pnl_concentration(three_names, "2026-08-09", 90, 0.40, 4)
+    assert r_three["state"] == FAIL, r_three
+    assert r_three["distinct_names"] == 3, r_three
+
+    # 5. Per-trade, not per-symbol aggregation. One symbol closes multiple times
+    # with per-symbol aggregate exceeding 40%, but no individual round-trip does.
+    # A: three trades of $15 each (total $45, aggregate is 45% of $100, exceeds 40%).
+    # But each individual A trade is 15%, and the max single trade is $15 (15% of $100).
+    # With B=$10, C=$10, D=$10, E=$10, F=$15 (total=$100, distinct=6, max trade=15%):
+    multi_trade = [_o("A", 1, 15.0), _o("A", 2, 15.0), _o("A", 3, 15.0),
+                   _o("B", 4, 10.0), _o("C", 5, 10.0), _o("D", 6, 10.0),
+                   _o("E", 7, 10.0), _o("F", 8, 15.0)]
+    r_multi = pnl_concentration(multi_trade, "2026-08-09", 90, 0.40, 4)
+    assert r_multi["state"] == PASS, r_multi
+    assert abs(r_multi["value"] - 0.15) < 1e-9, r_multi
+    assert r_multi["distinct_names"] == 6, r_multi
+
+    # 6. Records with event != "outcome" are ignored, not counted in totals
+    # or distinct-name set. A "decision" event with realized_usd=$100 is present
+    # but excluded; the test passes because only the outcome events are counted.
+    non_outcome = [
+        _o("A", 1, 30.0),
+        _o("B", 2, 30.0),
+        _o("C", 3, 25.0),
+        {"event": "decision", "symbol": "D", "at": "2026-08-04T00:00:00Z",
+         "outcome": {"realized_usd": 100.0}},  # ignored: not an outcome event
+        _o("D", 5, 15.0)
+    ]
+    r_non_outcome = pnl_concentration(non_outcome, "2026-08-09", 90, 0.40, 4)
+    assert r_non_outcome["state"] == PASS, r_non_outcome
+    assert r_non_outcome["distinct_names"] == 4, r_non_outcome
+    assert abs(r_non_outcome["value"] - 0.30) < 1e-9, r_non_outcome
+
     print("selftest OK: mandate loads, terms match")
 
 
