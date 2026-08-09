@@ -78,6 +78,29 @@ instead of procedures, and governance keeps only what rejects on safety.
 
 All four measured **continuously**. No calendar boundaries.
 
+**Every criterion is three-state: `PASS` / `FAIL` / `INSUFFICIENT_DATA`.**
+`INSUFFICIENT_DATA` must never render as a pass — the whole point of a falsifiable
+mandate is defeated by a criterion that silently reads green because it cannot be
+computed.
+
+**Two classes, and the distinction is load-bearing:**
+
+- **Blocking (safety):** criteria 1 and 2. If either is `FAIL`, the machine acts
+  (flatten on 1, gate rejection on 2). If either is `INSUFFICIENT_DATA`, degraded
+  mode applies — *manage what is open, open nothing new*.
+- **Informational (performance):** criteria 3 and 4. They judge whether autonomy is
+  *working*; they never gate an order. `INSUFFICIENT_DATA` on these does **not**
+  freeze the book — it means the agent is not yet being judged on them.
+
+*Why this matters concretely (measured 2026-08-09):* criteria 1 and 2 are computable
+today from `research_store/history/equity.jsonl` and `src/marks.py`. Criteria 3 and 4
+are **not yet**: `equity.jsonl` holds 22 daily points against the 60 that criterion 4
+needs (mature ~2026-10), and outcome records carry `pnl_pct` but no dollar P&L
+because position size was never recorded — so criterion 3 depends on the executed-
+quantity field added 2026-08-09 (`604a75d`) and is forward-only from that date.
+Without the blocking/informational split, two immature criteria would have frozen the
+book for two months.
+
 1. **Drawdown ≤ 15%** from the all-time high-water mark (`governance.update_peak`
    already tracks it), measured **close-to-close, never intraday** — an intraday
    measure would fire the flatten on noise. Breach → mechanical flatten + loud alert.
@@ -299,13 +322,10 @@ waits on Claude."* A fire spawns a **full-authority session**, not an alert.
 - Everything needed exists here: same SDK, same OpenD. But this repo is **entirely
   poll-based today** — `set_handler` push callbacks are a new pattern in
   `src/adapters/moomoo/`.
-- ⚠️ **Cross-repo hazard that does not exist on `moom`.** Our OpenD is **shared with
-  `moomoo-vol-desk`**, and price reminders are account-level state on moomoo's
-  servers. Both repos setting reminders means each process's handler receives the
-  other's fires, and cleanup in one can clear the other's. Their `note="wt<id>"`
-  convention is exactly the mitigation — we need our own namespace prefix and must
-  filter incoming fires on it. `moom` has a dedicated OpenD and never had to think
-  about this.
+- ~~Cross-repo hazard from the shared OpenD~~ — **resolved 2026-08-09: Aaron has shut
+  `moomoo-vol-desk` down.** We are the only consumer of this OpenD, so price reminders
+  no longer risk cross-repo collision. Keep the `note=` namespace prefix anyway: it is
+  free, and it is what makes a fired reminder map back to its local row.
 - Their own scar worth not repeating: `server_keys` was in-memory, so every watcher
   restart lost the ability to clean up server-side reminders (orphaned reminders
   accumulate at the broker). Persist the mapping.
