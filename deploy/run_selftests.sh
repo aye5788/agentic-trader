@@ -54,6 +54,7 @@ VENV_SELFTESTS=(
     "src/agent_env/terrain.py"
     "src/agent_env/decide.py"
     "src/agent_env/server.py"
+    "scripts/session_tools.py"
 )
 
 # Scripts that `import moomoo` at module scope — MUST run under system python3.
