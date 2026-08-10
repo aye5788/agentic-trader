@@ -86,16 +86,21 @@ def mandate_status() -> str:
     never gate an order. A criterion reporting INSUFFICIENT_DATA is NOT a pass.
     """
     v = marks.load()
-    eq = state.equity_series(EQUITY)
-    bench = []
+    eq_dated = state.equity_series_with_dates(EQUITY)
+    # Pair equity and SPY by CALENDAR DATE, never by position. equity.jsonl
+    # (scripts/log_equity.py) and closes.parquet (scripts/fetch_prices.py) are
+    # written on different schedules by different jobs and do NOT necessarily
+    # cover the same trading days — a length match between them is a
+    # coincidence, not evidence they line up. An equity date with no matching
+    # SPY close is dropped entirely (both sides), never forward-filled.
+    bench_by_date = {}
     if CLOSES.exists():
         try:
-            spy = pd.read_parquet(CLOSES)["SPY"].dropna().tolist()
-            bench = spy[-len(eq):] if eq else []
+            spy = pd.read_parquet(CLOSES)["SPY"].dropna()
+            bench_by_date = {ts.date().isoformat(): float(val) for ts, val in spy.items()}
         except Exception:
-            bench = []
-    if len(bench) != len(eq):
-        bench = [0.0] * len(eq)      # misaligned -> criterion 4 reports INSUFFICIENT
+            bench_by_date = {}
+    eq, bench = state.pair_with_benchmark(eq_dated, bench_by_date)
     s = mandate.status(eq, bench, v["positions"], v["account_value"],
                        _outcomes(), v["as_of"])
     return json.dumps(s, indent=2, default=str)

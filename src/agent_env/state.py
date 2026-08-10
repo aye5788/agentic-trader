@@ -49,7 +49,13 @@ def holdings(valued: dict, theses: list) -> dict:
 
 def equity_series(path: Path) -> list:
     """Ordered daily equity closes, oldest first. Skips malformed rows rather
-    than raising — mandate.drawdown() applies its own missing-data discipline."""
+    than raising — mandate.drawdown() applies its own missing-data discipline.
+
+    Bare values, no dates — fine for drawdown/concentration, which only care
+    about the shape of the book's own track record. NOT safe to pair
+    positionally against a series from a different source/schedule (e.g. a
+    price panel) — use equity_series_with_dates() + pair_with_benchmark() for
+    that; see their docstrings for why positional pairing is a defect."""
     import json
     if not path.exists():
         return []
@@ -62,6 +68,74 @@ def equity_series(path: Path) -> list:
         except Exception:
             continue
     return out
+
+
+def equity_series_with_dates(path: Path) -> list[tuple[str, float]]:
+    """Ordered (date, value) pairs, oldest first, straight from equity.jsonl.
+
+    Same tolerance as equity_series(): a malformed row is skipped, never
+    raised. Malformed here also covers an unparseable `date` field (not a
+    valid ISO calendar date) — a row this tool cannot place on a calendar
+    cannot be paired against anything, so it is dropped exactly like a row
+    with a missing/non-numeric `value`.
+
+    This exists so a caller can pair each equity point against another
+    series (e.g. a benchmark close) BY CALENDAR DATE. equity_series() throws
+    the date away, which is only safe when nothing downstream needs to align
+    it against a second, independently-scheduled series.
+    """
+    import datetime
+    import json
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            date = row["date"]
+            value = float(row["value"])
+        except Exception:
+            continue
+        try:
+            datetime.date.fromisoformat(str(date))
+        except (TypeError, ValueError):
+            continue
+        out.append((str(date), value))
+    return out
+
+
+def pair_with_benchmark(eq_dated: list[tuple[str, float]],
+                        bench_by_date: dict) -> tuple[list, list]:
+    """Pair each equity point with the benchmark's close on the SAME calendar
+    date, never by position. `eq_dated` is equity_series_with_dates()'s
+    output; `bench_by_date` maps an ISO date string to a benchmark close.
+
+    An equity date with no matching benchmark close drops the pair entirely
+    — both the equity value and the (nonexistent) benchmark value — rather
+    than substituting a nearby day. Forward-filling or interpolating a
+    missing benchmark close would invent a number to keep a pair alive,
+    which is exactly how a confident-looking wrong answer gets produced; the
+    honest outcome is fewer pairs, reported as INSUFFICIENT_DATA upstream if
+    too few survive.
+
+    Duplicate equity dates are not deduplicated here — each row is paired
+    independently on its own merits, same as equity_series()/
+    equity_series_with_dates() never deduplicate. That is a property of the
+    upstream log, not something this pairing step should paper over.
+
+    Returns (equity_values, benchmark_values): two lists, always the same
+    length, positionally aligned to each other (index i is one surviving
+    pair) even though the INPUT was aligned by date, not position.
+    """
+    eq_out: list = []
+    bm_out: list = []
+    for date, value in eq_dated:
+        if date in bench_by_date:
+            eq_out.append(value)
+            bm_out.append(bench_by_date[date])
+    return eq_out, bm_out
 
 
 def _selftest() -> None:
@@ -114,6 +188,66 @@ def _selftest() -> None:
                      '{"date":"2026-08-02","value":95.0}\n')
         assert equity_series(f) == [100.0, 95.0], equity_series(f)
         assert equity_series(Path(d) / "absent.jsonl") == []
+
+    # DATE-PAIRING: equity_series_with_dates() + pair_with_benchmark(). This
+    # is the fix for the defect where the benchmark was paired by POSITION —
+    # equity and benchmark can happen to match in LENGTH while every date
+    # diverges, and a length-only guard can never catch that.
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "equity.jsonl"
+        f.write_text(
+            '{"date":"2026-08-01","value":100.0}\n'
+            'not json\n'
+            '{"date":"2026-08-02","value":95.0}\n'
+            '{"date":"bogus-date","value":50.0}\n'
+            '{"date":"2026-08-03","value":"nan-ish"}\n'
+        )
+        eqd = equity_series_with_dates(f)
+        # unparseable date row and non-numeric value row are both skipped,
+        # same tolerance as equity_series()'s "skip, don't raise" discipline
+        assert eqd == [("2026-08-01", 100.0), ("2026-08-02", 95.0)], eqd
+        assert equity_series_with_dates(Path(d) / "absent.jsonl") == []
+
+    # all dates match -> every pair survives, values correctly aligned
+    eqd = [("2026-08-01", 100.0), ("2026-08-02", 95.0), ("2026-08-03", 110.0)]
+    bench = {"2026-08-01": 400.0, "2026-08-02": 401.0, "2026-08-03": 402.0}
+    eq_out, bm_out = pair_with_benchmark(eqd, bench)
+    assert eq_out == [100.0, 95.0, 110.0], eq_out
+    assert bm_out == [400.0, 401.0, 402.0], bm_out
+
+    # some equity dates missing from the benchmark -> those pairs dropped on
+    # BOTH sides; the surviving pairs stay correctly aligned to each other
+    bench_gappy = {"2026-08-01": 400.0, "2026-08-03": 402.0}   # 08-02 missing
+    eq_out, bm_out = pair_with_benchmark(eqd, bench_gappy)
+    assert eq_out == [100.0, 110.0], eq_out
+    assert bm_out == [400.0, 402.0], bm_out
+    assert len(eq_out) == len(bm_out)
+
+    # this is the exact failure mode being fixed: same LENGTH, dates offset
+    # by a few days (e.g. equity log skips a weekend the price panel has, or
+    # vice versa). Positional pairing would silently mismatch every point;
+    # date pairing must drop every one of them since none of the dates match.
+    eqd_shifted = [("2026-08-03", 100.0), ("2026-08-04", 95.0), ("2026-08-05", 110.0)]
+    bench_shifted = {"2026-08-01": 400.0, "2026-08-02": 401.0, "2026-08-03": 402.0}
+    eq_out, bm_out = pair_with_benchmark(eqd_shifted, bench_shifted)
+    # 08-03 is the only overlapping date -> exactly one surviving pair, not
+    # three misaligned ones
+    assert eq_out == [100.0], eq_out
+    assert bm_out == [402.0], bm_out
+
+    # no dates match at all -> both sides empty, never a synthesized pair
+    eq_out, bm_out = pair_with_benchmark(eqd, {"2099-01-01": 999.0})
+    assert eq_out == [] and bm_out == [], (eq_out, bm_out)
+    eq_out, bm_out = pair_with_benchmark(eqd, {})
+    assert eq_out == [] and bm_out == [], (eq_out, bm_out)
+
+    # duplicate dates in the equity log: each row is paired independently
+    # (no dedup here — that is a property of the upstream log, not this
+    # function's job), and every surviving pair still lines up correctly
+    eqd_dup = [("2026-08-01", 100.0), ("2026-08-01", 101.0), ("2026-08-02", 95.0)]
+    eq_out, bm_out = pair_with_benchmark(eqd_dup, bench)
+    assert eq_out == [100.0, 101.0, 95.0], eq_out
+    assert bm_out == [400.0, 400.0, 401.0], bm_out
 
     print("selftest OK: holdings merges marks with agent levels, unwatched visible")
 
