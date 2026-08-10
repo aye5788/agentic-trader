@@ -66,6 +66,18 @@ def drawdown(equity: list[float], max_pct: float) -> dict:
     `nulls_dropped` and folded into `reason` so a gapped series can never read as
     a clean one — a dropped point may also have been the true high-water peak,
     understating the drawdown.
+
+    Interior non-finite discipline (FIX B, 2026-08-10): an interior NaN/+inf/-inf
+    is dropped and counted in `nulls_dropped`, EXACTLY like an interior None --
+    it is NOT an abort. `equity.jsonl` is append-only and permanent, and this is
+    a BLOCKING criterion: aborting to INSUFFICIENT_DATA on any single corrupt
+    interior point would make criterion 1 unmeasurable FOREVER (permanent
+    tradeable=False / degraded mode), unfixable without hand-editing the track
+    record. The MOST RECENT point keeps the strict abort above -- a stale value
+    must never masquerade as current, so "unknown right now" still reports
+    INSUFFICIENT_DATA rather than silently reusing an older close. Since that
+    check already runs first and validates equity[-1] specifically, any
+    non-finite value reached by the loop below is by construction interior.
     """
     out = {"criterion": "drawdown", "state": INSUFFICIENT, "value": None,
            "limit": max_pct, "room": None, "reason": "", "nulls_dropped": 0}
@@ -102,9 +114,14 @@ def drawdown(equity: list[float], max_pct: float) -> dict:
             out["nulls_dropped"] = nulls_dropped
             return out
         if not math.isfinite(fv):
-            out["reason"] = f"non-finite equity value ({v!r}) in series"
-            out["nulls_dropped"] = nulls_dropped
-            return out
+            # Interior non-finite -- dropped and counted exactly like an
+            # interior None, never an abort. See the docstring's "Interior
+            # non-finite discipline (FIX B)" note above for why: the MOST
+            # RECENT point was already validated finite above, so reaching
+            # this branch means the corrupt value is interior, and this is a
+            # BLOCKING criterion whose input log is permanent/append-only.
+            nulls_dropped += 1
+            continue
         vals.append(fv)
 
     if len(vals) < 2:
@@ -470,30 +487,51 @@ def _selftest() -> None:
     assert r_nan_last["state"] == INSUFFICIENT, r_nan_last
     assert "non-finite" in r_nan_last["reason"], r_nan_last
     assert "current equity is unknown" in r_nan_last["reason"], r_nan_last
-    # NaN in an interior slot -> INSUFFICIENT, never a silently-false comparison
-    # that lets the FAIL branch go unreached
+    # NaN in an interior slot (FIX B, 2026-08-10): dropped and counted, exactly
+    # like an interior None -- NOT an abort. A single corrupt interior point in
+    # the permanent, append-only equity.jsonl must never make this BLOCKING
+    # criterion unmeasurable forever. peak=100 (nan dropped), last=95 -> -5%,
+    # PASS against the 15% test limit.
     r_nan_interior = drawdown([100.0, nan, 95.0], md)
-    assert r_nan_interior["state"] == INSUFFICIENT, r_nan_interior
-    assert "non-finite" in r_nan_interior["reason"], r_nan_interior
-    # +inf anywhere -> INSUFFICIENT, not a PASS from a NaN-valued drawdown
+    assert r_nan_interior["state"] == PASS, r_nan_interior
+    assert r_nan_interior["nulls_dropped"] == 1, r_nan_interior
+    assert abs(r_nan_interior["value"] + 0.05) < 1e-9, r_nan_interior
+    # +inf as the MOST RECENT point -> still the strict abort (current equity
+    # unknown), unaffected by the interior-drop change above
     r_pos_inf = drawdown([100.0, 95.0, pos_inf], md)
     assert r_pos_inf["state"] == INSUFFICIENT, r_pos_inf
     assert "non-finite" in r_pos_inf["reason"], r_pos_inf
-    # -inf anywhere -> INSUFFICIENT, not a FAIL with a nonsensical room/reason
+    # -inf as the MOST RECENT point -> same strict abort
     r_neg_inf = drawdown([100.0, 95.0, neg_inf], md)
     assert r_neg_inf["state"] == INSUFFICIENT, r_neg_inf
     assert "non-finite" in r_neg_inf["reason"], r_neg_inf
+    # -inf in an interior slot -> dropped and counted, same as the NaN-interior
+    # case above, never an abort
     r_neg_inf_interior = drawdown([100.0, neg_inf, 95.0], md)
-    assert r_neg_inf_interior["state"] == INSUFFICIENT, r_neg_inf_interior
-    assert "non-finite" in r_neg_inf_interior["reason"], r_neg_inf_interior
-    # a dropped None BEFORE a later non-finite value must still be reflected in
-    # nulls_dropped on the early-return path (the reporting bug in the finding)
+    assert r_neg_inf_interior["state"] == PASS, r_neg_inf_interior
+    assert r_neg_inf_interior["nulls_dropped"] == 1, r_neg_inf_interior
+    assert abs(r_neg_inf_interior["value"] + 0.05) < 1e-9, r_neg_inf_interior
+    # a dropped None AND a dropped interior non-finite together must both be
+    # reflected in nulls_dropped -- neither aborts, both are counted
     r_null_then_nan = drawdown([100.0, None, nan, 95.0], md)
-    assert r_null_then_nan["state"] == INSUFFICIENT, r_null_then_nan
-    assert r_null_then_nan["nulls_dropped"] == 1, r_null_then_nan
+    assert r_null_then_nan["state"] == PASS, r_null_then_nan
+    assert r_null_then_nan["nulls_dropped"] == 2, r_null_then_nan
+    assert abs(r_null_then_nan["value"] + 0.05) < 1e-9, r_null_then_nan
+    # a genuinely non-numeric interior value ("oops", not NaN/inf) is corrupt
+    # data of a DIFFERENT kind -- not a float at all -- and keeps aborting to
+    # INSUFFICIENT_DATA; FIX B only changes non-finite FLOAT handling
     r_null_then_bad = drawdown([100.0, None, "oops", 95.0], md)
     assert r_null_then_bad["state"] == INSUFFICIENT, r_null_then_bad
     assert r_null_then_bad["nulls_dropped"] == 1, r_null_then_bad
+    # FIX B core regression: a single corrupt interior point must never make
+    # this BLOCKING criterion unmeasurable FOREVER (permanent tradeable=False /
+    # degraded mode from one bad write to a permanent, append-only log). The
+    # criterion must stay LIVE and able to FAIL -- peak 100 (interior nan
+    # dropped) -> 83 is a genuine breach of the 15% test limit, not an
+    # INSUFFICIENT_DATA cop-out.
+    r_fixb_breach = drawdown([100.0, nan, 83.0], md)
+    assert r_fixb_breach["state"] == FAIL, r_fixb_breach
+    assert r_fixb_breach["nulls_dropped"] == 1, r_fixb_breach
     # ordinary finite values are entirely unaffected by the isfinite check
     r_finite_unaffected = drawdown([80.0, 100.0, 95.0], md)
     assert r_finite_unaffected["state"] == PASS, r_finite_unaffected

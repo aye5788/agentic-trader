@@ -20,6 +20,7 @@ Legacy schema ({"SYM": <cost dollars>}) is still valued (at cost, qty unknown)
 so an old snapshot degrades gracefully instead of crashing the dashboard.
 """
 import json
+import math
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -65,8 +66,23 @@ def load(snapshot_path: Path = SNAPSHOT) -> dict | None:
             continue
         qty = float(p.get("qty") or 0)
         avg = float(p.get("avg_cost") or 0)
+        if not math.isfinite(avg):                      # corrupt cost basis
+            avg = 0.0
         mark = marks.get(sym) or p.get("last") or avg
         mark = float(mark) if mark else 0.0
+        if not math.isfinite(mark):
+            # FIX B (2026-08-10): a NaN/inf mark (e.g. a corrupt monitor quote)
+            # must never reach `value`/`invested`/`account_value`. Python's json
+            # module writes a bare NaN and reads it back happily, so an
+            # unguarded NaN here would flow straight into
+            # research_store/history/equity.jsonl via scripts/log_equity.py and
+            # permanently corrupt the equity track record mandate.drawdown()
+            # reads. src/mandate.py's drawdown() now survives a corrupt
+            # interior POINT once one exists, but the real fix is to never
+            # WRITE one -- fall back exactly like an absent mark would: cost
+            # basis (already guaranteed finite above), or 0.0 if that is
+            # unusable too.
+            mark = avg
         value = qty * mark
         cost = qty * avg
         positions[sym] = {"qty": qty, "avg_cost": avg, "mark": round(mark, 4),
@@ -85,3 +101,81 @@ def load(snapshot_path: Path = SNAPSHOT) -> dict | None:
             "marked_at": marked_at, "cash": round(float(cash), 2),
             "positions": positions, "invested": round(invested, 2),
             "account_value": round(account_value, 2)}
+
+
+def _selftest() -> None:
+    """Covers the isfinite guard (FIX B, 2026-08-10): a NaN/inf mark or
+    avg_cost must never reach `value`/`invested`/`account_value` -- it must
+    fall back exactly like an absent mark would (cost basis, or 0.0), and
+    ordinary finite marks must be entirely unaffected."""
+    import tempfile
+    global SNAPSHOT, QUOTES
+    _snap, _quotes = SNAPSHOT, QUOTES
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            snap_path = Path(d) / "positions.json"
+            QUOTES = Path(d) / "quotes.json"        # absent by default -> no monitor overlay
+
+            def _write_snap(last, avg_cost=10.0, ts="2026-08-10T14:00:00+00:00"):
+                snap_path.write_text(json.dumps({
+                    "account_number": "1", "cash": 10.0, "as_of": "2026-08-10",
+                    "ts": ts,
+                    "positions": {"AAA": {"qty": 2.0, "avg_cost": avg_cost, "last": last}}}))
+
+            # 1. ordinary finite mark: unaffected by the guard
+            _write_snap(last=12.0)
+            out = load(snap_path)
+            assert out["positions"]["AAA"]["mark"] == 12.0, out
+            assert out["positions"]["AAA"]["value"] == 24.0, out
+            assert math.isfinite(out["account_value"]), out
+
+            # 2. NaN `last` falls back to the (finite) avg_cost, never NaN
+            _write_snap(last=float("nan"))
+            out = load(snap_path)
+            assert out["positions"]["AAA"]["mark"] == 10.0, out
+            assert out["positions"]["AAA"]["value"] == 20.0, out
+            assert math.isfinite(out["positions"]["AAA"]["mark"]), out
+            assert math.isfinite(out["account_value"]), out
+
+            # 3. +inf `last` is guarded the same way as NaN
+            _write_snap(last=float("inf"))
+            out = load(snap_path)
+            assert out["positions"]["AAA"]["mark"] == 10.0, out
+            assert math.isfinite(out["account_value"]), out
+
+            # 4. -inf `last` is guarded the same way
+            _write_snap(last=float("-inf"))
+            out = load(snap_path)
+            assert out["positions"]["AAA"]["mark"] == 10.0, out
+            assert math.isfinite(out["account_value"]), out
+
+            # 5. BOTH last and avg_cost corrupt -> mark falls all the way to
+            #    0.0 (not NaN), same discipline as the pre-existing "mark or 0"
+            #    fallback for an absent mark, never a corrupted one
+            _write_snap(last=float("nan"), avg_cost=float("nan"))
+            out = load(snap_path)
+            assert out["positions"]["AAA"]["mark"] == 0.0, out
+            assert out["positions"]["AAA"]["avg_cost"] == 0.0, out
+            assert math.isfinite(out["account_value"]), out
+
+            # 6. a NaN monitor-quote overlay (fresher than the snapshot) is
+            #    guarded exactly like a NaN snapshot `last` -- the priority
+            #    chain (monitor > last > avg_cost) must never smuggle a NaN
+            #    through its highest-priority source
+            _write_snap(last=12.0, ts="2026-08-10T14:00:00+00:00")
+            QUOTES.write_text(json.dumps({"ts": "2026-08-10T15:00:00+00:00",
+                                          "prices": {"AAA": float("nan")}}))
+            out = load(snap_path)
+            assert out["positions"]["AAA"]["mark"] == 10.0, out   # falls to avg_cost
+            assert math.isfinite(out["account_value"]), out
+
+        print("selftest OK: marks -- isfinite guard on mark/avg_cost "
+              "(NaN/inf never reaches value/account_value)")
+    finally:
+        SNAPSHOT, QUOTES = _snap, _quotes
+
+
+if __name__ == "__main__":
+    import sys
+    if "--selftest" in sys.argv:
+        _selftest()

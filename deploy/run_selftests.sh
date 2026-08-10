@@ -42,6 +42,7 @@ VENV_SELFTESTS=(
     "src/repo_checks.py"
     "src/mandate.py"
     "src/governance.py"
+    "src/marks.py"
     "scripts/record_fills.py"
 )
 
