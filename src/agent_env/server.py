@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -23,6 +24,7 @@ from research_store import read_current         # noqa: E402
 from agent_env import state                           # noqa: E402  sibling module
 from agent_env import screen                          # noqa: E402  sibling module
 from agent_env import terrain as terrain_mod          # noqa: E402  sibling module
+from agent_env import decide                          # noqa: E402  sibling module
 import mandate                                  # noqa: E402
 import pandas as pd                             # noqa: E402
 
@@ -188,6 +190,24 @@ def terrain(symbol: str) -> str:
     return json.dumps(terrain_mod.excursions(
         pd.read_parquet(CLOSES), pd.read_parquet(HIGHS), pd.read_parquet(LOWS),
         symbol.strip().upper()), indent=2, default=str)
+
+
+@mcp.tool()
+def set_levels(symbol: str, stop: float, target: float = 0.0,
+               reason: str = "") -> str:
+    """Set YOUR stop and take-profit for a position. `reason` is required.
+
+    The monitor enforces exactly what you set here — this is how a position gets
+    protected. Pass target=0 to set a stop with no take-profit. Use `terrain()`
+    first so the levels sit where price actually goes.
+    """
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        merged = decide.write_levels(symbol, stop, target or None, reason, ts)
+    except ValueError as e:
+        return json.dumps({"ok": False, "error": str(e)}, indent=2)
+    return json.dumps({"ok": True, "symbol": symbol.strip().upper(),
+                       "levels": merged[symbol.strip().upper()]}, indent=2)
 
 
 def _selftest() -> None:
