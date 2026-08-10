@@ -129,6 +129,51 @@ def _ctx():
             pass
 
 
+# --- rate limiting -----------------------------------------------------------
+# moomoo's documented per-endpoint ceilings. OpenD is SHARED with the sibling
+# repos, so exceeding these degrades moomoo-vol-desk as well as us -- and the
+# agent drives these calls interactively, with no natural pacing. `prices.py`
+# paces its own calls; this module had NONE until 2026-08-10.
+#
+# get_market_state is the strict one at 10/30s, and `quotes()` makes one of each,
+# so a quote() call is bounded by the market-state budget, not the snapshot's.
+_LIMITS = {
+    "snapshot": (60, 30.0),
+    "market_state": (10, 30.0),
+    "earnings": (60, 30.0),
+    "rank": (60, 30.0),
+    "plate": (60, 30.0),
+    "calendar": (60, 30.0),
+    "trading_days": (60, 30.0),
+    "subscribe": (60, 30.0),
+}
+_calls: dict = {}
+
+
+def _pace(kind: str) -> float:
+    """Block until another `kind` call is within moomoo's published rate limit.
+
+    Sliding window, not a fixed min-interval: the limits are "N per 30s", so a
+    burst of 10 followed by a wait is legal and a rigid interval would be slower
+    than the API allows for no benefit. Returns seconds waited (for tests).
+    """
+    import time                            # noqa: PLC0415
+    limit, window = _LIMITS.get(kind, (60, 30.0))
+    now = time.monotonic()
+    hist = [t for t in _calls.get(kind, []) if now - t < window]
+    waited = 0.0
+    if len(hist) >= limit:
+        sleep_for = window - (now - hist[0]) + 0.05
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+            waited = sleep_for
+            now = time.monotonic()
+            hist = [t for t in hist if now - t < window]
+    hist.append(now)
+    _calls[kind] = hist
+    return waited
+
+
 def _num(v):
     """moomoo uses 'N/A' and 0.0 for absent. Return None rather than a fake number."""
     if v is None:
@@ -204,6 +249,7 @@ def _snapshot_resilient(mo, q, codes: list) -> tuple[list, dict]:
     for _ in range(_MAX_DROP_ROUNDS):
         if not remaining:
             return [], dropped
+        _pace("snapshot")
         ret, df = q.get_market_snapshot(remaining)
         if ret == mo.RET_OK:
             return df.to_dict("records"), dropped
@@ -233,6 +279,7 @@ def _market_state(mo, q, codes) -> dict:
     quote with an unknown session is still a quote -- so this degrades to {}.
     """
     try:
+        _pace("market_state")
         ret, df = q.get_market_state(codes)
         if ret != mo.RET_OK:
             return {}
@@ -345,6 +392,7 @@ def earnings(symbols=None, weeks: int = 4, today: date | None = None) -> dict:
                 begin = today + timedelta(days=7 * w)
                 end = begin + timedelta(days=6)          # inclusive 7-day window
                 scanned.append(f"{begin}..{end}")
+                _pace("earnings")
                 ret, df = q.get_earnings_calendar(
                     market=mo.Market.US,
                     begin_date=begin.isoformat(),
@@ -474,6 +522,7 @@ def depth(symbol: str, levels: int = 5) -> dict:
                              f"subscriptions (cap {_SUB_MAX_HELD}) and none has "
                              f"passed moomoo's 60s minimum yet. Retry shortly — "
                              f"refusing to take another shared slot."}
+        _pace("subscribe")
         ret, msg = q.subscribe([code], mo.SubType.ORDER_BOOK)
         if ret != mo.RET_OK:
             return {"error": f"could not subscribe to the order book: {msg}",
@@ -552,6 +601,7 @@ def leaders(period: str = "20d", n: int = 25, worst: bool = False) -> dict:
     n = max(1, min(int(n), MAX_RANK_COUNT))
     try:
         with _ctx() as (mo, q):
+            _pace("rank")
             ret, payload = q.get_period_change_rank(market=mo.Market.US,
                                                     count=MAX_RANK_COUNT)
             if ret != mo.RET_OK:
@@ -608,6 +658,7 @@ def sectors(symbols) -> dict:
     rows, unsupported = [], {}
     try:
         with _ctx() as (mo, q):
+            _pace("plate")
             ret, df = q.get_owner_plate(codes)
             if ret == mo.RET_OK:
                 rows = df.to_dict("records")
@@ -619,6 +670,7 @@ def sectors(symbols) -> dict:
                 # unsupported, rather than returning nothing for a book that is
                 # part single names and part sleeve ETFs (ours always is).
                 for c in codes[:_MAX_PLATE_FALLBACK]:
+                    _pace("plate")
                     r1, d1 = q.get_owner_plate([c])
                     if r1 == mo.RET_OK:
                         rows.extend(d1.to_dict("records"))
@@ -661,6 +713,7 @@ def macro_calendar(days: int = 7, importance: str = "HIGH", today=None) -> dict:
     end = today + timedelta(days=max(1, int(days)))
     try:
         with _ctx() as (mo, q):
+            _pace("calendar")
             out = q.get_economic_calendar(begin_date=today.isoformat(),
                                           end_date=end.isoformat())
             ret, data = out[0], out[1]
@@ -733,6 +786,37 @@ def _selftest() -> None:
     # stdout sealing must be idempotent and must not raise
     _seal_stdout()
     _seal_stdout()
+
+    # --- rate limiting ------------------------------------------------------
+    import time as _time
+    _calls.clear()
+    # Under the limit: never sleeps.
+    for _ in range(10):
+        assert _pace("snapshot") == 0.0
+    assert len(_calls["snapshot"]) == 10
+
+    # market_state is the strict one (10/30s). The 11th must wait.
+    _calls.clear()
+    for _ in range(_LIMITS["market_state"][0]):
+        assert _pace("market_state") == 0.0
+    # Fake the window as nearly elapsed so the test waits ~0.1s, not 30.
+    _calls["market_state"] = [_time.monotonic() - 29.95] * _LIMITS["market_state"][0]
+    waited = _pace("market_state")
+    assert 0 < waited < 1.0, f"expected a short wait, got {waited}"
+
+    # Entries older than the window fall out rather than accumulating forever.
+    _calls["snapshot"] = [_time.monotonic() - 31.0] * 100
+    assert _pace("snapshot") == 0.0
+    assert len(_calls["snapshot"]) == 1, _calls["snapshot"]
+
+    # Budgets are per-endpoint: exhausting one must not throttle another.
+    _calls.clear()
+    _calls["market_state"] = [_time.monotonic()] * _LIMITS["market_state"][0]
+    assert _pace("snapshot") == 0.0
+
+    # An unknown endpoint falls back to the conservative default, never KeyErrors.
+    assert _pace("something_new") == 0.0
+    _calls.clear()
 
     # --- unknown-symbol parsing -------------------------------------------
     assert _parse_unknown("Unknown stock. FAKE1") == "FAKE1"
