@@ -594,7 +594,10 @@ def main() -> None:
     from research_store import read_current, store   # noqa: E402
     cfg = strat.load()
     rc = cfg["risk_review"]
-    armed = gov.live_approved(cfg) and not rc.get("alert_only", True)
+    killed = gov.kill_switch_active(cfg)
+    armed = gov.live_approved(cfg) and not rc.get("alert_only", True) and not killed
+    if killed:
+        print("⛔ KILL-SWITCH active — risk review placing NOTHING (alert-only this run)")
 
     if args.facts:
         valued = marks.load()
