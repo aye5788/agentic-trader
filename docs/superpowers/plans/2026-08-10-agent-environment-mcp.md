@@ -4,7 +4,7 @@
 
 **Goal:** Give the trading agent a custom MCP tool surface so it can SEE the facts and DECIDE, instead of following a procedural markdown script.
 
-**Architecture:** One FastMCP server at `src/mcp/server.py`, built from small pure helper modules in `src/mcp/`. Every tool reads state that already exists on disk (`research_store/`, price parquet panels) via modules already in the repo — `marks`, `mandate`, `momentum`, `governance`, `research_store`. Nothing new is invented; the server is a *window* onto facts the system already computes, plus two write tools (`set_levels`, `record_decision`) that record the agent's own decisions.
+**Architecture:** One FastMCP server at `src/agent_env/server.py`, built from small pure helper modules in `src/agent_env/`. Every tool reads state that already exists on disk (`research_store/`, price parquet panels) via modules already in the repo — `marks`, `mandate`, `momentum`, `governance`, `research_store`. Nothing new is invented; the server is a *window* onto facts the system already computes, plus two write tools (`set_levels`, `record_decision`) that record the agent's own decisions.
 
 **Tech Stack:** Python 3.12 (`.venv`), `mcp==1.28.1` (FastMCP), pandas, stdlib. No new dependencies beyond the already-pinned `mcp`.
 
@@ -61,13 +61,13 @@ research_store/history/equity.jsonl     {"date","ts","value","invested","cash"}
 ### Task 1: Package skeleton and a server that runs
 
 **Files:**
-- Create: `src/mcp/__init__.py`
-- Create: `src/mcp/server.py`
+- Create: `src/agent_env/__init__.py`
+- Create: `src/agent_env/server.py`
 
 **Interfaces:**
-- Produces: `src/mcp/server.py` module-level `mcp = FastMCP("agentic-trader")`, a `ping() -> str` tool, and `_selftest()`.
+- Produces: `src/agent_env/server.py` module-level `mcp = FastMCP("agentic-trader")`, a `ping() -> str` tool, and `_selftest()`.
 
-**Note on the package name:** the directory is `src/mcp/`, which shadows the installed `mcp` SDK package if `src/` is on `sys.path` first. **Verify this immediately in Step 2** — if `from mcp.server.fastmcp import FastMCP` fails from inside `src/mcp/server.py`, rename the directory to `src/agent_env/` and use that name throughout the rest of the plan. Report which name you used; later tasks depend on it.
+**Note on the package name:** the directory is `src/agent_env/`, which shadows the installed `mcp` SDK package if `src/` is on `sys.path` first. **Verify this immediately in Step 2** — if `from mcp.server.fastmcp import FastMCP` fails from inside `src/agent_env/server.py`, rename the directory to `src/agent_env/` and use that name throughout the rest of the plan. Report which name you used; later tasks depend on it.
 
 - [ ] **Step 1: Create the package**
 
@@ -75,7 +75,7 @@ research_store/history/equity.jsonl     {"date","ts","value","invested","cash"}
 mkdir -p src/mcp
 ```
 
-Create `src/mcp/__init__.py`:
+Create `src/agent_env/__init__.py`:
 
 ```python
 """The agent's ENVIRONMENT — the tools it can call to see the book and act on it.
@@ -96,17 +96,17 @@ Run:
 ```bash
 .venv/bin/python -c "import sys; sys.path.insert(0,'src'); from mcp.server.fastmcp import FastMCP; print('no shadow')"
 ```
-If this prints `no shadow`, keep `src/mcp/`. If it raises `ModuleNotFoundError`, `git mv src/mcp src/agent_env` and use `agent_env` everywhere below.
+If this prints `no shadow`, keep `src/agent_env/`. If it raises `ModuleNotFoundError`, `git mv src/mcp src/agent_env` and use `agent_env` everywhere below.
 
 - [ ] **Step 3: Write the server with one tool**
 
-Create `src/mcp/server.py`:
+Create `src/agent_env/server.py`:
 
 ```python
 """FastMCP server exposing the agent's tool surface.
 
-Run manually:   .venv/bin/python src/mcp/server.py
-Run the tests:  .venv/bin/python src/mcp/server.py --selftest
+Run manually:   .venv/bin/python src/agent_env/server.py
+Run the tests:  .venv/bin/python src/agent_env/server.py --selftest
 
 Transport is stdio: Claude Code launches this as a subprocess and speaks MCP over
 its stdin/stdout, so NOTHING may be printed to stdout except protocol traffic.
@@ -147,13 +147,13 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Run the selftest**
 
-Run: `.venv/bin/python src/mcp/server.py --selftest`
+Run: `.venv/bin/python src/agent_env/server.py --selftest`
 Expected: `selftest OK: mcp server boots, ping responds`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/mcp/
+git add src/agent_env/
 git commit -m "feat(env): MCP server skeleton — the agent's tool surface
 
 Plan 2 of the inversion. This package is a WINDOW onto facts the system already
@@ -166,14 +166,14 @@ only and diagnostics must go to stderr."
 ### Task 2: `positions()` and `account()` — what do I hold?
 
 **Files:**
-- Create: `src/mcp/state.py`
-- Modify: `src/mcp/server.py`
+- Create: `src/agent_env/state.py`
+- Modify: `src/agent_env/server.py`
 
 **Interfaces:**
 - Consumes: `marks.load()`, `research_store.read_current()`.
 - Produces: `state.holdings() -> dict`, `state.account_summary() -> dict`; tools `positions()`, `account()`.
 
-- [ ] **Step 1: Write the failing test in `src/mcp/state.py`**
+- [ ] **Step 1: Write the failing test in `src/agent_env/state.py`**
 
 ```python
 """What the agent holds, and what it is worth. Pure assembly over marks.load()
@@ -227,7 +227,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `.venv/bin/python src/mcp/state.py --selftest`
+Run: `.venv/bin/python src/agent_env/state.py --selftest`
 Expected: FAIL with `NotImplementedError`
 
 - [ ] **Step 3: Implement `holdings()`**
@@ -256,20 +256,20 @@ Replace the `raise NotImplementedError` body with:
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `.venv/bin/python src/mcp/state.py --selftest`
+Run: `.venv/bin/python src/agent_env/state.py --selftest`
 Expected: `selftest OK: holdings merges marks with agent levels, unwatched visible`
 
-- [ ] **Step 5: Add the two tools to `src/mcp/server.py`**
+- [ ] **Step 5: Add the two tools to `src/agent_env/server.py`**
 
 Add after the `ping` tool:
 
 ```python
 import marks                                    # noqa: E402
 from research_store import read_current         # noqa: E402
-from mcp import state                           # noqa: E402  sibling module
+from agent_env import state                           # noqa: E402  sibling module
 ```
 
-`server.py` already inserts `REPO/src` on `sys.path`, so `from mcp import state` resolves to `src/mcp/state.py`. If you renamed the package in Task 1, use `from agent_env import state` instead. Run `.venv/bin/python -c "import sys; sys.path.insert(0,'src'); from mcp import state; print('ok')"` to confirm before continuing.
+`server.py` already inserts `REPO/src` on `sys.path`, so `from agent_env import state` resolves to `src/agent_env/state.py`. If you renamed the package in Task 1, use `from agent_env import state` instead. Run `.venv/bin/python -c "import sys; sys.path.insert(0,'src'); from agent_env import state; print('ok')"` to confirm before continuing.
 
 Then the tools:
 
@@ -301,7 +301,7 @@ Run:
 ```bash
 .venv/bin/python -c "
 import sys; sys.path.insert(0,'src')
-from mcp import server
+from agent_env import server
 print(server.account())
 import json; h=json.loads(server.positions())
 print('positions:', len(h), '| unwatched:', [s for s,v in h.items() if not v['watched']])"
@@ -311,7 +311,7 @@ Expected: a JSON account block, a position count of 13, and a list (possibly emp
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/mcp/
+git add src/agent_env/
 git commit -m "feat(env): positions() and account() — what the agent holds
 
 Values through src/marks.py, the one place positions become dollars, so the agent,
@@ -325,13 +325,13 @@ visible to the agent that has to deal with it."
 ### Task 3: `mandate_status()` — am I passing, and how much room?
 
 **Files:**
-- Modify: `src/mcp/server.py`
+- Modify: `src/agent_env/server.py`
 
 **Interfaces:**
 - Consumes: `mandate.status(...)`, `marks.load()`, `research_store/history/equity.jsonl`, `research_store/journal.jsonl`, `research_store/prices/closes.parquet` (for the SPY benchmark series).
 - Produces: tool `mandate_status()`.
 
-- [ ] **Step 1: Add a helper to `src/mcp/state.py` with its test**
+- [ ] **Step 1: Add a helper to `src/agent_env/state.py` with its test**
 
 Append to `state.py` above `_selftest`:
 
@@ -368,10 +368,10 @@ Add to `_selftest()` before the print:
 
 - [ ] **Step 2: Run it**
 
-Run: `.venv/bin/python src/mcp/state.py --selftest`
+Run: `.venv/bin/python src/agent_env/state.py --selftest`
 Expected: the selftest OK line (the new assertions pass).
 
-- [ ] **Step 3: Add the tool to `src/mcp/server.py`**
+- [ ] **Step 3: Add the tool to `src/agent_env/server.py`**
 
 ```python
 import mandate                                  # noqa: E402
@@ -426,7 +426,7 @@ Run:
 ```bash
 .venv/bin/python -c "
 import sys,json; sys.path.insert(0,'src')
-from mcp import server
+from agent_env import server
 s=json.loads(server.mandate_status())
 for k,c in s['criteria'].items(): print(f\"  {k:20s} {c['state']}\")
 print('  tradeable:', s['tradeable'])"
@@ -436,7 +436,7 @@ Expected: `drawdown PASS`, `concentration PASS`, both informational `INSUFFICIEN
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/mcp/
+git add src/agent_env/
 git commit -m "feat(env): mandate_status() — the terms, with real numbers
 
 The agent can always ask whether it is passing and how much room is left. Reads
@@ -449,8 +449,8 @@ there is exactly one answer in the system to 'are we passing'."
 ### Task 4: `candidates()` and `universe()` — the screen as an attention budget
 
 **Files:**
-- Create: `src/mcp/screen.py`
-- Modify: `src/mcp/server.py`
+- Create: `src/agent_env/screen.py`
+- Modify: `src/agent_env/server.py`
 
 **Interfaces:**
 - Consumes: `momentum.compute(panel, asof)`, `config/universe.csv`, `config/etf_universe.csv`, `research_store/prices/closes.parquet`.
@@ -458,7 +458,7 @@ there is exactly one answer in the system to 'are we passing'."
 
 **Design note the implementer must honour:** the top-N is an **attention budget, not a boundary**. `candidates()` returns the top N *and* states in its docstring that the full list is one `universe()` call away. Neither tool restricts what may be traded.
 
-- [ ] **Step 1: Write the failing test in `src/mcp/screen.py`**
+- [ ] **Step 1: Write the failing test in `src/agent_env/screen.py`**
 
 ```python
 """The momentum screen, exposed as a CANDIDATE GENERATOR.
@@ -526,7 +526,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `.venv/bin/python src/mcp/screen.py --selftest`
+Run: `.venv/bin/python src/agent_env/screen.py --selftest`
 Expected: FAIL with `NotImplementedError`
 
 - [ ] **Step 3: Implement both functions**
@@ -547,13 +547,13 @@ def rank(panel, asof, tickers: list):
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `.venv/bin/python src/mcp/screen.py --selftest`
+Run: `.venv/bin/python src/agent_env/screen.py --selftest`
 Expected: `selftest OK: screen ranks, restricts cleanly, tolerates unknown tickers`
 
-- [ ] **Step 5: Add the tools to `src/mcp/server.py`**
+- [ ] **Step 5: Add the tools to `src/agent_env/server.py`**
 
 ```python
-from mcp import screen                          # noqa: E402  (adjust if renamed)
+from agent_env import screen                          # noqa: E402  (adjust if renamed)
 
 UNIVERSE = REPO / "config" / "universe.csv"
 ETF_UNIVERSE = REPO / "config" / "etf_universe.csv"
@@ -599,7 +599,7 @@ Run:
 ```bash
 .venv/bin/python -c "
 import sys,json; sys.path.insert(0,'src')
-from mcp import server
+from agent_env import server
 c=json.loads(server.candidates(5)); print('  top 5:', list(c))
 u=json.loads(server.universe()); print('  full list size:', len(u))"
 ```
@@ -608,7 +608,7 @@ Expected: five tickers, and a full list of roughly 150–168 names.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/mcp/
+git add src/agent_env/
 git commit -m "feat(env): candidates() and universe() — the screen as a candidate generator
 
 Spec §3: a screen ranks, it does not decide. The top-10 is an attention budget so
@@ -621,8 +621,8 @@ Neither tool restricts what may be traded."
 ### Task 5: `terrain()` — how far does this name actually move?
 
 **Files:**
-- Create: `src/mcp/terrain.py`
-- Modify: `src/mcp/server.py`
+- Create: `src/agent_env/terrain.py`
+- Modify: `src/agent_env/server.py`
 
 **Interfaces:**
 - Consumes: `research_store/prices/{closes,highs,lows}.parquet`.
@@ -630,7 +630,7 @@ Neither tool restricts what may be traded."
 
 **Why this tool exists:** `scripts/calibrate_geometry.py` (2026-08-09) measured that the old formula placed the first take-profit 5.5 daily sigma away, a distance price reaches roughly 2.6% of the time in five days, while the stop at 2.5 sigma is hit about 20% of the time. The agent sets its own levels now, so it needs the same measurement per name, not a formula.
 
-- [ ] **Step 1: Write the failing test in `src/mcp/terrain.py`**
+- [ ] **Step 1: Write the failing test in `src/agent_env/terrain.py`**
 
 ```python
 """How far a name actually travels, in units of its own daily volatility.
@@ -694,7 +694,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `.venv/bin/python src/mcp/terrain.py --selftest`
+Run: `.venv/bin/python src/agent_env/terrain.py --selftest`
 Expected: FAIL with `NotImplementedError`
 
 - [ ] **Step 3: Implement `excursions()`**
@@ -732,13 +732,13 @@ def excursions(close, high, low, symbol: str, horizons=(1, 3, 5, 10, 20)) -> dic
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `.venv/bin/python src/mcp/terrain.py --selftest`
+Run: `.venv/bin/python src/agent_env/terrain.py --selftest`
 Expected: `selftest OK: terrain excursions scale with horizon, unknown symbol explained`
 
-- [ ] **Step 5: Add the tool to `src/mcp/server.py`**
+- [ ] **Step 5: Add the tool to `src/agent_env/server.py`**
 
 ```python
-from mcp import terrain as terrain_mod          # noqa: E402  (adjust if renamed)
+from agent_env import terrain as terrain_mod          # noqa: E402  (adjust if renamed)
 
 HIGHS = REPO / "research_store" / "prices" / "highs.parquet"
 LOWS = REPO / "research_store" / "prices" / "lows.parquet"
@@ -768,7 +768,7 @@ Run:
 ```bash
 .venv/bin/python -c "
 import sys,json; sys.path.insert(0,'src')
-from mcp import server
+from agent_env import server
 t=json.loads(server.terrain('MU'))
 print('  MU sigma%:', round(t['sigma_pct'],2))
 print('  5d mfe_median:', t['horizons']['5']['mfe_median'], 'mae_median:', t['horizons']['5']['mae_median'])
@@ -779,7 +779,7 @@ Expected: a positive sigma, a positive 5-day median favourable excursion, a nega
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/mcp/
+git add src/agent_env/
 git commit -m "feat(env): terrain() — measured excursions, so levels beat formulas
 
 The agent sets its own stops and targets now, so it needs the distribution price
@@ -793,8 +793,8 @@ time in five days against a stop hit ~20% of the time."
 ### Task 6: `set_levels()` — the agent's own stop and target
 
 **Files:**
-- Create: `src/mcp/decide.py`
-- Modify: `src/mcp/server.py`
+- Create: `src/agent_env/decide.py`
+- Modify: `src/agent_env/server.py`
 
 **Interfaces:**
 - Consumes: `research_store/monitor/overrides.json` (the file `scripts/risk_review.py` writes and `scripts/market_monitor.py:499` reads).
@@ -802,7 +802,7 @@ time in five days against a stop hit ~20% of the time."
 
 **Why this file:** `overrides.json` is already written atomically by `risk_review.py` (via `os.replace`) and already read by the monitor, so the agent's levels flow through a proven path rather than new plumbing. **Note for the implementer:** the monitor currently applies overrides *stricter-only*. Loosening that so the agent's level is honoured in both directions is Plan 3's job — do NOT change the monitor here.
 
-- [ ] **Step 1: Write the failing test in `src/mcp/decide.py`**
+- [ ] **Step 1: Write the failing test in `src/agent_env/decide.py`**
 
 ```python
 """Where the agent records the decisions it makes: the levels it sets, and why.
@@ -869,7 +869,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `.venv/bin/python src/mcp/decide.py --selftest`
+Run: `.venv/bin/python src/agent_env/decide.py --selftest`
 Expected: FAIL with `NotImplementedError`
 
 - [ ] **Step 3: Implement `merge_levels()`**
@@ -907,7 +907,7 @@ def merge_levels(existing: dict, symbol: str, stop, target, reason: str, ts: str
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `.venv/bin/python src/mcp/decide.py --selftest`
+Run: `.venv/bin/python src/agent_env/decide.py --selftest`
 Expected: `selftest OK: merge_levels is pure, reason mandatory, levels sane`
 
 - [ ] **Step 5: Add an atomic writer and the tool**
@@ -939,11 +939,11 @@ def write_levels(symbol: str, stop, target, reason: str, ts: str,
     return merged
 ```
 
-In `src/mcp/server.py`:
+In `src/agent_env/server.py`:
 
 ```python
 from datetime import datetime, timezone         # noqa: E402
-from mcp import decide                          # noqa: E402  (adjust if renamed)
+from agent_env import decide                          # noqa: E402  (adjust if renamed)
 
 
 @mcp.tool()
@@ -971,7 +971,7 @@ Run:
 cp research_store/monitor/overrides.json /tmp/ov.bak 2>/dev/null || echo "{}" > /tmp/ov.bak
 .venv/bin/python -c "
 import sys,json; sys.path.insert(0,'src')
-from mcp import server
+from agent_env import server
 print(server.set_levels('ZZTEST', 10.0, 20.0, 'plan-2 smoke test'))
 print(server.set_levels('ZZTEST', 10.0, 5.0, 'should reject'))
 print(server.set_levels('ZZTEST', 10.0, 20.0, ''))"
@@ -983,7 +983,7 @@ Expected: the first call `ok: true`; the second rejected for a target below the 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/mcp/
+git add src/agent_env/
 git commit -m "feat(env): set_levels() — the agent's own stop and target, with a reason
 
 Writes research_store/monitor/overrides.json, the file risk_review already writes
@@ -998,7 +998,7 @@ stricter-only — honouring the agent's level in both directions is Plan 3."
 ### Task 7: `record_decision()` — every action carries a why
 
 **Files:**
-- Modify: `src/mcp/decide.py`, `src/mcp/server.py`
+- Modify: `src/agent_env/decide.py`, `src/agent_env/server.py`
 
 **Interfaces:**
 - Consumes: `research_store.store.append_journal(entry: dict)`.
@@ -1021,7 +1021,7 @@ stricter-only — honouring the agent's level in both directions is Plan 3."
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `.venv/bin/python src/mcp/decide.py --selftest`
+Run: `.venv/bin/python src/agent_env/decide.py --selftest`
 Expected: FAIL with `NameError: name 'decision_entry' is not defined`
 
 - [ ] **Step 3: Implement it in `decide.py`**
@@ -1049,10 +1049,10 @@ def decision_entry(symbol: str, action: str, reason: str, ts: str) -> dict:
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `.venv/bin/python src/mcp/decide.py --selftest`
+Run: `.venv/bin/python src/agent_env/decide.py --selftest`
 Expected: `selftest OK: merge_levels is pure, reason mandatory, levels sane`
 
-- [ ] **Step 5: Add the tool to `src/mcp/server.py`**
+- [ ] **Step 5: Add the tool to `src/agent_env/server.py`**
 
 ```python
 from research_store import store                # noqa: E402
@@ -1084,7 +1084,7 @@ Run:
 BEFORE=$(wc -l < research_store/journal.jsonl)
 .venv/bin/python -c "
 import sys; sys.path.insert(0,'src')
-from mcp import server
+from agent_env import server
 print(server.record_decision('ZZTEST','skip','plan-2 smoke test — not a real decision'))
 print(server.record_decision('ZZTEST','skip',''))"
 AFTER=$(wc -l < research_store/journal.jsonl)
@@ -1096,7 +1096,7 @@ Expected: exactly one new line, and the second call rejected. The test line stay
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/mcp/
+git add src/agent_env/
 git commit -m "feat(env): record_decision() — every action carries a why
 
 Including deciding NOT to act. A later session cannot distinguish 'ruled this out'
@@ -1109,7 +1109,7 @@ what stops an autonomous agent rediscovering the same ground every session."
 ### Task 8: `check_order()` — can the agent ask whether this is permitted?
 
 **Files:**
-- Modify: `src/mcp/server.py`
+- Modify: `src/agent_env/server.py`
 
 **Interfaces:**
 - Consumes: `governance.gates()`, `governance.vet_plan()`, `governance.liquidity_ok()`, `strategy.load()`, `marks.load()`.
@@ -1194,7 +1194,7 @@ Run:
 ```bash
 .venv/bin/python -c "
 import sys,json; sys.path.insert(0,'src')
-from mcp import server
+from agent_env import server
 for sym,side,amt in [('MU','buy',5.0),('MU','sell',5.0),('ZZZZ','buy',5.0),('MU','buy',999999.0)]:
     r=json.loads(server.check_order(sym,side,amt))
     print(f'  {sym:6s} {side:5s} {amt:>9}  allowed={r[\"allowed\"]}  {(r[\"reasons\"] or [\"\"])[0][:52]}')"
@@ -1207,7 +1207,7 @@ Run:
 ```bash
 .venv/bin/python -c "
 import sys,json; sys.path.insert(0,'src')
-from mcp import server
+from agent_env import server
 r=json.loads(server.check_order('ZZZZ_NOT_IN_UNIVERSE','sell',5.0))
 print('  off-universe SELL allowed:', r['allowed'], '(must be True — never strand an exit)')"
 ```
@@ -1216,7 +1216,7 @@ Expected: `True`. Stops are software-only; refusing an exit removes a position's
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/mcp/
+git add src/agent_env/
 git commit -m "feat(env): check_order() — the agent can ask what is permitted
 
 A question-answering tool first: returns allowed/refused with a reason the agent
@@ -1230,7 +1230,7 @@ concentration, size, liquidity) and never selection: symbol choice is the agent'
 ### Task 9: `brief()` — the whole picture in one call
 
 **Files:**
-- Modify: `src/mcp/server.py`
+- Modify: `src/agent_env/server.py`
 
 **Interfaces:**
 - Consumes: every tool above, plus `momentum.regime_on()` and `research_store.read_current()`.
@@ -1288,7 +1288,7 @@ Run:
 ```bash
 .venv/bin/python -c "
 import sys,json; sys.path.insert(0,'src')
-from mcp import server
+from agent_env import server
 b=json.loads(server.brief())
 print('  keys:', list(b))
 print('  positions:', len(b['positions']), '| unprotected:', b['unprotected'])
@@ -1301,7 +1301,7 @@ Expected: all keys present, 13 positions, a candidate list, `tradeable: True`, a
 - [ ] **Step 3: Commit**
 
 ```bash
-git add src/mcp/
+git add src/agent_env/
 git commit -m "feat(env): brief() — the whole picture, assembled fresh
 
 A tool rather than a file, so it cannot go stale and slow_loop does not have to
@@ -1329,7 +1329,7 @@ the agent must not miss."
   "mcpServers": {
     "agentic-trader": {
       "command": "/opt/agentic-trader/.venv/bin/python",
-      "args": ["/opt/agentic-trader/src/mcp/server.py"]
+      "args": ["/opt/agentic-trader/src/agent_env/server.py"]
     }
   }
 }
@@ -1342,7 +1342,7 @@ Expected: a line naming `agentic-trader`. If it does not appear, check `.mcp.jso
 
 - [ ] **Step 3: Register the new selftests**
 
-Add to the venv array in `deploy/run_selftests.sh`, matching the existing entries' style: `src/mcp/state.py`, `src/mcp/screen.py`, `src/mcp/terrain.py`, `src/mcp/decide.py`, `src/mcp/server.py`.
+Add to the venv array in `deploy/run_selftests.sh`, matching the existing entries' style: `src/agent_env/state.py`, `src/agent_env/screen.py`, `src/agent_env/terrain.py`, `src/agent_env/decide.py`, `src/agent_env/server.py`.
 
 - [ ] **Step 4: Run the full runner**
 
@@ -1354,7 +1354,7 @@ Expected: `ALL SELFTESTS PASSED`, exit 0, with all five new entries listed.
 Add to the repo-layout block, in the established style:
 
 ```
-src/mcp/                THE AGENT'S ENVIRONMENT (Plan 2 of the inversion) — a
+src/agent_env/                THE AGENT'S ENVIRONMENT (Plan 2 of the inversion) — a
                         FastMCP server exposing what the agent can SEE and DO:
                         brief(), positions(), account(), mandate_status(),
                         candidates(n)/universe(), terrain(symbol),
@@ -1371,7 +1371,7 @@ src/mcp/                THE AGENT'S ENVIRONMENT (Plan 2 of the inversion) — a
 
 ```bash
 bash deploy/run_selftests.sh && python3 src/repo_checks.py
-git add .mcp.json deploy/run_selftests.sh CLAUDE.md src/mcp/
+git add .mcp.json deploy/run_selftests.sh CLAUDE.md src/agent_env/
 git commit -m "feat(env): register the MCP surface and its selftests
 
 .mcp.json makes the server discoverable to Claude Code; run_selftests.sh gains
@@ -1392,7 +1392,7 @@ switching them over is Plan 3."
 ```bash
 .venv/bin/python -c "
 import sys,json; sys.path.insert(0,'src')
-from mcp import server
+from agent_env import server
 b=json.loads(server.brief())
 print('brief keys      :', list(b))
 print('positions       :', len(b['positions']))
