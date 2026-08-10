@@ -30,7 +30,9 @@ config/strategy.toml has always documented it as ("halt new buys if account down
   - halt-entries: research_store/HALT_ENTRIES  -> block_entries
   - drawdown    : down > max_drawdown from peak -> block_entries
   - order caps  : reject any single BUY over max_order_pct of account value
-  - whitelist   : only ever trade names in the configured universe
+  - whitelist   : only ever BUY names in the configured universe (a SELL is
+                  never blocked by it — exiting a name you already hold must
+                  never be refused by a universe list)
   - live switch : [proof] live_approved gates PLACEMENT entirely (proof gate §9)
 
 Pure functions + a tiny JSON state file for the drawdown peak. No broker I/O —
@@ -352,7 +354,17 @@ def vet_plan(plan: list[dict], account_value: float, cfg) -> tuple[list[dict], l
     `amount` or a non-finite `account_value` (which makes the cap itself
     meaningless — max_order would be NaN) ONLY ever blocks a BUY here; a SELL
     is never refused for this reason, so a bad mark can never trap an open
-    position."""
+    position.
+
+    The whitelist is likewise BUY-ONLY (2026-08-10): a SELL is never checked
+    against it. `scripts/universe_refresh.py` has never run — its first window
+    is Oct 1-7 — so the day it drops a held name, that name must still be
+    exitable. Stops in this system are software-only (market_monitor.py places
+    the sell); a gate that can block an exit removes an open position's only
+    protection, exactly the failure mode this file's module docstring already
+    documents for the kill switch and the drawdown halt. A universe list may
+    say what the agent is allowed to newly BUY; it must never say what it is
+    forbidden to sell."""
     g = cfg["governance"]
     wl = whitelist(cfg) if g.get("require_whitelist") else None
     account_value_bad = not math.isfinite(account_value)
@@ -360,7 +372,7 @@ def vet_plan(plan: list[dict], account_value: float, cfg) -> tuple[list[dict], l
     approved, blocked = [], []
     for o in plan:
         why = None
-        if wl is not None and o["symbol"] not in wl:
+        if wl is not None and o["side"] == "buy" and o["symbol"] not in wl:
             why = "not in whitelist universe"
         elif o["side"] == "buy" and _amount_invalid(o.get("amount")):
             why = (f"order amount is invalid ({o.get('amount')!r}) — must be a "
@@ -450,6 +462,24 @@ def _selftest() -> None:
             assert [o["amount"] for o in appr] == [15.0, 90.0], appr
             assert "not in whitelist" in blkd[0]["blocked"]
             assert "exceeds max order" in blkd[1]["blocked"]
+
+            # 7b. WHITELIST-SELL REGRESSION (load-bearing): the whitelist must be
+            # BUY-ONLY. A held name that has fallen off config/universe.csv (e.g.
+            # scripts/universe_refresh.py hasn't run since a rebalance dropped it)
+            # must still be exitable — a gate that blocks a sell removes an open
+            # position's only protection, since stops here are software-only. This
+            # is the assertion that makes the module/_selftest docstrings' claim
+            # ("NO gate except the kill switch can ever block a sell") actually
+            # true for the whitelist, rather than merely asserted in prose.
+            off_universe_sell = {"symbol": "NFLX", "side": "sell", "amount": 10.0}
+            off_universe_buy = {"symbol": "NFLX", "side": "buy", "amount": 10.0}
+            appr, blkd = vet_plan([off_universe_sell, off_universe_buy], 100.0, cfg)
+            assert appr == [off_universe_sell], (
+                "an off-universe SELL must be approved — the whitelist must "
+                "never strand an exit", appr, blkd)
+            assert len(blkd) == 1 and blkd[0]["symbol"] == "NFLX" and blkd[0]["side"] == "buy"
+            assert "not in whitelist" in blkd[0]["blocked"], (
+                "an off-universe BUY must still be blocked", blkd)
 
             # 8. NaN/CORRUPTED-VALUE REGRESSION: a non-finite account_value must
             #    fail CLOSED through drawdown_halt (not silently "not halted",
