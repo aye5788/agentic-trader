@@ -495,6 +495,83 @@ def _overrides() -> dict:
 
 
 @mcp.tool()
+def performance(limit: int = 30) -> str:
+    """Your own track record — the equity curve and every closed round trip.
+
+    Answers the question none of the other tools do: is what I am doing working?
+    `positions` shows unrealized P&L on what is open; `mandate_status` judges
+    against the terms. This is the history: where equity started, where it is,
+    its high-water mark, the drawdown from it, and each completed trade with its
+    return, holding period and how it ended (stop / target / rebalanced).
+
+    `win_rate` is reported ONLY alongside average win and average loss. A win
+    rate on its own is the most misleading number in trading — 78% winners lost
+    money in this system's own backtest, because the losers were larger.
+    """
+    pts = []
+    if EQUITY.exists():
+        for line in EQUITY.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            v = r.get("value")
+            if isinstance(v, (int, float)) and v == v:
+                pts.append({"date": r.get("date"), "value": float(v)})
+
+    curve = {}
+    if pts:
+        vals = [p["value"] for p in pts]
+        peak = max(vals)
+        curve = {
+            "points": len(pts),
+            "from": pts[0]["date"], "to": pts[-1]["date"],
+            "start": vals[0], "current": vals[-1],
+            "high_water": peak,
+            "return_pct": round((vals[-1] / vals[0] - 1) * 100, 2) if vals[0] else None,
+            "drawdown_from_peak_pct": round((vals[-1] / peak - 1) * 100, 2) if peak else None,
+        }
+
+    closed = []
+    for rec in _outcomes():
+        if rec.get("event") != "outcome":
+            continue
+        o = rec.get("outcome") or {}
+        closed.append({
+            "symbol": rec.get("symbol"), "at": rec.get("at"),
+            "pnl_pct": o.get("pnl_pct"), "holding_days": o.get("holding_days"),
+            "exit_reason": o.get("exit_reason"),
+            "hit_stop": o.get("hit_stop"), "hit_target": o.get("hit_target"),
+        })
+    closed.sort(key=lambda r: str(r.get("at") or ""), reverse=True)
+
+    rs = [c["pnl_pct"] for c in closed
+          if isinstance(c.get("pnl_pct"), (int, float))]
+    wins = [r for r in rs if r > 0]
+    losses = [r for r in rs if r <= 0]
+    summary = {"closed_trades": len(rs)}
+    if rs:
+        summary.update({
+            "win_rate_pct": round(len(wins) / len(rs) * 100, 1),
+            "avg_win_pct": round(sum(wins) / len(wins) * 100, 2) if wins else None,
+            "avg_loss_pct": round(sum(losses) / len(losses) * 100, 2) if losses else None,
+            "avg_trade_pct": round(sum(rs) / len(rs) * 100, 2),
+            "stopped_out": sum(1 for c in closed if c.get("hit_stop")),
+            "hit_target": sum(1 for c in closed if c.get("hit_target")),
+        })
+
+    return json.dumps({
+        "equity_curve": curve or {"note": "no equity history recorded yet"},
+        "closed_trades_summary": summary,
+        "recent_closed_trades": closed[:int(limit)],
+        "note": "Unrealized P&L on open positions is in positions(); this is the "
+                "realized record. Read win_rate only next to avg_win/avg_loss.",
+    }, indent=2, default=str)
+
+
+@mcp.tool()
 def halt_status() -> str:
     """Are the switches on? Read this BEFORE planning orders.
 

@@ -105,7 +105,7 @@ is the failure pattern this repo keeps repeating.
 | Term | Enforcement |
 |---|---|
 | **Day trading is ALLOWED** | Nothing to enforce — a *permission*. Stated because the agent would otherwise assume the PDT rule applies. It does not: PDT governs margin accounts, and this is cash. Intraday round trips are bounded only by settled cash, not by a trade count. |
-| **Options are NOT** | **Structural.** §5's allowlist names 8 Robinhood tools; no option tool is among them, so `place_option_order` is unreachable rather than merely forbidden. |
+| **Options are NOT** | **Structural.** §5's allowlist names 10 Robinhood tools; no option tool is among them, so `place_option_order` is unreachable rather than merely forbidden. |
 | **Cash account, T+1 settlement on CLOSES** | **Partly unenforced — see below.** Proceeds from a sale are unavailable until T+1. |
 | **Observe moomoo rate limits** | **Code, as of `f59022e`.** `live.py` now paces every endpoint on a sliding window. Previously unenforced: an agent looping `quote()` would have breached `get_market_state`'s 10-per-30s ceiling on an OpenD shared with the sibling repos, degrading their feed too. |
 
@@ -135,11 +135,13 @@ read `.env`. **An agent that can edit its own guardrails has none.**
 
 Sessions launch with an explicit allowlist:
 
-- **`agentic-trader` MCP** — all 28 tools (§7).
-- **`robinhood-trading` MCP** — 8 tools only: `get_accounts`,
+- **`agentic-trader` MCP** — all 29 tools (§7), none of which can place an order.
+- **`robinhood-trading` MCP** — 10 tools only: `get_accounts`,
   `get_equity_positions`, `get_portfolio`, `get_equity_quotes`,
-  `get_equity_orders`, `review_equity_order`, `place_equity_order`,
-  `cancel_equity_order`. The other ~45 (options, watchlists, scanners) stay denied.
+  `get_equity_orders`, `get_realized_pnl`, `get_pnl_trade_history`,
+  `review_equity_order`, `place_equity_order`, `cancel_equity_order`. The other
+  ~43 (options, watchlists, scanners) stay denied — so `place_option_order` is
+  unreachable, not merely forbidden (§4a).
 - **Nothing else.** No Bash, no Read/Write/Edit, no WebFetch.
 
 Enforced in settings, and asserted by a new `src/repo_checks.py` check so it
@@ -182,18 +184,60 @@ loudly on a mismatch, so a hook that silently stops firing is still caught.
 
 ---
 
-## 7. The tool surface (28, complete as of `8161c2a`)
+## 7. The tool surface — grouped BY VENUE first
 
-| Group | Tools |
-|---|---|
-| **Orientation** | `brief`, `positions`, `account`, `mandate_status`, `halt_status` |
-| **Selection** | `candidates(n)`, `universe`, `leaders`, `sectors` |
-| **Pricing** | `quote`, `depth`, `terrain` |
-| **Events** | `earnings`, `macro_calendar`, `macro`, `news` |
-| **Acting** | `check_order`, `set_levels`, `record_decision` |
-| **Memory** | `research_log`, `rule_out`, `revisit`, `open_question`, `close_question` |
-| **Attention** | `wake_register`, `wake_status`, `wake_deregister` |
-| **Liveness** | `ping` |
+**The division of labour is the first thing the charter states, because confusing
+it is a class of error no gate catches.** The agent must never reach for moomoo to
+place an order, nor Robinhood to research one.
+
+> **moomoo is DATA. Robinhood is ORDERS. There is no overlap, and no second
+> execution venue exists.**
+>
+> moomoo's API *can* trade — `unlock_trade` — and this system never calls it, in
+> any repo. Nothing in the tool surface exposes it, so an order cannot be placed
+> at moomoo even by mistake. If you find yourself looking for one, the tool you
+> want is Robinhood's `place_equity_order`.
+
+| Venue | Group | Tools |
+|---|---|---|
+| — (local state) | **Orientation** | `brief`, `positions`, `account`, `mandate_status`, `halt_status`, `performance` |
+| moomoo + local panel | **Selection** | `candidates(n)`, `universe`, `leaders`, `sectors` |
+| moomoo | **Pricing** | `quote`, `depth` |
+| local panel | **Terrain** | `terrain` |
+| moomoo / FRED / Alpaca | **Events** | `earnings`, `macro_calendar`, `macro` (FRED), `news` (Alpaca) |
+| local | **Deciding** | `check_order`, `set_levels`, `record_decision` |
+| local | **Memory** | `research_log`, `rule_out`, `revisit`, `open_question`, `close_question` |
+| local | **Attention** | `wake_register`, `wake_status`, `wake_deregister` |
+| local | **Liveness** | `ping` |
+| **Robinhood** | **THE ONLY EXECUTION** | `place_equity_order`, `cancel_equity_order`, `review_equity_order` |
+| **Robinhood** | Account truth | `get_accounts`, `get_equity_positions`, `get_portfolio`, `get_equity_orders`, `get_equity_quotes`, `get_realized_pnl`, `get_pnl_trade_history` |
+
+Groups say what each tool *touches* — a fact about the tool — never when to reach
+for it (§2).
+
+**Robinhood allowlist corrected 2026-08-10:** the original 8 omitted
+`get_realized_pnl` and `get_pnl_trade_history`, so the agent could not see its own
+realised results from the broker at all. Now 10.
+
+### The basics, audited
+
+Prompted by Aaron: the exotic tools were built before anyone checked the obvious
+questions. Verified live against the real account:
+
+- *What is the account worth?* → `account()` — value, cash, invested, `marked_at`.
+- *What do I hold?* → `positions()` — 12 positions with qty, cost, mark, P&L,
+  share of equity, stop, targets, and `watched`.
+- *Am I within the terms?* → `mandate_status()` — all four criteria with room.
+- *Are the switches on?* → `halt_status()`.
+- *Is what I am doing working?* → **`performance()`, added in response.** Nothing
+  exposed the equity curve or a single closed trade before; `state.equity_series`
+  had zero callers. The agent could not see its own track record.
+
+`performance()` on first run: 17 closed trades, 29.4% win rate, average win
++1.5%, average loss −9.26%, **0 of 17 targets hit**. That is the trade-geometry
+mismatch showing in realised results, and it was invisible to every other tool.
+Win rate is therefore reported ONLY beside average win and average loss — this
+system's own backtest produced 78% winners that lost money.
 
 Two distinctions the charter must state explicitly, because confusing either is a
 safety failure:
