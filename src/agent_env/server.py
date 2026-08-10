@@ -18,6 +18,10 @@ sys.path.insert(0, str(REPO / "src"))
 
 from mcp.server.fastmcp import FastMCP   # noqa: E402
 
+import marks                                    # noqa: E402
+from research_store import read_current         # noqa: E402
+from agent_env import state                           # noqa: E402  sibling module
+
 mcp = FastMCP("agentic-trader")
 
 
@@ -25,6 +29,27 @@ mcp = FastMCP("agentic-trader")
 def ping() -> str:
     """Liveness check. Returns 'pong' if the environment server is reachable."""
     return "pong"
+
+
+@mcp.tool()
+def positions() -> str:
+    """Every position actually held, with the stop and target set for it.
+
+    `watched: false` means the position has NO stop being enforced — it is
+    unprotected. That is deliberately reported rather than hidden.
+    """
+    prod = read_current()
+    return json.dumps(state.holdings(marks.load(),
+                                     prod.theses if prod else []), indent=2, default=str)
+
+
+@mcp.tool()
+def account() -> str:
+    """Account value, cash, invested capital, and when it was last marked."""
+    v = marks.load()
+    return json.dumps({k: v.get(k) for k in
+                       ("account_number", "account_value", "cash", "invested",
+                        "as_of", "marked_at")}, indent=2, default=str)
 
 
 def _selftest() -> None:
