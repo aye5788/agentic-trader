@@ -399,6 +399,311 @@ def earnings(symbols=None, weeks: int = 4, today: date | None = None) -> dict:
     return res
 
 
+# ----------------------------------------------------------------- depth ----
+
+_SUB_MIN_SECONDS = 65          # moomoo REJECTS an unsubscribe before 60s
+_SUB_MAX_HELD = 5              # never hold more than this many order books
+_subs: dict = {}               # code -> monotonic timestamp of subscribe
+
+
+def _reap_subs(mo, q) -> list:
+    """Release any order-book subscription past moomoo's 60s minimum.
+
+    ⚠️ moomoo REFUSES an unsubscribe inside the first minute ("subscription
+    duration ... too short. Minimum ... 1 minute"), so subscribe→read→release is
+    impossible: the slot is held whether we like it or not. Slots are capped at
+    100 and SHARED with the sibling repos through the same OpenD, so they are
+    reaped lazily on the next call instead, and the number held at once is
+    capped.
+
+    On a fresh process we ADOPT whatever order books OpenD already holds -- a
+    previous server may have exited owning some -- so a restart cannot orphan a
+    slot forever.
+    """
+    import time                            # noqa: PLC0415
+    now = time.monotonic()
+    try:
+        ret, info = q.query_subscription()
+        if ret == mo.RET_OK:
+            existing = set((info.get("sub_list") or {}).get("ORDER_BOOK") or [])
+            for code in existing:
+                _subs.setdefault(code, now)          # adopt, then age out normally
+            for code in list(_subs):
+                if code not in existing:
+                    _subs.pop(code, None)            # already gone
+    except Exception:                       # noqa: BLE001
+        pass
+    released = []
+    for code, at in sorted(_subs.items(), key=lambda kv: kv[1]):
+        if now - at < _SUB_MIN_SECONDS:
+            continue
+        ret, msg = q.unsubscribe([code], mo.SubType.ORDER_BOOK)
+        if ret == mo.RET_OK:
+            _subs.pop(code, None)
+            released.append(code)
+        # A failed release is NOT swallowed -- it stays in _subs and is retried
+        # on the next call, and the caller is told below.
+    return released
+
+
+def depth(symbol: str, levels: int = 5) -> dict:
+    """Live bid/ask ladder for ONE symbol — is this name tradeable right now?
+
+    Answers a different question from `quote`: turnover says how much trades over
+    a day, this says what is actually resting at the touch right now, and what it
+    would cost to cross.
+
+    ⚠️ Requires a SUBSCRIPTION, unlike everything else here, and moomoo will not
+    let it be released for 60 seconds. Slots are capped at 100 and shared with the
+    sibling repos, so this holds at most %d at a time and reaps the expired ones
+    on each call. If that cap is reached and nothing is old enough to release,
+    this REFUSES rather than quietly consuming another shared slot.
+    """ % _SUB_MAX_HELD
+    code = _code(symbol)
+    ok, why = opend_reachable()
+    if not ok:
+        return {"error": f"OpenD not reachable ({why})", "symbol": _bare(code)}
+    mo = _import_moomoo()
+    q = mo.OpenQuoteContext(host=HOST, port=PORT)
+    subscribed = False
+    try:
+        _reap_subs(mo, q)
+        if code not in _subs and len(_subs) >= _SUB_MAX_HELD:
+            return {"symbol": _bare(code),
+                    "error": f"already holding {len(_subs)} order-book "
+                             f"subscriptions (cap {_SUB_MAX_HELD}) and none has "
+                             f"passed moomoo's 60s minimum yet. Retry shortly — "
+                             f"refusing to take another shared slot."}
+        ret, msg = q.subscribe([code], mo.SubType.ORDER_BOOK)
+        if ret != mo.RET_OK:
+            return {"error": f"could not subscribe to the order book: {msg}",
+                    "symbol": _bare(code)}
+        subscribed = True
+        import time as _t                   # noqa: PLC0415
+        _subs.setdefault(code, _t.monotonic())
+        ret, data = q.get_order_book(code, num=max(1, int(levels)))
+        if ret != mo.RET_OK:
+            return {"error": f"order book unavailable: {data}", "symbol": _bare(code)}
+        bids = [(float(p), float(v)) for p, v, *_ in (data.get("Bid") or [])]
+        asks = [(float(p), float(v)) for p, v, *_ in (data.get("Ask") or [])]
+        out = {"symbol": _bare(code),
+               "bids": [{"price": p, "size": v} for p, v in bids],
+               "asks": [{"price": p, "size": v} for p, v in asks]}
+        if bids and asks:
+            bid, ask = bids[0][0], asks[0][0]
+            mid = (bid + ask) / 2.0
+            out["bid"], out["ask"] = bid, ask
+            out["spread"] = round(ask - bid, 4)
+            if mid:
+                out["spread_bps"] = round((ask - bid) / mid * 10000, 2)
+            out["depth_at_touch"] = {"bid_size": bids[0][1], "ask_size": asks[0][1]}
+        else:
+            out["note"] = ("no two-sided book right now — outside regular hours "
+                           "the ladder is usually empty, which is not illiquidity")
+        return out
+    except Exception as e:                  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}", "symbol": _bare(code)}
+    finally:
+        # No unsubscribe here: moomoo rejects it for the first 60s (see
+        # _reap_subs). The slot is released on a later call instead. Attempting
+        # it here would fail every time and, if swallowed, would look like it had
+        # worked -- which is exactly how the first version leaked a shared slot.
+        del subscribed
+        try:
+            q.close()
+        except Exception:                   # noqa: BLE001
+            pass
+
+
+# ----------------------------------------------------------- period ranks ----
+
+_MAX_PLATE_FALLBACK = 30
+
+_PERIODS = {"5d": "change_rate_5d", "10d": "change_rate_10d",
+            "20d": "change_rate_20d", "60d": "change_rate_60d",
+            "120d": "change_rate_120d", "250d": "change_rate_250d",
+            "ytd": "change_rate_ytd"}
+
+
+MAX_RANK_COUNT = 200          # 200 works, 500 is rejected by the endpoint
+
+
+def leaders(period: str = "20d", n: int = 25, worst: bool = False) -> dict:
+    """The market's strongest (or weakest) names over a horizon — DISCOVERY.
+
+    This looks OUTSIDE the 168-name universe. Its job is to show what is moving
+    that the configured universe does not contain, so the universe is a starting
+    point rather than a cage.
+
+    Deliberately NOT our signal, and not a substitute for it: src/momentum.py is
+    the house measure (residual, sector-tilted, vol-scaled) over names we have
+    deep history for. This is raw price change over a fixed window across ~6,900
+    US names. Where they disagree is information, not an error.
+
+    ⚠️ NOT a per-symbol lookup. The endpoint returns a ranked PAGE capped at
+    %d rows out of ~6,900, with no way to ask for one name, and paging to find an
+    arbitrary symbol would cost ~35 calls. For a specific name's own numbers use
+    `quote` and `candidates`. Reporting a global rank for a name found in a
+    200-row page would be a fabricated denominator.
+    """ % MAX_RANK_COUNT
+    col = _PERIODS.get(str(period).lower())
+    if col is None:
+        return {"error": f"unknown period {period!r}; use one of {sorted(_PERIODS)}"}
+    n = max(1, min(int(n), MAX_RANK_COUNT))
+    try:
+        with _ctx() as (mo, q):
+            ret, payload = q.get_period_change_rank(market=mo.Market.US,
+                                                    count=MAX_RANK_COUNT)
+            if ret != mo.RET_OK:
+                return {"error": f"period rank failed: {payload}"}
+            # Payload is (total_available, DataFrame) -- pick the frame by SHAPE,
+            # not by position: indexing [0] silently grabbed the int total.
+            df = None
+            if isinstance(payload, tuple):
+                for el in payload:
+                    if hasattr(el, "columns"):
+                        df = el
+                        break
+            else:
+                df = payload
+            if df is None:
+                return {"error": f"unexpected payload shape: {type(payload).__name__}"}
+    except Exception as e:                  # noqa: BLE001
+        return {"error": f"moomoo unreachable ({type(e).__name__}: {e})"}
+
+    if col not in df.columns:
+        return {"error": f"{col} missing from the response"}
+    ranked = df.sort_values(col, ascending=bool(worst)).head(n)
+    rows = []
+    for r in ranked.to_dict("records"):
+        rec = {"symbol": _bare(str(r.get("security", ""))), "name": r.get("name")}
+        for label, c in _PERIODS.items():
+            v = _num(r.get(c))
+            if v is not None:
+                rec[f"chg_{label}_pct"] = v
+        for extra in ("cur_price", "turnover", "market_cap", "volume_ratio"):
+            v = _num(r.get(extra))
+            if v is not None:
+                rec[extra] = v
+        rows.append(rec)
+    return {"source": f"moomoo get_period_change_rank ({'weakest' if worst else 'strongest'} by {period})",
+            "scanned": f"{len(df)} of the US market (endpoint caps a page at {MAX_RANK_COUNT})",
+            "leaders": rows}
+
+
+# --------------------------------------------------------------- sectors ----
+
+def sectors(symbols) -> dict:
+    """Real industry membership per name, from moomoo's plate data.
+
+    The residual-momentum tilt currently proxies sectors with 11 SPDR ETFs; this
+    is the actual classification. INDUSTRY plates only -- CONCEPT plates are
+    thematic baskets ("Metaverse") and OTHER is noise, so folding them in would
+    put one name in a dozen overlapping "sectors".
+    """
+    syms = _symbols_or_empty(symbols)
+    if not syms:
+        return {"error": "no symbols given", "sectors": {}}
+    codes = [_code(s) for s in syms]
+    rows, unsupported = [], {}
+    try:
+        with _ctx() as (mo, q):
+            ret, df = q.get_owner_plate(codes)
+            if ret == mo.RET_OK:
+                rows = df.to_dict("records")
+            else:
+                # ⚠️ ETFs are NOT supported by this endpoint, and ONE ETF fails
+                # the whole batch -- the error names no symbol, unlike the
+                # snapshot's "Unknown stock. X", so there is nothing to drop and
+                # retry. Fall back to per-symbol calls and record which are
+                # unsupported, rather than returning nothing for a book that is
+                # part single names and part sleeve ETFs (ours always is).
+                for c in codes[:_MAX_PLATE_FALLBACK]:
+                    r1, d1 = q.get_owner_plate([c])
+                    if r1 == mo.RET_OK:
+                        rows.extend(d1.to_dict("records"))
+                    else:
+                        unsupported[_bare(c)] = str(d1)[:120]
+                if len(codes) > _MAX_PLATE_FALLBACK:
+                    unsupported["_truncated"] = (
+                        f"only the first {_MAX_PLATE_FALLBACK} symbols were "
+                        f"retried individually ({len(codes)} requested)")
+    except Exception as e:                  # noqa: BLE001
+        return {"error": f"moomoo unreachable ({type(e).__name__}: {e})",
+                "sectors": {}}
+    out: dict = {}
+    for r in rows:
+        if str(r.get("plate_type")) != "INDUSTRY":
+            continue
+        sym = _bare(str(r.get("code", "")))
+        out.setdefault(sym, []).append(str(r.get("plate_name")))
+    missing = sorted({_bare(c) for c in codes} - set(out) - set(unsupported))
+    res = {"source": "moomoo get_owner_plate (INDUSTRY plates only)",
+           "sectors": out,
+           "no_industry_plate": missing}
+    if unsupported:
+        res["unsupported"] = unsupported
+        res["note"] = ("ETFs have no industry plate — an empty result for a "
+                       "sleeve ETF is expected, not a failure.")
+    return res
+
+
+# -------------------------------------------------------- macro calendar ----
+
+def macro_calendar(days: int = 7, importance: str = "HIGH", today=None) -> dict:
+    """Scheduled US macro events (FOMC, CPI, payrolls) in the next `days`.
+
+    The macro sibling of `earnings`: dates the whole book is exposed to at once,
+    rather than one name. States dates and nothing else -- what to do about an
+    FOMC two days out is the agent's call.
+    """
+    today = today or date.today()
+    end = today + timedelta(days=max(1, int(days)))
+    try:
+        with _ctx() as (mo, q):
+            out = q.get_economic_calendar(begin_date=today.isoformat(),
+                                          end_date=end.isoformat())
+            ret, data = out[0], out[1]
+            if ret != mo.RET_OK:
+                return {"error": f"economic calendar failed: {data}", "events": []}
+            rows = data.to_dict("records") if hasattr(data, "to_dict") else list(data)
+    except Exception as e:                  # noqa: BLE001
+        return {"error": f"moomoo unreachable ({type(e).__name__}: {e})", "events": []}
+
+    wanted = str(importance).upper() if importance else None
+    events = []
+    for r in rows:
+        country = str(r.get("country", ""))
+        if "United States" not in country and country.upper() not in ("US", "USA"):
+            continue
+        star = str(r.get("star", "")).upper()
+        if wanted and wanted != "ALL" and star != wanted:
+            continue
+        ts = r.get("timestamp")
+        when = None
+        if ts:
+            try:
+                when = datetime.fromtimestamp(float(ts)).astimezone().isoformat(
+                    timespec="minutes")
+            except (TypeError, ValueError, OSError):
+                when = None
+        events.append({"title": r.get("title"), "when": when, "importance": star,
+                       "previous": r.get("previous"), "consensus": r.get("consensus"),
+                       "actual": r.get("actual")})
+    return {"source": "moomoo get_economic_calendar (US)",
+            "window": f"{today}..{end}",
+            "importance_filter": wanted or "ALL",
+            "events": events}
+
+
+def _symbols_or_empty(symbols) -> list:
+    if symbols is None:
+        return []
+    if isinstance(symbols, str):
+        return [s for s in symbols.replace(",", " ").split() if s]
+    return [str(s).strip() for s in symbols if str(s).strip()]
+
+
 # -------------------------------------------------------------- selftest ----
 
 def _selftest() -> None:

@@ -426,6 +426,61 @@ def earnings(symbols: str = "", weeks: int = 6) -> str:
 
 
 @mcp.tool()
+def depth(symbol: str, levels: int = 5) -> str:
+    """The live bid/ask ladder for one name — can you actually get filled here?
+
+    `quote` tells you how much trades over a day; this tells you what is resting
+    at the touch right now and what crossing the spread costs. Use it before
+    committing size to a thinner name, and to sanity-check a fill you did not
+    like.
+
+    Outside regular hours the ladder is usually empty — that is the session, not
+    illiquidity, and the reply says so.
+    """
+    return json.dumps(live_mod.depth(symbol, levels), indent=2, default=str)
+
+
+@mcp.tool()
+def leaders(period: str = "20d", n: int = 25, worst: bool = False) -> str:
+    """What is actually moving in the whole US market — beyond our 168 names.
+
+    Periods: 5d, 10d, 20d, 60d, 120d, 250d, ytd. `worst=True` gives the weakest.
+
+    This exists so the configured universe is a starting point, not a cage: it
+    looks at ~6,900 names, most of which we hold no history for. A name found
+    here is a candidate to investigate, not a signal — we have no deep panel for
+    it, so `terrain` and `candidates` cannot score it. Say so if you act on one.
+    """
+    return json.dumps(live_mod.leaders(period=period, n=n, worst=worst),
+                      indent=2, default=str)
+
+
+@mcp.tool()
+def sectors(symbols: str) -> str:
+    """Real industry classification per name, from moomoo's plate data.
+
+    Useful for seeing concentration the position count hides — five names in one
+    industry is one bet wearing five hats. ETFs have no industry plate and come
+    back under `unsupported`; that is expected, not a failure.
+    """
+    return json.dumps(live_mod.sectors(_symlist(symbols)), indent=2, default=str)
+
+
+@mcp.tool()
+def macro_calendar(days: int = 7, importance: str = "HIGH") -> str:
+    """Scheduled US macro events — FOMC, CPI, payrolls — in the next `days`.
+
+    The macro sibling of `earnings`: these hit the whole book at once rather than
+    one name. `importance` is HIGH / MEDIUM / LOW / ALL.
+
+    Dates only. Nothing here blocks a trade or sizes one; what to do about a CPI
+    print two days out is your call.
+    """
+    return json.dumps(live_mod.macro_calendar(days=days, importance=importance),
+                      indent=2, default=str)
+
+
+@mcp.tool()
 def brief() -> str:
     """Everything you need to decide, assembled fresh: mandate status, what you
     hold and whether it is protected, the top candidates, and the market backdrop.
