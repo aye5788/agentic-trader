@@ -306,10 +306,6 @@ def _selftest() -> None:
     names = discover_agentic()
     assert names, "discovery returned nothing"
     assert all(n.startswith("mcp__agentic-trader__") for n in names), names
-    for required in ("mcp__agentic-trader__halt_status",
-                     "mcp__agentic-trader__check_order",
-                     "mcp__agentic-trader__place_holder_never"):
-        pass
     assert "mcp__agentic-trader__halt_status" in names
     assert "mcp__agentic-trader__check_order" in names
     print(f"session_tools: OK — discovered {len(names)} tools")
