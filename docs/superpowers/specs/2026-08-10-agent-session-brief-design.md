@@ -96,6 +96,34 @@ replaces per-trade approval. Three classes are pushed **before** acting:
 Aaron keeps veto on the unusual without gating the routine. Standing rule holds:
 settlement and buying-power deferrals stay silent — they self-heal.
 
+### 4a. Standing terms (Aaron, 2026-08-10)
+
+These are not announce-first items; they are terms the charter states outright.
+Each is marked by **how it is enforced**, because a term that lives only in prose
+is the failure pattern this repo keeps repeating.
+
+| Term | Enforcement |
+|---|---|
+| **Day trading is ALLOWED** | Nothing to enforce — a *permission*. Stated because the agent would otherwise assume the PDT rule applies. It does not: PDT governs margin accounts, and this is cash. Intraday round trips are bounded only by settled cash, not by a trade count. |
+| **Options are NOT** | **Structural.** §5's allowlist names 8 Robinhood tools; no option tool is among them, so `place_option_order` is unreachable rather than merely forbidden. |
+| **Cash account, T+1 settlement on CLOSES** | **Partly unenforced — see below.** Proceeds from a sale are unavailable until T+1. |
+| **Observe moomoo rate limits** | **Code, as of `f59022e`.** `live.py` now paces every endpoint on a sliding window. Previously unenforced: an agent looping `quote()` would have breached `get_market_state`'s 10-per-30s ceiling on an OpenD shared with the sibling repos, degrading their feed too. |
+
+**The settlement gap is real and open.** Nothing exposes settled vs unsettled
+cash. `pending_settlement` exists only as a recorded *outcome* — the reason a buy
+was skipped after the fact (XLI and LITE, 2026-08-10). So the agent sees a cash
+balance, plans buys against it, and discovers only at placement that the money
+was not available. With no shell, it cannot investigate why.
+
+This is a required addition before lockdown: `account()` must distinguish
+**settled** from **unsettled** cash, and the charter must state the T+1 rule as a
+fact the agent plans around. Until then the agent will repeatedly plan
+unfundable rotations — the single most likely cause of a wasted session.
+
+Note this interacts with day trading: in a cash account, selling and rebuying the
+same day spends settled cash, and the proceeds do not return until T+1. Day
+trading is permitted, but it is **rate-limited by settlement**, not by rule.
+
 ---
 
 ## 5. The environment limit: MCP only (decision 3)
@@ -208,6 +236,9 @@ Recorded so they are decisions rather than omissions:
   `get_orderbook`, which measures spread, not volume.
 - **Wake polling.** `wakes.due()` exists and is selftested; nothing calls it yet.
   Until something does, wakes register but never fire.
+- **Settled-cash visibility.** NOT deferred — it is a precondition for lockdown
+  (§4a). Listed here only so it is not lost: `account()` must separate settled
+  from unsettled cash before the shell is removed.
 
 ---
 
