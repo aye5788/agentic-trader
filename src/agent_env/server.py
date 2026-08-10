@@ -29,6 +29,7 @@ from agent_env import decide                          # noqa: E402  sibling modu
 import mandate                                  # noqa: E402
 import governance as gov                        # noqa: E402
 import strategy as strat                        # noqa: E402
+import momentum                                 # noqa: E402
 import pandas as pd                             # noqa: E402
 
 mcp = FastMCP("agentic-trader")
@@ -365,6 +366,47 @@ def check_order(symbol: str, side: str, amount: float) -> str:
     return json.dumps({"allowed": not reasons, "symbol": sym, "side": sd,
                        "amount": float(amount), "reasons": reasons,
                        "liquidity_advisory": liquidity_advisory}, indent=2)
+
+
+@mcp.tool()
+def brief() -> str:
+    """Everything you need to decide, assembled fresh: mandate status, what you
+    hold and whether it is protected, the top candidates, and the market backdrop.
+
+    These are FACTS, not instructions. The regime line is an observation, not a
+    switch — nothing here decides for you. Pull `terrain(symbol)` before setting
+    levels, and `universe()` if the top candidates do not suit.
+    """
+    prod = read_current()
+    v = marks.load()
+    panel = _panel()
+    asof = panel.index[-1]
+
+    regime = None
+    if "SPY" in panel.columns:
+        try:
+            regime = {
+                "spy_above_50dma": bool(momentum.regime_on(panel["SPY"], asof)),
+                "note": "an observation about the market, not a rule that acts",
+            }
+        except Exception:
+            regime = None
+
+    held = state.holdings(v, prod.theses if prod else [])
+    top = screen.rank(panel, asof, _all_tickers()).head(10).round(4)
+
+    return json.dumps({
+        "as_of": str(asof.date()),
+        "book_as_of": prod.as_of if prod else None,
+        "account": {k: v.get(k) for k in ("account_value", "cash", "invested")},
+        "mandate": json.loads(mandate_status()),
+        "positions": held,
+        "unprotected": [s for s, h in held.items() if not h["watched"]],
+        "candidates": json.loads(top.to_json(orient="index")),
+        "regime": regime,
+        "available": "candidates() shows 10 of ~168; universe() shows all. "
+                     "terrain(symbol) gives measured excursions for any name.",
+    }, indent=2, default=str)
 
 
 def _selftest() -> None:
