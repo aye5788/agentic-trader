@@ -370,7 +370,10 @@ def status(equity: list[float], benchmark: list[float], positions: dict,
 
 def _selftest() -> None:
     m = load()
-    assert m["drawdown"]["max_pct"] == 0.15, m["drawdown"]
+    # Pins the CURRENT mandate value on purpose: changing a term the agent is judged
+    # against must be a deliberate act that also updates this line, never a quiet config
+    # edit. If you are here because this failed, that is the mechanism working.
+    assert m["drawdown"]["max_pct"] == 0.20, m["drawdown"]
     assert m["concentration"]["max_position_pct"] == 0.15, m["concentration"]
     assert m["pnl_concentration"]["window_days"] == 90
     assert m["pnl_concentration"]["max_single_share"] == 0.40
@@ -383,7 +386,13 @@ def _selftest() -> None:
     assert PASS != FAIL and FAIL != INSUFFICIENT and PASS != INSUFFICIENT
 
     # --- criterion 1: drawdown ------------------------------------------------
-    md = m["drawdown"]["max_pct"]
+    # Fixed literals below, deliberately NOT read from config/mandate.toml. These
+    # test the FUNCTIONS, and their expected values are derived from 0.15. Reading
+    # the live limit coupled function tests to a tunable mandate value, so retuning
+    # the drawdown limit broke tests that were not about it. The live config values
+    # are pinned separately in the config-load assertions above -- that pin is the
+    # thing that should fail when the mandate changes, and only that.
+    md = 0.15
     # peak 100 -> 95 is a 5% drawdown against a 15% limit: PASS, 10% of room left
     r = drawdown([80.0, 100.0, 95.0], md)
     assert r["state"] == PASS, r
@@ -473,7 +482,7 @@ def _selftest() -> None:
     assert r_finite_unaffected["nulls_dropped"] == 0, r_finite_unaffected
 
     # --- criterion 2: concentration -------------------------------------------
-    mc = m["concentration"]["max_position_pct"]
+    mc = 0.15
     pos = {"AAA": {"value": 10.0}, "BBB": {"value": 5.0}}
     r = concentration(pos, 100.0, mc)          # worst is 10% against a 15% limit
     assert r["state"] == PASS, r
@@ -760,9 +769,15 @@ def _selftest() -> None:
     assert abs(r_clean_rr["benchmark_return"] - 0.05) < 1e-9, r_clean_rr
 
     # --- status(): the aggregate ----------------------------------------------
+    TCFG = {"drawdown": {"max_pct": 0.15},
+            "concentration": {"max_position_pct": 0.15},
+            "pnl_concentration": {"window_days": 90, "max_single_share": 0.40,
+                                  "min_distinct_names": 4},
+            "relative_return": {"window_days": 60, "benchmark": "SPY"}}
+
     healthy = status(equity=[100.0, 101.0], benchmark=[50.0, 50.0],
                      positions={"AAA": {"value": 10.0}}, account_value=100.0,
-                     outcomes=[], asof="2026-08-09")
+                     outcomes=[], asof="2026-08-09", cfg=TCFG)
     assert healthy["criteria"]["drawdown"]["state"] == PASS
     assert healthy["criteria"]["concentration"]["state"] == PASS
     # informational criteria are immature today and must NOT block trading
@@ -775,14 +790,14 @@ def _selftest() -> None:
     # a blocking FAIL stops trading
     breached = status(equity=[100.0, 80.0], benchmark=[50.0, 50.0],
                       positions={}, account_value=100.0, outcomes=[],
-                      asof="2026-08-09")
+                      asof="2026-08-09", cfg=TCFG)
     assert breached["blocking_fail"] == ["drawdown"], breached
     assert breached["tradeable"] is False
 
     # a blocking criterion that cannot be MEASURED means degraded mode, not a pass
     dark = status(equity=[100.0, 99.0], benchmark=[50.0, 50.0],
                   positions={"AAA": {"value": None}}, account_value=100.0,
-                  outcomes=[], asof="2026-08-09")
+                  outcomes=[], asof="2026-08-09", cfg=TCFG)
     assert dark["blocking_unmeasurable"] == ["concentration"], dark
     assert dark["tradeable"] is False and dark["degraded"] is True, dark
 
@@ -791,7 +806,7 @@ def _selftest() -> None:
     both_fail = status(
         equity=[100.0, 80.0], benchmark=[50.0, 50.0],
         positions={"AAA": {"value": 20.0}}, account_value=100.0,
-        outcomes=[], asof="2026-08-09")
+        outcomes=[], asof="2026-08-09", cfg=TCFG)
     assert both_fail["criteria"]["drawdown"]["state"] == FAIL, both_fail
     assert both_fail["criteria"]["concentration"]["state"] == FAIL, both_fail
     assert set(both_fail["blocking_fail"]) == {"drawdown", "concentration"}, both_fail
@@ -804,7 +819,7 @@ def _selftest() -> None:
     hot = [_o("A", 1, 70.0), _o("B", 2, 10.0), _o("C", 3, 10.0), _o("D", 4, 10.0)]
     blocking_and_info_fail = status(
         equity=[100.0, 80.0], benchmark=[50.0, 50.0],
-        positions={}, account_value=100.0, outcomes=hot, asof="2026-08-09")
+        positions={}, account_value=100.0, outcomes=hot, asof="2026-08-09", cfg=TCFG)
     assert blocking_and_info_fail["criteria"]["drawdown"]["state"] == FAIL, blocking_and_info_fail
     assert blocking_and_info_fail["criteria"]["pnl_concentration"]["state"] == FAIL, blocking_and_info_fail
     assert blocking_and_info_fail["blocking_fail"] == ["drawdown"], blocking_and_info_fail
@@ -820,7 +835,7 @@ def _selftest() -> None:
     info_only_fail = status(
         equity=lagging_eq, benchmark=lagging_bm,
         positions={"AAA": {"value": 10.0}}, account_value=100.0,
-        outcomes=thin, asof="2026-08-09")
+        outcomes=thin, asof="2026-08-09", cfg=TCFG)
     assert info_only_fail["criteria"]["drawdown"]["state"] == PASS, info_only_fail
     assert info_only_fail["criteria"]["concentration"]["state"] == PASS, info_only_fail
     assert info_only_fail["criteria"]["pnl_concentration"]["state"] == FAIL, info_only_fail
@@ -834,7 +849,7 @@ def _selftest() -> None:
     all_dark = status(
         equity=[100.0], benchmark=[50.0],
         positions={"AAA": {"value": None}}, account_value=100.0,
-        outcomes=[], asof="2026-08-09")
+        outcomes=[], asof="2026-08-09", cfg=TCFG)
     assert all_dark["criteria"]["drawdown"]["state"] == INSUFFICIENT, all_dark
     assert all_dark["criteria"]["concentration"]["state"] == INSUFFICIENT, all_dark
     assert all_dark["criteria"]["pnl_concentration"]["state"] == INSUFFICIENT, all_dark
@@ -852,7 +867,7 @@ def _selftest() -> None:
     conc_fail_alone = status(
         equity=[100.0, 90.0], benchmark=[50.0, 50.0],
         positions={"AAA": {"value": 20.0}}, account_value=100.0,
-        outcomes=[], asof="2026-08-09")
+        outcomes=[], asof="2026-08-09", cfg=TCFG)
     assert conc_fail_alone["blocking_fail"] == ["concentration"], conc_fail_alone
     assert conc_fail_alone["blocking_unmeasurable"] == [], conc_fail_alone
     assert conc_fail_alone["tradeable"] is False, conc_fail_alone
@@ -864,7 +879,7 @@ def _selftest() -> None:
     dd_insufficient_alone = status(
         equity=[100.0], benchmark=[50.0],
         positions={"AAA": {"value": 10.0}}, account_value=100.0,
-        outcomes=[], asof="2026-08-09")
+        outcomes=[], asof="2026-08-09", cfg=TCFG)
     assert dd_insufficient_alone["blocking_fail"] == [], dd_insufficient_alone
     assert dd_insufficient_alone["blocking_unmeasurable"] == ["drawdown"], dd_insufficient_alone
     assert dd_insufficient_alone["tradeable"] is False, dd_insufficient_alone
@@ -876,7 +891,7 @@ def _selftest() -> None:
     mixed_blocking = status(
         equity=[100.0], benchmark=[50.0],
         positions={"AAA": {"value": 25.0}}, account_value=100.0,
-        outcomes=[], asof="2026-08-09")
+        outcomes=[], asof="2026-08-09", cfg=TCFG)
     assert mixed_blocking["blocking_fail"] == ["concentration"], mixed_blocking
     assert mixed_blocking["blocking_unmeasurable"] == ["drawdown"], mixed_blocking
     assert mixed_blocking["tradeable"] is False, mixed_blocking
@@ -904,7 +919,7 @@ def _selftest() -> None:
     all_pass = status(
         equity=full_eq, benchmark=full_bm,
         positions=full_pos, account_value=100.0,
-        outcomes=full_outcomes, asof="2026-08-09")
+        outcomes=full_outcomes, asof="2026-08-09", cfg=TCFG)
     assert all_pass["blocking_fail"] == [], all_pass
     assert all_pass["blocking_unmeasurable"] == [], all_pass
     assert all_pass["informational_fail"] == [], all_pass
