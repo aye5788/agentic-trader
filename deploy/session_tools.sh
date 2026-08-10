@@ -14,11 +14,24 @@
 # `--permission-mode dontAsk` auto-DENIES anything unlisted instead of
 # prompting. Headless there is nobody to answer, and `default` would hang until
 # the timeout — a silent no-trade day.
-set -euo pipefail
+#
+# No `set -euo pipefail` here. This file is SOURCED, not executed — a `set`
+# here changes the CALLING shell's options too, which is a side effect on a
+# process we don't own (and unlike run_fast_loop.sh etc., this has no `cd` of
+# its own to make that trade-off for). The empty-discovery guard below is an
+# explicit `if`, so it does not depend on `-e` anyway — and `-e` would not
+# have covered the python failure mode either: with `mapfile -t X < <(cmd)`,
+# `-e` sees mapfile's own exit status, not the process-substituted command's,
+# so a crashing `session_tools.py --print` was never caught by `-e` here.
+#
+# Repo root resolved from this file's own path, not `$0` (unreliable when
+# sourced) and not `cd` (would move the caller's shell). Absolute paths from
+# here on so this is correct regardless of the caller's cwd.
+_session_tools_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Derived, never hardcoded — see scripts/session_tools.py for the incident that
 # rule comes from.
-mapfile -t _AGENTIC_TOOLS < <(.venv/bin/python scripts/session_tools.py --print)
+mapfile -t _AGENTIC_TOOLS < <("${_session_tools_root}/.venv/bin/python" "${_session_tools_root}/scripts/session_tools.py" --print)
 if [ "${#_AGENTIC_TOOLS[@]}" -eq 0 ]; then
   echo "REFUSING: MCP tool discovery returned nothing" >&2
   exit 1

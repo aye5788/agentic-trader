@@ -8,6 +8,22 @@ existing. Deriving the list makes that failure unrepresentable.
 
 Refuses to return empty: a session launched with no tools would run, trade
 nothing, and look like a quiet day.
+
+Scope — what this does and does not cover, stated honestly:
+
+COVERS: that each `agentic-trader` MCP tool the server advertises at
+discovery time is registered and reachable by name — the exact failure this
+module exists to make unrepresentable (see above).
+
+DOES NOT COVER:
+  * whether a discovered tool BEHAVES correctly. Discovery proves the name
+    is callable, not that its logic, arguments, or return shape are right —
+    that's what each tool's own tests are for.
+  * `deploy/session_tools.sh`'s hardcoded `_RH_TOOLS` list (Robinhood). That
+    allowlist is deliberately static (10 of 53 tools, by design — see that
+    file), not derived, so if Robinhood renames or removes a tool
+    server-side this module has no way to notice: it only asks the
+    `agentic-trader` server, never `robinhood-trading`.
 """
 from __future__ import annotations
 
