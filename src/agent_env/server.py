@@ -27,6 +27,8 @@ from agent_env import screen                          # noqa: E402  sibling modu
 from agent_env import terrain as terrain_mod          # noqa: E402  sibling module
 from agent_env import decide                          # noqa: E402  sibling module
 from agent_env import live as live_mod                # noqa: E402  sibling module
+from agent_env import memory                          # noqa: E402  sibling module
+from agent_env import wakes                           # noqa: E402  sibling module
 import mandate                                  # noqa: E402
 import governance as gov                        # noqa: E402
 import strategy as strat                        # noqa: E402
@@ -73,7 +75,8 @@ def positions() -> str:
     """
     prod = read_current()
     return json.dumps(state.holdings(marks.load(),
-                                     prod.theses if prod else []), indent=2, default=str)
+                                     prod.theses if prod else [],
+                                     _overrides()), indent=2, default=str)
 
 
 @mcp.tool()
@@ -417,7 +420,7 @@ def earnings(symbols: str = "", weeks: int = 6) -> str:
     syms = _symlist(symbols)
     if not syms:
         v = marks.load() or {}
-        syms = sorted(state.holdings(v, []).keys())
+        syms = sorted(state.holdings(v, [], _overrides()).keys())
         if not syms:
             return json.dumps({"earnings": {},
                                "note": "no symbols given and no positions held"},
@@ -480,6 +483,173 @@ def macro_calendar(days: int = 7, importance: str = "HIGH") -> str:
                       indent=2, default=str)
 
 
+OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
+WAKES = REPO / "research_store" / "monitor" / "wakes.json"
+
+
+def _overrides() -> dict:
+    try:
+        return json.loads(OVERRIDES.read_text())
+    except Exception:                       # noqa: BLE001 -- absent or torn
+        return {}
+
+
+@mcp.tool()
+def halt_status() -> str:
+    """Are the switches on? Read this BEFORE planning orders.
+
+    Three independent controls, and they are not the same thing:
+      - kill switch (`research_store/HALT`): nothing is placed, not even a sell.
+        Exits must be done by hand. The monitor keeps WATCHING and alerting.
+      - halt-entries (`research_store/HALT_ENTRIES`): new buys blocked, exits
+        still go through.
+      - live_approved: the master switch in config. Off means alert-only.
+
+    An order that violates these is refused at placement, so without this tool
+    you would plan, be denied, and have no way to learn why.
+    """
+    cfg = strat.load()
+    kill = gov.kill_switch_active(cfg)
+    entries = gov.halt_entries_active(cfg)
+    live = gov.live_approved(cfg)
+    return json.dumps({
+        "kill_switch": kill,
+        "halt_entries": entries,
+        "live_approved": live,
+        "can_buy": bool(live and not kill and not entries),
+        "can_sell": bool(live and not kill),
+        "meaning": ("kill switch: nothing places, exits by hand. halt_entries: "
+                    "buys blocked, exits still place. live_approved off: "
+                    "alert-only, nothing places."),
+    }, indent=2)
+
+
+@mcp.tool()
+def macro() -> str:
+    """Macro regime facts: VIX, the 10y-2y curve, and high-yield spreads (FRED).
+
+    Deep history, updated daily — VIX here is the INDEX close, not an intraday
+    print. moomoo does not carry it (checked: no volatility index among its 24 US
+    macro indicators, and VIXY/UVXY are decaying futures ETFs, not the index).
+
+    These are observations about conditions, not switches. Nothing here turns
+    trading on or off.
+    """
+    try:
+        from adapters.fred import indicators as fred   # noqa: PLC0415
+        snap = fred.snapshot()
+    except Exception as e:                  # noqa: BLE001
+        return json.dumps({"error": f"FRED unavailable ({type(e).__name__}: {e})",
+                           "note": "no cached value is being substituted"}, indent=2)
+    return json.dumps({"source": "FRED (daily close, deep history)",
+                       "indicators": snap,
+                       "note": "facts about conditions, not a trading switch"},
+                      indent=2, default=str)
+
+
+@mcp.tool()
+def news(symbols: str = "", limit: int = 20) -> str:
+    """Recent symbol-tagged headlines (Alpaca). Blank symbols = what you hold.
+
+    Context for judgment, not a signal. A headline explains a move you already
+    see; it does not by itself justify an entry.
+    """
+    syms = _symlist(symbols)
+    if not syms:
+        v = marks.load() or {}
+        syms = sorted(state.holdings(v, [], _overrides()).keys())
+    if not syms:
+        return json.dumps({"news": [], "note": "no symbols and nothing held"},
+                          indent=2)
+    try:
+        from adapters.alpaca import news as anews      # noqa: PLC0415
+        items = anews.get_news(syms, limit=int(limit))
+    except Exception as e:                  # noqa: BLE001
+        return json.dumps({"error": f"Alpaca news unavailable "
+                                    f"({type(e).__name__}: {e})"}, indent=2)
+    return json.dumps({"symbols": syms, "news": items}, indent=2, default=str)
+
+
+# ---- memory: what past sessions concluded --------------------------------
+
+@mcp.tool()
+def research_log(limit: int = 25) -> str:
+    """What past sessions decided and why, plus current rule-outs and questions.
+
+    Read this early. Sessions are separate processes with separate contexts, so
+    without it you re-derive the same conclusions and re-litigate the same
+    rejections. It is YOUR past reasoning, not market fact — supersede it freely
+    with a stated reason.
+    """
+    return json.dumps(memory.research_log(REPO / "research_store", JOURNAL, limit),
+                      indent=2, default=str)
+
+
+@mcp.tool()
+def rule_out(symbol: str, reason: str) -> str:
+    """Record that you considered this name and rejected it, and why.
+
+    Not a ban and not a fact about the name — a note to your future self so the
+    next session does not repeat the work. Use `revisit` when it changes.
+    """
+    return json.dumps(memory.rule_out(REPO / "research_store", symbol, reason),
+                      indent=2, default=str)
+
+
+@mcp.tool()
+def revisit(symbol: str, reason: str) -> str:
+    """Supersede an earlier rule-out. Appends — the original is never deleted."""
+    return json.dumps(memory.revisit(REPO / "research_store", symbol, reason),
+                      indent=2, default=str)
+
+
+@mcp.tool()
+def open_question(question: str) -> str:
+    """Record something worth resolving that this session could not settle."""
+    return json.dumps(memory.open_question(REPO / "research_store", question),
+                      indent=2, default=str)
+
+
+@mcp.tool()
+def close_question(question: str, answer: str) -> str:
+    """Answer an open question. The original entry stays in the record."""
+    return json.dumps(memory.close_question(REPO / "research_store", question,
+                                            answer), indent=2, default=str)
+
+
+# ---- wakes: asking to be woken -------------------------------------------
+
+@mcp.tool()
+def wake_register(symbol: str, direction: str, level: float, reason: str,
+                  budget: int = 3, ttl_days: int = 5) -> str:
+    """Ask to be woken with a full session when `symbol` trades above/below
+    `level`. `direction` is "above" or "below".
+
+    ⚠️ A WAKE IS NOT A STOP. It starts a session so you can decide; it places no
+    order and protects nothing. If what you want is "get me out at X", that is
+    `set_levels` — the monitor enforces those without waking anything.
+
+    Bounded on purpose: `budget` caps how many times it may ever fire so a
+    flapping price cannot spawn endless sessions, and it expires after
+    `ttl_days`.
+    """
+    return json.dumps(wakes.register(WAKES, symbol, direction, level, reason,
+                                     budget=budget, ttl_days=ttl_days),
+                      indent=2, default=str)
+
+
+@mcp.tool()
+def wake_status() -> str:
+    """Your active wakes, with expired ones listed rather than silently dropped."""
+    return json.dumps(wakes.status(WAKES), indent=2, default=str)
+
+
+@mcp.tool()
+def wake_deregister(key: str) -> str:
+    """Cancel a wake by its key (from wake_status)."""
+    return json.dumps(wakes.deregister(WAKES, key), indent=2, default=str)
+
+
 @mcp.tool()
 def brief() -> str:
     """Everything you need to decide, assembled fresh: mandate status, what you
@@ -504,7 +674,7 @@ def brief() -> str:
         except Exception:
             regime = None
 
-    held = state.holdings(v, prod.theses if prod else [])
+    held = state.holdings(v, prod.theses if prod else [], _overrides())
     top = screen.rank(panel, asof, _all_tickers()).head(10).round(4)
 
     # Degrade mandate_status gracefully when no snapshot exists yet

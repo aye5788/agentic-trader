@@ -46,6 +46,8 @@ VENV_SELFTESTS=(
     "src/marks.py"
     "scripts/record_fills.py"
     "src/agent_env/live.py"
+    "src/agent_env/memory.py"
+    "src/agent_env/wakes.py"
     "src/agent_env/state.py"
     "src/agent_env/screen.py"
     "src/agent_env/terrain.py"

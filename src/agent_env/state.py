@@ -10,8 +10,16 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
 
-def holdings(valued: dict, theses: list) -> dict:
+def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
     """Merge broker positions with the levels the agent set for them.
+
+    `overrides` is research_store/monitor/overrides.json — the levels the agent
+    set via set_levels, which is what the MONITOR actually enforces. Without it
+    this reported the slow loop's thesis stop while a tighter agent-set stop was
+    live, so the agent could not read back its own decision and would re-decide
+    against a number nothing was using. `stop`/`targets` therefore report the
+    ENFORCED level, with the thesis value preserved alongside as `book_stop` and
+    the agent's own reason as `level_reason`.
 
     `valued` is marks.load(). `theses` is product.theses (may be empty).
     A held symbol with no thesis is reported with stop/target None and
@@ -30,20 +38,32 @@ def holdings(valued: dict, theses: list) -> dict:
     valued = valued or {}
     av = float(valued.get("account_value") or 0.0)
     out = {}
+    ov = overrides or {}
     for sym, p in (valued.get("positions") or {}).items():
         t = by_sym.get(sym)
-        out[sym] = {
+        book_stop = getattr(t, "stop", None) if t else None
+        book_targets = list(getattr(t, "targets", []) or []) if t else []
+        o = ov.get(sym) or {}
+        agent_stop = o.get("stop")
+        agent_targets = o.get("targets")
+        rec = {
             "qty": p.get("qty"),
             "avg_cost": p.get("avg_cost"),
             "mark": p.get("mark"),
             "value": p.get("value"),
             "pnl": p.get("pnl"),
             "share_of_equity": (float(p["value"]) / av) if av > 0 and p.get("value") is not None else None,
-            "stop": getattr(t, "stop", None) if t else None,
-            "targets": list(getattr(t, "targets", []) or []) if t else [],
+            "stop": agent_stop if agent_stop is not None else book_stop,
+            "targets": agent_targets if agent_targets else book_targets,
             "watched": bool(t is not None and getattr(t, "target_weight", 0) > 0
                             and getattr(t, "stop", None)),
         }
+        if agent_stop is not None or agent_targets:
+            rec["set_by_agent"] = True
+            rec["book_stop"] = book_stop
+            if o.get("reason"):
+                rec["level_reason"] = o["reason"]
+        out[sym] = rec
     return out
 
 
