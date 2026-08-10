@@ -5,3 +5,4 @@ numpy>=1.26
 pyarrow>=14.0
 flask>=3.0
 
+mcp==1.28.1
