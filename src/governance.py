@@ -274,6 +274,48 @@ def liquidity_ok(symbol: str, dollar_volume: float | None,
     return True, ""
 
 
+def mandate_action(status: dict) -> dict:
+    """Translate a mandate status (mandate.status()) into machine action. Decides;
+    does not execute -- a later wiring calls this and hands the verdict to the
+    monitor, which is the one place that actually places the sell.
+
+    ONLY a drawdown breach flattens -- that is the mandate's own terminal term,
+    so enforcing it is enforcing the terms the human agreed to, not forming a
+    view about the market. A concentration breach deliberately does NOT flatten:
+    choosing WHICH name to sell to fix concentration is a trading decision, and
+    trading decisions belong to the agent, never the machine. A blocking
+    criterion that is merely UNMEASURABLE (blocking_unmeasurable) must not
+    flatten either -- not knowing is not the same as knowing something is
+    wrong, and liquidating a book because a data feed broke would be a
+    catastrophe caused by the safety system itself. Either way it blocks new
+    entries: manage what is open, open nothing new.
+
+    Informational criteria (informational_fail) never appear here -- they judge
+    whether autonomy is working, never whether the machine should act, and
+    mandate.status() keeps them out of blocking_fail/blocking_unmeasurable, so
+    this function never even looks at that key.
+
+    A status dict missing the expected keys (including `{}`) is read as
+    "nothing blocking reported" via .get(..., []) -- mandate.status() always
+    populates these keys, so this is not a case of trusting adversarial input;
+    it is just not inventing a flatten out of a shape this function doesn't
+    recognise.
+    """
+    reasons, flatten = [], False
+    for k in status.get("blocking_fail", []):
+        why = (status.get("criteria", {}).get(k) or {}).get("reason", k)
+        reasons.append(f"MANDATE BREACH [{k}]: {why}")
+        if k == "drawdown":
+            flatten = True
+    for k in status.get("blocking_unmeasurable", []):
+        why = (status.get("criteria", {}).get(k) or {}).get("reason", k)
+        reasons.append(f"UNMEASURABLE [{k}]: {why}; degraded mode -- "
+                       "manage what is open, open nothing new")
+    return {"flatten": flatten,
+            "block_entries": bool(reasons),
+            "reasons": reasons}
+
+
 def vet_plan(plan: list[dict], account_value: float, cfg) -> tuple[list[dict], list[dict]]:
     """Split a plan into (approved, blocked). Each blocked order carries a reason.
     Only BUYS are capped by max_order_pct — capping a sell would strand a position
@@ -616,10 +658,81 @@ def _selftest() -> None:
             except PermissionError as e:
                 assert "parsed" in str(e).lower(), e
 
+            # --- mandate action: the ONLY mechanical close in the system ------
+            clean = {"blocking_fail": [], "blocking_unmeasurable": [],
+                     "criteria": {}, "tradeable": True, "degraded": False}
+            a = mandate_action(clean)
+            assert a == {"flatten": False, "block_entries": False, "reasons": []}, a
+            # a drawdown breach flattens
+            dd = {"blocking_fail": ["drawdown"], "blocking_unmeasurable": [],
+                  "criteria": {"drawdown": {"reason": "-18% from peak"}},
+                  "tradeable": False, "degraded": False}
+            a = mandate_action(dd)
+            assert a["flatten"] is True and a["block_entries"] is True, a
+            assert any("-18%" in r for r in a["reasons"]), a
+            # a CONCENTRATION breach blocks entries but must NOT flatten the book --
+            # forced selling to fix concentration is a trading decision, not enforcement
+            conc = {"blocking_fail": ["concentration"], "blocking_unmeasurable": [],
+                    "criteria": {"concentration": {"reason": "AAA at 22%"}},
+                    "tradeable": False, "degraded": False}
+            a = mandate_action(conc)
+            assert a["flatten"] is False and a["block_entries"] is True, a
+            # unmeasurable blocking criteria: degraded mode, no new risk, no flatten
+            dark = {"blocking_fail": [], "blocking_unmeasurable": ["concentration"],
+                    "criteria": {"concentration": {"reason": "no usable mark"}},
+                    "tradeable": False, "degraded": True}
+            a = mandate_action(dark)
+            assert a["flatten"] is False and a["block_entries"] is True, a
+            # drawdown breach AND concentration breach together -- flatten must
+            # win (drawdown's terminal term is absolute) and BOTH reasons must
+            # surface, because the concentration breach still needs a human to
+            # act on once the flatten is over.
+            both = {"blocking_fail": ["drawdown", "concentration"],
+                    "blocking_unmeasurable": [],
+                    "criteria": {"drawdown": {"reason": "-20% from peak"},
+                                 "concentration": {"reason": "BBB at 30%"}},
+                    "tradeable": False, "degraded": False}
+            a = mandate_action(both)
+            assert a["flatten"] is True and a["block_entries"] is True, a
+            assert any("-20%" in r for r in a["reasons"]), a
+            assert any("BBB at 30%" in r for r in a["reasons"]), a
+            assert len(a["reasons"]) == 2, a
+            # an informational criterion FAILing while everything blocking
+            # passes must produce a completely empty verdict -- informational
+            # criteria judge whether autonomy is working, never whether the
+            # machine should act, and must never leak into this output.
+            info_only = {"blocking_fail": [], "blocking_unmeasurable": [],
+                         "informational_fail": ["relative_return"],
+                         "criteria": {"relative_return": {"reason": "trailing SPY by 9%"}},
+                         "tradeable": True, "degraded": False}
+            a = mandate_action(info_only)
+            assert a == {"flatten": False, "block_entries": False, "reasons": []}, a
+            # a status dict missing expected keys entirely: DECISION -- treat
+            # absence as "nothing blocking reported" (empty lists via .get
+            # defaults), matching mandate.status()'s own contract that these
+            # keys are always present. This is NOT the same as trusting an
+            # attacker-controlled or corrupt status blob; mandate.status() is
+            # an internal, non-adversarial producer. A missing key must not be
+            # read as a breach (that would be inventing a flatten out of thin
+            # air) -- reasons stay empty, both flags default to safe/False.
+            assert mandate_action({}) == {"flatten": False, "block_entries": False,
+                                           "reasons": []}
+            assert mandate_action({"tradeable": True}) == {
+                "flatten": False, "block_entries": False, "reasons": []}
+            # reasons must be human-readable enough to carry the SPECIFIC
+            # number from the criterion's own reason string, not just repeat
+            # the criterion name -- a phone alert saying "drawdown" tells a
+            # human nothing actionable; "-18% from peak" does.
+            a = mandate_action(dd)
+            assert "drawdown" in a["reasons"][0] and "-18% from peak" in a["reasons"][0], a
+            a = mandate_action(dark)
+            assert "concentration" in a["reasons"][0] and "no usable mark" in a["reasons"][0], a
+
         print("selftest OK: governance two-tier gates "
               "(only the kill switch blocks a sell), peak, whitelist, order cap, "
               "NaN/inf account_value and order-amount fail-closed handling, "
-              "account-scoping layer 1 (assert_agentic_account)")
+              "account-scoping layer 1 (assert_agentic_account), "
+              "mandate_action (the only mechanical close)")
     finally:
         REPO, STATE = _repo, _state
 
