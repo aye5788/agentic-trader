@@ -29,9 +29,16 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    dollar values (the code marks to market via src/marks.py):
    ```
    {"account_number":"<num>","account_value":<get_portfolio.total_value>,
-    "cash":<get_portfolio.cash>,"as_of":"<YYYY-MM-DD>","ts":"<now, ISO-8601 UTC>",
+    "cash":<get_portfolio.cash>,
+    "buying_power":<get_portfolio.buying_power.buying_power>,
+    "unsettled_funds":<get_accounts -> this account's unsettled_funds>,
+    "as_of":"<YYYY-MM-DD>","ts":"<now, ISO-8601 UTC>",
     "positions":{"SYM":{"qty":<quantity>,"avg_cost":<average_buy_price>,"last":<quote last price>},...}}
    ```
+   ⚠️ `cash` is NOT what can be spent. This is a CASH account, so sale proceeds
+   are unsettled until T+1: on 2026-08-10 cash was $9.20 while buying_power was
+   $2.14 (unsettled_funds $7.06). Record ALL THREE — anything sizing a buy against
+   `cash` sizes against money that is not there, and the order is rejected.
 5. **Plan.** Run `/usr/bin/python3 scripts/fast_loop.py` — **system python3, not
    the .venv.** The `no_chase` guard needs a live quote and quotes now come from
    moomoo, whose SDK exists only under system python3. Under `.venv` the import

@@ -98,6 +98,16 @@ def load(snapshot_path: Path = SNAPSHOT) -> dict | None:
         cash = account_value - invested
     return {"account_number": snap.get("account_number"),
             "as_of": snap.get("as_of"), "ts": snap_ts or None,
+            # Pass through the broker's OWN funding figures when the snapshot
+            # carries them. `cash` is NOT what can be spent: on this cash account
+            # sale proceeds are unsettled for T+1, so on 2026-08-10 cash was
+            # $9.20 while buying_power was $2.14 (unsettled_funds $7.06). Anything
+            # sizing a BUY against `cash` is sizing against money that is not
+            # there. Absent -> None, never a substituted value.
+            "buying_power": (round(float(snap["buying_power"]), 2)
+                             if snap.get("buying_power") is not None else None),
+            "unsettled_funds": (round(float(snap["unsettled_funds"]), 2)
+                                if snap.get("unsettled_funds") is not None else None),
             "marked_at": marked_at, "cash": round(float(cash), 2),
             "positions": positions, "invested": round(invested, 2),
             "account_value": round(account_value, 2)}

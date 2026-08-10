@@ -88,9 +88,22 @@ def account() -> str:
     not an error; a tool that raises tells the agent nothing about what it holds.
     """
     v = marks.load() or {}
-    return json.dumps({k: v.get(k) for k in
-                       ("account_number", "account_value", "cash", "invested",
-                        "as_of", "marked_at")}, indent=2, default=str)
+    out = {k: v.get(k) for k in
+           ("account_number", "account_value", "cash", "invested",
+            "as_of", "marked_at")}
+    bp = v.get("buying_power")
+    out["buying_power"] = bp
+    out["unsettled_funds"] = v.get("unsettled_funds")
+    if bp is None:
+        out["spendable"] = ("UNKNOWN from this snapshot. `cash` is NOT what you "
+                            "can spend — this is a CASH account, so sale proceeds "
+                            "are unsettled until T+1. Call Robinhood's "
+                            "get_portfolio for the authoritative buying_power "
+                            "before sizing any buy.")
+    else:
+        out["spendable"] = (f"{bp} — size buys against THIS, not `cash`. Sale "
+                            f"proceeds settle T+1 on this cash account.")
+    return json.dumps(out, indent=2, default=str)
 
 
 @mcp.tool()
@@ -352,6 +365,31 @@ def check_order(symbol: str, side: str, amount: float) -> str:
         except Exception:
             age_days = None
 
+    # Funding: ADVISORY, never a block. An underfunded buy is rejected by the
+    # broker, so it wastes a placement rather than endangering anything — and
+    # blocking on a possibly-stale snapshot could freeze trading on bad data.
+    # But `cash` is not spendable on this CASH account (proceeds settle T+1), so
+    # an agent sizing against cash plans orders that cannot fill: on 2026-08-10
+    # cash was $9.20 and buying_power $2.14.
+    funding = None
+    if sd == "buy":
+        bp = v.get("buying_power") if v else None
+        if bp is None:
+            funding = {"known": False,
+                       "note": "this snapshot carries no buying_power. `cash` is "
+                               "NOT spendable — call Robinhood get_portfolio for "
+                               "the live figure before sizing this buy."}
+        else:
+            bp = float(bp)
+            funding = {"known": True, "buying_power": bp,
+                       "amount": float(amount),
+                       "affordable": float(amount) <= bp,
+                       "unsettled_funds": v.get("unsettled_funds"),
+                       "note": ("fits within buying power" if float(amount) <= bp else
+                                f"${float(amount):.2f} exceeds buying power ${bp:.2f} "
+                                f"— Robinhood will reject this. Unsettled proceeds "
+                                f"become available T+1.")}
+
     liquidity_advisory = {
         "ok": liq_ok,
         "dollar_volume_20d": dvol,
@@ -367,9 +405,12 @@ def check_order(symbol: str, side: str, amount: float) -> str:
         ),
     }
 
-    return json.dumps({"allowed": not reasons, "symbol": sym, "side": sd,
-                       "amount": float(amount), "reasons": reasons,
-                       "liquidity_advisory": liquidity_advisory}, indent=2)
+    out = {"allowed": not reasons, "symbol": sym, "side": sd,
+           "amount": float(amount), "reasons": reasons,
+           "liquidity_advisory": liquidity_advisory}
+    if funding is not None:
+        out["funding"] = funding
+    return json.dumps(out, indent=2)
 
 
 def _symlist(symbols) -> list:
