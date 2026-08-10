@@ -156,8 +156,10 @@ over the tunnel's HTTPS so creds are encrypted. Access can be added later as a
 second layer, but the app-level password is the load-bearing gate — do not remove
 `DASH_PASS` thinking Access covers it.
 
-The equity curve fills from `scripts/log_equity.py`, which `run_fast_loop.sh` runs
-each day — one point per trading day from first run.
+The equity curve fills from `scripts/log_equity.py`, which runs on its own
+Mon–Fri 16:15 ET cron entry (post-close, independent of the fast/slow loops —
+see `scripts/log_equity.py`'s docstring) — one point per trading day from first
+run.
 
 ## GitHub Actions (off-box automation)
 

@@ -40,6 +40,16 @@ HOME=/root
 # Mon–Fri 10:00 (after the open). No-op unless [proof] live_approved=true.
 0 10 * * 1-5 /opt/agentic-trader/deploy/run_fast_loop.sh >> /opt/agentic-trader/logs/fast.log 2>&1
 
+# --- DAILY EQUITY LOG (post-close, feeds mandate.drawdown()'s close-to-close series) ---
+# Mon–Fri 16:15 ET — deliberately its OWN entry, not folded into the fast loop
+# (10:00 ET, 32min after the open — the noisiest stretch of the session; the
+# mandate promises close-to-close, never intraday) or the slow loop (would
+# couple the equity track record to the book rebuild succeeding, and the
+# Sunday 20:00 rebalance would write a spurious weekend point duplicating
+# Friday's marks). 16:15 matches this codebase's settled-session boundary —
+# see _drop_unsettled_session() in scripts/fetch_prices.py. See scripts/log_equity.py.
+15 16 * * 1-5 cd /opt/agentic-trader && .venv/bin/python scripts/log_equity.py >> /opt/agentic-trader/logs/equity.log 2>&1
+
 # --- INTRADAY RISK REVIEW (headless Claude, stricter-only de-risk overlay) ---
 # Times are ET per this file's header convention (box is set to US/Eastern) —
 # no CRON_TZ needed, direct local-time entries like the other jobs.

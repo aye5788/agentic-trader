@@ -20,7 +20,8 @@ mkdir -p logs
 # Model pinned explicitly: don't ride the box default — if the default model is
 # ever retired/renamed, cron must keep trading on a known-available model.
 claude -p --model claude-opus-4-8 "$(cat prompts/fast_loop.md)"
-# record a daily equity point for the dashboard (best-effort; never fail the run)
-.venv/bin/python scripts/log_equity.py || true
+# Equity logging runs on its OWN post-close 16:15 ET cron entry (scripts/log_equity.py),
+# not here — this loop fires ~10:02 ET, 32 minutes after the open, the noisiest
+# stretch of the session; mandate.drawdown() must see close-to-close marks only.
 # mirror the non-regenerable ledger off-box (best-effort; never fails the run)
 deploy/backup_ledger.sh || true

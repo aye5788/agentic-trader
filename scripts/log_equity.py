@@ -1,11 +1,22 @@
 """Append one equity point to research_store/history/equity.jsonl — the data
-behind the dashboard's performance curve.
+behind the dashboard's performance curve AND the close-to-close series
+src/mandate.py's drawdown() reads to decide whether to flatten the book.
 
 Values the RH snapshot through src/marks.py (qty × freshest mark — same math as
-the dashboard), so it needs no extra broker call. Run it right after the fast
-loop each day; over time the jsonl becomes the account's track record.
-Append-only, idempotent per day (a second run the same date overwrites that
-day's point).
+the dashboard), so it needs no extra broker call. Runs on its OWN cron entry,
+Mon-Fri 16:15 ET — AFTER the session settles, deliberately independent of the
+10:00 ET fast loop and the 18:00/Sunday 20:00 slow loop. mandate.drawdown()'s
+whole guarantee is "close-to-close, never intraday"; logging at 16:15 (this
+codebase's settled-session boundary — see _drop_unsettled_session() in
+scripts/fetch_prices.py) is what keeps that guarantee true. Folding this into
+the fast loop stamped the point ~10:02 ET, 32 minutes after the open, the
+noisiest stretch of the session — the exact thing the mandate promises to
+avoid. Folding it into the slow loop instead would couple the equity track
+record to the book rebuild succeeding, and the Sunday 20:00 rebalance would
+write a spurious weekend point duplicating Friday's marks; a dedicated job
+yields exactly one point per trading day, post-close, independent of either
+loop. Append-only, idempotent per day (a second run the same date overwrites
+that day's point).
 
     .venv/bin/python scripts/log_equity.py
 """
