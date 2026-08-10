@@ -174,6 +174,13 @@ pills.push(DATA.flags.live_approved
 pills.push(DATA.flags.kill_switch
   ?`<span class="pill off"><span class="dot"></span>KILL-SWITCH ON</span>`
   :`<span class="pill"><span class="dot"></span>KILL-SWITCH CLEAR</span>`);
+// HALT (kill switch) = the machine places NOTHING, stops are NOT firing —
+// exits must be placed by hand. HALT_ENTRIES is the lesser flag: no new
+// buys, but stop/take-profit exits stay armed and keep firing normally. Two
+// different pills so the two are never mistaken for one another at a glance.
+pills.push(DATA.flags.halt_entries
+  ?`<span class="pill warn"><span class="dot"></span>HALT-ENTRIES ON</span>`
+  :`<span class="pill"><span class="dot"></span>HALT-ENTRIES CLEAR</span>`);
 document.getElementById("statusPills").innerHTML=pills.join("")+
   `<div class="asof mono">book ${DATA.asof||"—"} · marks ${(DATA.account.marked_at||"—").replace('T',' ').replace('+00:00','')} · refreshed ${(DATA.generated||"").replace('T',' ').replace('+00:00','')} UTC</div>`;
 
@@ -246,7 +253,8 @@ ddi.style.background=Math.abs(dd)>=lim?"var(--neg)":Math.abs(dd)>lim*.6?"var(--w
 document.getElementById("guardRows").innerHTML=
   `<div class="row"><span class="k">Max order size</span><span class="v">$${fmt(g.max_order)} · ${Math.round((g.max_order_pct||0)*100)}%</span></div>
    <div class="row"><span class="k">Live trading</span><span class="v" style="color:var(--${DATA.flags.live_approved?'pos':'warn'})">${DATA.flags.live_approved?'ARMED':'PAUSED'}</span></div>
-   <div class="row"><span class="k">Kill-switch</span><span class="v">${DATA.flags.kill_switch?'ENGAGED':'clear'}</span></div>
+   <div class="row"><span class="k">Kill-switch</span><span class="v" style="color:var(--${DATA.flags.kill_switch?'neg':'pos'})">${DATA.flags.kill_switch?'ENGAGED — places nothing, stops NOT firing':'clear'}</span></div>
+   <div class="row"><span class="k">Halt-entries</span><span class="v" style="color:var(--${DATA.flags.halt_entries?'warn':'pos'})">${DATA.flags.halt_entries?'ENGAGED — no new buys, stops still armed':'clear'}</span></div>
    <div class="row"><span class="k">Cooldown (stopped-out)</span><span class="v">${(g.cooldown&&g.cooldown.length)?g.cooldown.join(', '):'none'}</span></div>
    <div class="row"><span class="k">Realized P&amp;L (30d)</span><span class="v">${DATA.realized?`<span style="color:var(--${(DATA.realized.total||0)>=0?'pos':'neg'})">$${fmt(DATA.realized.total)}</span> · ${DATA.realized.days?DATA.realized.days.reduce((a,x)=>a+(x.trades||0),0):0} closes`:'— (no exits yet)'}</span></div>`;
 
