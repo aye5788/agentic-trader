@@ -24,7 +24,7 @@ TWO paths, and picking the wrong one hits a wall:
 import datetime as dt
 import time
 
-from moomoo import RET_OK, AuType, KLType
+from moomoo import RET_OK, AuType, KLType, TradeDateMarket
 
 from .client import quote_ctx
 from .research import _bare, _us
@@ -116,6 +116,44 @@ def daily_ohlc(ticker: str, start: str, end: str, ctx=None):
     finally:
         if own:
             q.close()
+
+
+def is_trading_day(day, ctx=None):
+    """Was/is `day` (YYYY-MM-DD) a US trading session? True / False / None=unknown.
+
+    Exists because the time-of-day settle guard in `fetch_prices` cannot tell a
+    closed market from a settled one: `get_market_snapshot` on a shut market
+    returns the PREVIOUS session's close, so a Sunday 20:15 ET run appended a
+    byte-identical copy of Friday stamped Sunday (2026-08-02, 2026-08-09 — 100%
+    of 168 names matched). Each injects a 0% return and deflates sigma, which
+    sets stop distance.
+
+    None means "could not tell", never a guess. The caller treats None as
+    "fall back to the weekend test", which needs no network and is never wrong;
+    this call only adds weekday HOLIDAYS on top of that.
+
+    ⚠️ The SDK method is `request_trading_days`, NOT `get_trading_days` — the
+    latter is only the name of a wrapper script in moomoo's own examples, and
+    calling it raises AttributeError. Both WHOLE and HALF days are trading days.
+    """
+    day = str(day)[:10]
+    own = ctx is None
+    q = None
+    try:
+        q = ctx or quote_ctx()
+        ret, data = _paced(q.request_trading_days,
+                           market=TradeDateMarket.US, start=day, end=day)
+        if ret != RET_OK:
+            return None
+        return any(str(r.get("time", ""))[:10] == day for r in (data or []))
+    except Exception:                      # noqa: BLE001 -- unknown, never a guess
+        return None
+    finally:
+        if own and q is not None:
+            try:
+                q.close()
+            except Exception:              # noqa: BLE001
+                pass
 
 
 def snapshot_ohlc(tickers, ctx=None):

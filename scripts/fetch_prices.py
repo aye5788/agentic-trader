@@ -95,8 +95,9 @@ MARKET_TZ = ZoneInfo("America/New_York")
 SETTLE_AFTER = dt.time(16, 15)
 
 
-def _drop_unsettled_session(panels: dict, now_et: dt.datetime) -> tuple[dict, str | None]:
-    """Drop the current session's bar unless it has closed AND settled.
+def _drop_unsettled_session(panels: dict, now_et: dt.datetime,
+                            trading_day: bool | None = None) -> tuple[dict, str | None]:
+    """Drop the current session's bar unless it is a REAL, settled trading day.
 
     Why this exists: we now pass `endDate` to Schwab (see `_try_pull`), which is
     the ONLY way to get today's bar at all — without it Schwab silently defaults
@@ -108,6 +109,24 @@ def _drop_unsettled_session(panels: dict, now_et: dt.datetime) -> tuple[dict, st
     So: before 16:15 ET, drop today's row (falls back to the old, correct-if-late
     behaviour); after it, keep it — that is the whole point of the fix.
 
+    NON-TRADING DAYS (added 2026-08-10). The time-of-day test alone is not enough.
+    On a Sunday the weekly 20:15 ET job passes "after 16:15" and the row was kept
+    — but `get_market_snapshot` on a closed market returns the PREVIOUS session's
+    close, so the row is a byte-identical duplicate of Friday stamped Sunday.
+    Measured: 2026-08-02 and 2026-08-09 matched the prior Friday for 100% of 168
+    names. Each one injects a 0% return, deflating sigma — and sigma sets stop
+    distance, so stops end up tighter than the name's real volatility. Two rows
+    cost only 0.05–0.23% today, but they accrue ~52/yr and never self-heal. Ten
+    years of Schwab-era history contain none; this began with the moomoo feed.
+
+    `trading_day`: True / False / None (calendar unavailable). The WEEKEND test is
+    applied unconditionally and needs no network — Saturday and Sunday are never
+    US trading days, so that half can never be wrong and works with OpenD down.
+    `trading_day=False` additionally catches weekday holidays. Passing None
+    degrades to weekend-only rather than dropping a real session: this panel is
+    NON-REGENERABLE (history is capped at 100 distinct stocks account-wide), so
+    wrongly discarding a genuine close is the expensive error.
+
     Returns (panels, dropped_date_iso | None). Pure: no network, no I/O, no clock.
     """
     close = panels.get("close")
@@ -117,6 +136,10 @@ def _drop_unsettled_session(panels: dict, now_et: dt.datetime) -> tuple[dict, st
     today = now_et.date()
     if last.date() != today:
         return panels, None                      # nothing from today — nothing to drop
+    if today.weekday() >= 5 or trading_day is False:
+        # Market shut: whatever the feed returned is the prior session restamped.
+        return ({f: p.drop(index=last, errors="ignore") for f, p in panels.items()},
+                str(last.date()))
     if now_et.time() >= SETTLE_AFTER:
         return panels, None                      # settled close — keep it
     return {f: p.drop(index=last, errors="ignore") for f, p in panels.items()}, str(last.date())
@@ -202,13 +225,21 @@ def main() -> None:
                 raise SystemExit(2)
             panels = _merge_bars(panels, bars)
             meta = [(t, 1, "ok") for t in bars]
+        # Ask the calendar while the context is still open, so this costs no
+        # extra connection. None = could not tell -> the weekend test still
+        # applies; only weekday HOLIDAYS go unrecognised.
+        now_et = dt.datetime.now(MARKET_TZ)
+        trading_day = mmp.is_trading_day(now_et.date(), ctx=ctx)
     finally:
         ctx.close()
 
-    panels, dropped = _drop_unsettled_session(panels, dt.datetime.now(MARKET_TZ))
+    panels, dropped = _drop_unsettled_session(panels, now_et, trading_day)
     if dropped:
-        print(f"  dropped UNSETTLED session bar {dropped} (before "
-              f"{SETTLE_AFTER.strftime('%H:%M')} ET — partial, not a close)")
+        why = ("market CLOSED that day — the feed returns the prior session's "
+               "close, so this row is a duplicate"
+               if (now_et.date().weekday() >= 5 or trading_day is False)
+               else f"before {SETTLE_AFTER.strftime('%H:%M')} ET — partial, not a close")
+        print(f"  dropped session bar {dropped} ({why})")
 
     panel = panels["close"]
     print(f"panel now: {panel.shape[0]} dates x {panel.shape[1]} tickers, "
@@ -284,7 +315,40 @@ def _selftest() -> None:
     # empty panel must not explode
     _, dropped = _drop_unsettled_session({f: pd.DataFrame() for f in _FIELDS}, _et(D, 10, 0))
     assert dropped is None
-    print("selftest OK: _drop_unsettled_session (partial dropped, settled kept)")
+
+    # --- non-trading days (2026-08-10) --------------------------------------
+    # A Sunday 20:15 ET run passes the settle test but the market was SHUT, so
+    # the feed returned Friday's close restamped. Must drop, calendar or not.
+    SUN, SAT = "2026-08-09", "2026-08-08"
+    for day in (SUN, SAT):
+        _, dropped = _drop_unsettled_session(_panels_ending(day), _et(day, 20, 15))
+        assert dropped == day, f"{day} is a weekend — must drop even after settle"
+        # ...and the weekend test must not need the calendar to be right
+        _, dropped = _drop_unsettled_session(_panels_ending(day), _et(day, 20, 15),
+                                             trading_day=None)
+        assert dropped == day, f"{day} must drop with no calendar available"
+        # ...nor may a wrong calendar answer override it
+        _, dropped = _drop_unsettled_session(_panels_ending(day), _et(day, 20, 15),
+                                             trading_day=True)
+        assert dropped == day, f"{day} must drop even if the calendar says otherwise"
+
+    # A weekday HOLIDAY is only caught when the calendar says so.
+    HOL = "2026-12-25"                                   # Friday, market closed
+    assert dt.date.fromisoformat(HOL).weekday() < 5, "fixture must be a weekday"
+    _, dropped = _drop_unsettled_session(_panels_ending(HOL), _et(HOL, 20, 15),
+                                         trading_day=False)
+    assert dropped == HOL, "a weekday holiday must drop when the calendar says closed"
+    _, dropped = _drop_unsettled_session(_panels_ending(HOL), _et(HOL, 20, 15),
+                                         trading_day=None)
+    assert dropped is None, ("unknown calendar must NOT discard a weekday bar — "
+                            "this panel is non-regenerable")
+
+    # A normal settled weekday is still KEPT (the original fix must survive).
+    _, dropped = _drop_unsettled_session(_panels_ending(D), _et(D, 18, 3),
+                                         trading_day=True)
+    assert dropped is None, "a real settled session must still be kept"
+    print("selftest OK: _drop_unsettled_session (partial dropped, settled kept, "
+          "weekend/holiday duplicates dropped)")
 
     # --- _merge_bars: the append must never corrupt the 10y panel ---------------
     idx = pd.to_datetime(["2026-07-27", "2026-07-28"])
