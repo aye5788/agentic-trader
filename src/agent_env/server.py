@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -27,6 +27,8 @@ from agent_env import screen                          # noqa: E402  sibling modu
 from agent_env import terrain as terrain_mod          # noqa: E402  sibling module
 from agent_env import decide                          # noqa: E402  sibling module
 import mandate                                  # noqa: E402
+import governance as gov                        # noqa: E402
+import strategy as strat                        # noqa: E402
 import pandas as pd                             # noqa: E402
 
 mcp = FastMCP("agentic-trader")
@@ -264,6 +266,107 @@ def record_decision(symbol: str, action: str, reason: str) -> str:
     return json.dumps({"ok": True, "recorded": entry}, indent=2)
 
 
+def _dollar_volume(symbol: str) -> tuple[float | None, str | None]:
+    """Trailing 20-day average dollar volume for `symbol`, or None if unmeasurable.
+
+    Source: research_store/prices/pool_dvol.parquet (scripts/fetch_pool.py, built
+    from Alpaca IEX volume -- a single venue, a fraction of the consolidated
+    tape). Returns (value, as_of) where as_of is the ISO date of the file's last
+    row, so a caller can report how stale the reading is. Returns (None, None)
+    if the file is missing/unreadable; (None, as_of) if the file exists but the
+    symbol isn't in it or has no data in the trailing window. Never raises --
+    governance.liquidity_ok() fails CLOSED on None, which is the correct
+    direction: a name we cannot measure has not been shown to be tradeable.
+    """
+    dvol = REPO / "research_store" / "prices" / "pool_dvol.parquet"
+    if not dvol.exists():
+        return None, None
+    try:
+        d = pd.read_parquet(dvol)
+        as_of = d.index[-1].date().isoformat() if len(d.index) else None
+        if symbol not in d.columns:
+            return None, as_of
+        s = d[symbol].dropna().tail(20)
+        return (float(s.mean()) if len(s) else None), as_of
+    except Exception:
+        return None, None
+
+
+@mcp.tool()
+def check_order(symbol: str, side: str, amount: float) -> str:
+    """Ask whether an order is permitted BEFORE you place it.
+
+    Returns JSON: {"allowed": bool, "reasons": [...], "liquidity_advisory": {...}}.
+    Call this first, then place through the Robinhood MCP tools if allowed. It
+    does not place anything itself. A refusal is a finding worth reporting,
+    never something to work around.
+
+    What can make `allowed` false (buys only -- see below): the kill switch
+    (blocks everything, buy or sell), HALT-ENTRIES and the drawdown halt (block
+    new buys only), the per-order size cap, and the universe whitelist.
+    A SELL is NEVER refused by the drawdown halt, HALT-ENTRIES, the whitelist,
+    or the order cap -- stops in this system are software-only, so refusing an
+    exit would strand a position's only protection (only the kill switch, which
+    stops ALL placement by design, can still show up in a sell's reasons).
+
+    `liquidity_advisory` is reported SEPARATELY and NEVER makes `allowed` false.
+    It is ADVISORY ONLY, pending task #30: research_store/prices/pool_dvol.parquet
+    is built from Alpaca IEX volume (a single venue -- a fraction of consolidated
+    dollar volume) and is currently weeks stale. Checked against the configured
+    $50M floor as-is, roughly 30% of the curated 168-name universe reads below
+    it -- almost certainly a data problem, not an illiquid universe, so this
+    tool reports the finding (with the data's age) rather than hard-refusing on
+    it. Read `liquidity_advisory.ok` and use judgment.
+
+    This tool does NOT restrict which name you pick beyond the checks above --
+    symbol selection is yours.
+    """
+    cfg = strat.load()
+    v = marks.load()
+    acct = float(v["account_value"]) if v and v.get("account_value") is not None else float("nan")
+    sym = str(symbol).strip().upper()
+    sd = str(side).strip().lower()
+    reasons: list[str] = []
+
+    g = gov.gates(acct, cfg)
+    reasons += g["block_all"]
+    if sd == "buy":
+        reasons += g["block_entries"]
+
+    approved, blocked = gov.vet_plan(
+        [{"symbol": sym, "side": sd, "amount": float(amount)}], acct, cfg)
+    reasons += [b["blocked"] for b in blocked]
+
+    floor = float(cfg.get("governance", {}).get("min_dollar_volume_20d", 0.0))
+    dvol, as_of = _dollar_volume(sym)
+    liq_ok, liq_why = gov.liquidity_ok(sym, dvol, floor)
+    age_days = None
+    if as_of:
+        try:
+            age_days = (datetime.now(timezone.utc).date() - date.fromisoformat(as_of)).days
+        except Exception:
+            age_days = None
+
+    liquidity_advisory = {
+        "ok": liq_ok,
+        "dollar_volume_20d": dvol,
+        "floor": floor,
+        "as_of": as_of,
+        "age_days": age_days,
+        "reason": liq_why or None,
+        "advisory_only": True,
+        "why_advisory": (
+            "pool_dvol.parquet is single-venue (Alpaca IEX) volume and is "
+            "currently weeks stale -- ~30% of the curated universe reads below "
+            "the floor on it. Tracked as task #30. This never blocks the order."
+        ),
+    }
+
+    return json.dumps({"allowed": not reasons, "symbol": sym, "side": sd,
+                       "amount": float(amount), "reasons": reasons,
+                       "liquidity_advisory": liquidity_advisory}, indent=2)
+
+
 def _selftest() -> None:
     assert ping() == "pong"
     assert mcp is not None
@@ -421,6 +524,81 @@ def _selftest() -> None:
           "thesis (not-held, zero-weight, no-stop, ownership-indeterminate, "
           "genuinely-held-and-watched) -- and never touched the live "
           "overrides.json or positions.json")
+
+    # --- check_order(): a SELL must never be refused for a buy-only reason.
+    # Proven BY CONSTRUCTION: build a scratch config/state where EVERY buy-
+    # blocking condition fires simultaneously (HALT-ENTRIES touched, drawdown
+    # blown via a seeded peak, an order cap of ~0, and a whitelist that
+    # excludes the test symbol), then show a SELL of that same symbol/amount
+    # sails through clean while a BUY is blocked on all four. gov.REPO/STATE
+    # and strategy.load/marks.load are monkeypatched to a tmpdir for the
+    # whole block so this never touches the live repo state.
+    orig_gov_repo, orig_gov_state = gov.REPO, gov.STATE
+    orig_strat_load, orig_marks_load = strat.load, marks.load
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        gov.REPO = tdp
+        gov.STATE = tdp / "research_store" / "governance" / "state.json"
+        (tdp / "research_store").mkdir(parents=True)
+        (tdp / "config").mkdir()
+        (tdp / "config" / "universe.csv").write_text("ticker,flag\nAAPL,\n")
+        (tdp / "config" / "etf_universe.csv").write_text("ticker,flag\nXLK,\n")
+        (tdp / "research_store" / "HALT_ENTRIES").touch()   # blocks entries
+        gov.STATE.parent.mkdir(parents=True, exist_ok=True)
+        gov.STATE.write_text(json.dumps({"peak_value": 1000.0}))  # so $100 -> -90% dd
+        test_cfg = {
+            "governance": {"kill_switch_file": "research_store/HALT",
+                           "halt_entries_file": "research_store/HALT_ENTRIES",
+                           "max_drawdown": 0.01, "max_order_pct": 0.0001,
+                           "require_whitelist": True,
+                           "min_dollar_volume_20d": 50_000_000.0},
+            "universe": {"source": "config/universe.csv"},
+            "etf_sleeve": {"source": "config/etf_universe.csv"},
+        }
+        strat.load = lambda: test_cfg
+        marks.load = lambda: {"account_value": 100.0}
+        try:
+            # off-universe symbol: sell clean, buy blocked on HALT-ENTRIES +
+            # DRAWDOWN + whitelist (vet_plan's whitelist check short-circuits
+            # before it ever reaches the order-cap check, so a second symbol
+            # that IS whitelisted is used below to reach the cap).
+            r_sell = json.loads(check_order("ZZZZ_NOT_IN_UNIVERSE", "sell", 5.0))
+            assert r_sell["allowed"] is True, r_sell
+            assert r_sell["reasons"] == [], r_sell
+
+            r_buy = json.loads(check_order("ZZZZ_NOT_IN_UNIVERSE", "buy", 5.0))
+            assert r_buy["allowed"] is False, r_buy
+            assert any("HALT-ENTRIES" in x for x in r_buy["reasons"]), r_buy
+            assert any("DRAWDOWN" in x for x in r_buy["reasons"]), r_buy
+            assert any("whitelist" in x for x in r_buy["reasons"]), r_buy
+
+            # in-universe symbol, oversized: sell still clean; buy now reaches
+            # (and is blocked by) the per-order cap instead of the whitelist.
+            r_sell2 = json.loads(check_order("AAPL", "sell", 5.0))
+            assert r_sell2["allowed"] is True, r_sell2
+            assert r_sell2["reasons"] == [], r_sell2
+
+            r_buy2 = json.loads(check_order("AAPL", "buy", 5.0))
+            assert r_buy2["allowed"] is False, r_buy2
+            assert any("HALT-ENTRIES" in x for x in r_buy2["reasons"]), r_buy2
+            assert any("DRAWDOWN" in x for x in r_buy2["reasons"]), r_buy2
+            assert any("max order" in x for x in r_buy2["reasons"]), r_buy2
+        finally:
+            gov.REPO, gov.STATE = orig_gov_repo, orig_gov_state
+            strat.load, marks.load = orig_strat_load, orig_marks_load
+    print("selftest OK: check_order() -- a SELL is never refused by HALT-ENTRIES, "
+          "the drawdown halt, the order cap, or the whitelist (all forced on "
+          "simultaneously by construction); the matching BUY is blocked on each "
+          "-- and none of this touched the live repo state")
+
+    # liquidity is advisory only: an unmeasurable symbol must not appear in
+    # `reasons` (which would make `allowed` false), only in `liquidity_advisory`.
+    r = json.loads(check_order("ZZZZ_TOTALLY_UNKNOWN_SYMBOL", "buy", 1.0))
+    assert not any("liquidity" in x.lower() for x in r["reasons"]), r
+    assert r["liquidity_advisory"]["advisory_only"] is True, r
+    assert r["liquidity_advisory"]["ok"] is False, r  # unmeasurable -> fails closed, advisory
+    print("selftest OK: check_order() liquidity is advisory-only -- never appears "
+          "in the blocking `reasons`, even when unmeasurable")
 
 
 if __name__ == "__main__":
