@@ -21,6 +21,7 @@ from mcp.server.fastmcp import FastMCP   # noqa: E402
 import marks                                    # noqa: E402
 from research_store import read_current         # noqa: E402
 from agent_env import state                           # noqa: E402  sibling module
+from agent_env import screen                          # noqa: E402  sibling module
 import mandate                                  # noqa: E402
 import pandas as pd                             # noqa: E402
 
@@ -29,6 +30,8 @@ mcp = FastMCP("agentic-trader")
 EQUITY = REPO / "research_store" / "history" / "equity.jsonl"
 JOURNAL = REPO / "research_store" / "journal.jsonl"
 CLOSES = REPO / "research_store" / "prices" / "closes.parquet"
+UNIVERSE = REPO / "config" / "universe.csv"
+ETF_UNIVERSE = REPO / "config" / "etf_universe.csv"
 
 
 def _outcomes() -> list:
@@ -104,6 +107,40 @@ def mandate_status() -> str:
     s = mandate.status(eq, bench, v["positions"], v["account_value"],
                        _outcomes(), v["as_of"])
     return json.dumps(s, indent=2, default=str)
+
+
+def _panel():
+    return pd.read_parquet(CLOSES)
+
+
+def _all_tickers() -> list:
+    return screen.read_universe(UNIVERSE) + screen.read_universe(ETF_UNIVERSE)
+
+
+@mcp.tool()
+def candidates(n: int = 10) -> str:
+    """The momentum screen's top `n` names, strongest first, with their numbers.
+
+    This is an ATTENTION BUDGET, not a boundary — it exists so you are not
+    scanning 168 names every session. The full ranked list is one `universe()`
+    call away, and you may trade something outside the top n; say why when you do.
+
+    Columns: R (12-month return), sigma (daily volatility), trend (distance above
+    the 200-day mean), score (the rank-average), eligible (12-month return > 0).
+    """
+    panel = _panel()
+    r = screen.rank(panel, panel.index[-1], _all_tickers())
+    return r.head(int(n)).round(4).to_json(orient="index", indent=2)
+
+
+@mcp.tool()
+def universe() -> str:
+    """The FULL ranked list — every name in config/universe.csv plus the ETF
+    sleeve, scored and sorted. Call this when the top candidates do not suit and
+    you want to see everything available."""
+    panel = _panel()
+    r = screen.rank(panel, panel.index[-1], _all_tickers())
+    return r.round(4).to_json(orient="index", indent=2)
 
 
 def _selftest() -> None:
