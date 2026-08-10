@@ -75,6 +75,34 @@ def _load_state() -> dict:
 
 
 def update_peak(account_value: float) -> dict:
+    """Maintains THIS GATE'S OWN peak tracker — research_store/governance/state.json.
+
+    NOT the mandate's high-water mark (2026-08-10, FIX A — see docs/OPSLOG.md and
+    the design spec §5, criterion 1). Two candidate sources of "the account's
+    all-time peak" exist in this repo and they read differently RIGHT NOW
+    (this file's persisted peak_value=82.22 vs max(research_store/history/
+    equity.jsonl "value")=81.99): this one is sampled at whatever moment
+    scripts/fast_loop.py happens to call gates()/drawdown_halt() (today, once
+    per weekday run, but nothing stops a manual/test invocation from seeding it
+    with an intraday or off-cycle mark that scripts/log_equity.py's daily
+    close-to-close append never records) — so it is NOT reproducible from
+    anything on disk and NOT audited against a fixed cadence.
+
+    DECISION: src/mandate.py's drawdown() — which recomputes max() fresh from
+    research_store/history/equity.jsonl on every call — is the ONLY authoritative
+    high-water mark for anything that judges the mandate or flattens the book.
+    This tracker keeps its narrower, pre-existing job: seeding THIS gate's own
+    [governance] max_drawdown entries-halt (a different threshold, 0.25 here vs
+    0.20 in config/mandate.toml, for a different action — block_entries only,
+    never a flatten). The two are allowed to read differently because they now
+    answer different questions for different gates; what they must never do is
+    both claim to be *the* peak that authorises liquidating the book. Nothing in
+    src/mandate.py reads this file, and nothing computing a number for a human
+    (dashboard/app.py) reads it either as of this fix — both now source their
+    peak from the equity log, same as mandate.drawdown(). Do not wire this
+    tracker into the mandate path; if the two gates are ever merged, merge them
+    onto the equity-log peak, not this one.
+    """
     st = _load_state()
     st["peak_value"] = max(float(st.get("peak_value", 0.0)), float(account_value))
     STATE.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +121,11 @@ def drawdown_halt(account_value: float, cfg) -> tuple[bool, float]:
     passed to update_peak(): `max(stored_peak, nan)` happens to return the
     first argument today, but that is luck, not a guarantee, and a poisoned
     peak would corrupt every future drawdown measurement permanently.
+
+    The peak this measures drawdown against is update_peak()'s own tracker, NOT
+    the mandate's high-water mark — see update_peak()'s docstring (FIX A,
+    2026-08-10) for why the two are intentionally allowed to diverge and which
+    one is authoritative for the mandate/flatten path (it is not this one).
     """
     if not math.isfinite(account_value):
         return True, float("nan")

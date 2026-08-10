@@ -101,9 +101,22 @@ quantity field added 2026-08-09 (`604a75d`) and is forward-only from that date.
 Without the blocking/informational split, two immature criteria would have frozen the
 book for two months.
 
-1. **Drawdown ≤ 15%** from the all-time high-water mark (`governance.update_peak`
-   already tracks it), measured **close-to-close, never intraday** — an intraday
-   measure would fire the flatten on noise. Breach → mechanical flatten + loud alert.
+1. **Drawdown ≤ 15%** from the all-time high-water mark, measured **close-to-close,
+   never intraday** — an intraday measure would fire the flatten on noise. Breach →
+   mechanical flatten + loud alert.
+   *Peak source (corrected 2026-08-10, FIX A):* this spec originally said
+   `governance.update_peak` already tracks the peak needed here — it does not, and
+   must not. That tracker (`research_store/governance/state.json`) is sampled at
+   whatever arbitrary moment `scripts/fast_loop.py` calls `gates()`, has no fixed
+   cadence, and is not reproducible from disk; in practice it had already drifted
+   from the real close series (82.22 there vs 81.99 = max of
+   `research_store/history/equity.jsonl` on 2026-08-10). The mandate's peak is
+   `max()` over the audited, append-only `equity.jsonl` series — recomputed fresh
+   on every call by `mandate.drawdown()`, never cached — because that is the one
+   number on disk that is both close-to-close-only and independently
+   recomputable. `governance.update_peak` keeps its own narrower job: seeding
+   `[governance] max_drawdown` (a different, looser entries-halt threshold, 0.25
+   vs this criterion's 0.20) — it must never be wired into this criterion.
    *Why 15%:* the reference system's 3% was for a one-month paper challenge; a
    long-only momentum book sees 35–49% max drawdown over ten years
    (`sim_recycle.py`), so 3% would fire on ordinary market beta. Current setting is

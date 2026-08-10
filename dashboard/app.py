@@ -135,8 +135,15 @@ def build_data() -> dict:
     last_exec = next((e for e in reversed(recent) if e.get("event") == "execution"), None)
 
     equity = _tail_jsonl(RS / "history" / "equity.jsonl", 400)
-    gov_state = _read_json(RS / "governance" / "state.json", {})
-    peak = float(gov_state.get("peak_value", acct_value) or acct_value)
+    # Peak sourced from the audited equity.jsonl series, NOT from governance's
+    # research_store/governance/state.json peak_value (FIX A, 2026-08-10): that
+    # tracker is sampled at an arbitrary fast-loop moment and has already
+    # drifted from this series (82.22 there vs 81.99 here on 2026-08-10). The
+    # dashboard must show the same drawdown number the mandate uses, not a
+    # second, silently-competing one. See src/mandate.py drawdown()'s docstring.
+    equity_vals = [e.get("value") for e in equity
+                   if isinstance(e.get("value"), (int, float))]
+    peak = float(max(equity_vals)) if equity_vals else acct_value
     dd = 0.0 if peak <= 0 else min(0.0, acct_value / peak - 1.0)
     cooldown = _read_json(RS / "monitor" / "cooldown.json", {})
     mstate = _read_json(RS / "monitor" / "state.json", {})

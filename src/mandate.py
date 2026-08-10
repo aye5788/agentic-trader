@@ -36,6 +36,26 @@ def drawdown(equity: list[float], max_pct: float) -> dict:
     """Criterion 1 (BLOCKING). Close-to-close drawdown from the all-time high-water
     mark. `equity` is the ordered daily close series, oldest first.
 
+    THE PEAK USED HERE IS max(equity), recomputed fresh on every call — this is
+    the repo's ONE authoritative high-water mark for anything that can flatten
+    the book (2026-08-10, FIX A). It is deliberately NOT read from
+    research_store/governance/state.json's `peak_value` (src/governance.py's
+    update_peak()/drawdown_halt()), even though the design spec originally
+    said "governance.update_peak already tracks it" (now corrected in
+    docs/superpowers/specs/2026-08-09-agent-authority-inversion-design.md §5).
+    That tracker is sampled at an arbitrary moment (whenever scripts/
+    fast_loop.py happens to call gates()) with no fixed cadence and no way to
+    reproduce the number from disk; it has already drifted from this series in
+    the live state file (82.22 there vs 81.99 = max of the real equity.jsonl on
+    2026-08-10) and would drift further, monotonically, since a stale peak can
+    never come back down. `equity` here, by contrast, is an append-only,
+    audit-recomputable track record written once daily by scripts/
+    log_equity.py — exactly the "close-to-close, never intraday" discipline
+    this criterion requires. Do not add a code path that substitutes
+    governance's tracker for this recomputation; if a caller wants the
+    mandate's peak, it must pass this function the equity series, not a
+    cached number.
+
     Never measured intraday: an intraday measure fires the flatten on noise.
 
     Missing/unusable data discipline: a missing or non-numeric MOST RECENT point
