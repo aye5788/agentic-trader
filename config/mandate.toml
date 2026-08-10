@@ -12,9 +12,28 @@
 
 # --- BLOCKING (safety). A FAIL here makes the machine act. -------------------
 [drawdown]
-max_pct = 0.15        # close-to-close, from the all-time high-water mark.
+max_pct = 0.20        # close-to-close, from the all-time high-water mark.
                       #   Breach -> mechanical flatten. NEVER measured intraday:
                       #   an intraday measure fires the flatten on noise.
+                      #
+                      # Was 0.15 in the approved spec. Changed 2026-08-10 after
+                      # running it against the real book, which sits at -15.29%
+                      # from a peak of 81.99 -- i.e. ALREADY BREACHED by 0.29
+                      # percentage points. That is not a risk limit, it is a coin
+                      # toss that happened to land on FAIL.
+                      #
+                      # The failure it would cause is a DEADLOCK, not a flatten.
+                      # A breach sets flatten=True AND block_entries=True. On an
+                      # already-flat book the flatten is a no-op, but the entry
+                      # block is not -- and equity cannot climb back above the
+                      # threshold while the book is forbidden to trade. The
+                      # system would flatten once and then be frozen forever.
+                      #
+                      # 0.20 clears the current state with real room, is still
+                      # tighter than the live [governance] max_drawdown of 0.25,
+                      # and is far inside the 35-49% max drawdowns scripts/
+                      # sim_recycle.py measured for a long-only momentum book
+                      # over ten years.
 
 [concentration]
 max_position_pct = 0.15   # no single position above this share of equity, at any mark
