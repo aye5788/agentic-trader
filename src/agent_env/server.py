@@ -22,6 +22,7 @@ import marks                                    # noqa: E402
 from research_store import read_current         # noqa: E402
 from agent_env import state                           # noqa: E402  sibling module
 from agent_env import screen                          # noqa: E402  sibling module
+from agent_env import terrain as terrain_mod          # noqa: E402  sibling module
 import mandate                                  # noqa: E402
 import pandas as pd                             # noqa: E402
 
@@ -30,6 +31,8 @@ mcp = FastMCP("agentic-trader")
 EQUITY = REPO / "research_store" / "history" / "equity.jsonl"
 JOURNAL = REPO / "research_store" / "journal.jsonl"
 CLOSES = REPO / "research_store" / "prices" / "closes.parquet"
+HIGHS = REPO / "research_store" / "prices" / "highs.parquet"
+LOWS = REPO / "research_store" / "prices" / "lows.parquet"
 UNIVERSE = REPO / "config" / "universe.csv"
 ETF_UNIVERSE = REPO / "config" / "etf_universe.csv"
 
@@ -167,6 +170,24 @@ def universe() -> str:
         ]
     }
     return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+def terrain(symbol: str) -> str:
+    """How far this name actually travels, in units of its own daily volatility.
+
+    Use this to set stops and targets against measured behaviour rather than a
+    formula. `mfe_median` at horizon 5 is the typical BEST move over five sessions
+    in sigma; `mae_median` the typical worst. A target beyond `mfe_p90` is reached
+    less than one time in ten.
+
+    Context: the retired formula placed the first target 5.5 sigma out, which
+    price reached about 2.6% of the time in five days, while its 2.5-sigma stop
+    was hit about 20% of the time (scripts/calibrate_geometry.py, 2026-08-09).
+    """
+    return json.dumps(terrain_mod.excursions(
+        pd.read_parquet(CLOSES), pd.read_parquet(HIGHS), pd.read_parquet(LOWS),
+        symbol.strip().upper()), indent=2, default=str)
 
 
 def _selftest() -> None:
