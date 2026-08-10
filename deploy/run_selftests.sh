@@ -37,6 +37,7 @@ VENV_SELFTESTS=(
     "scripts/universe_refresh.py"
     "src/concentration.py"
     "src/ti_signals.py"
+    "src/deployed.py"
     "src/health.py"
     "scripts/health_check.py"
     "src/repo_checks.py"

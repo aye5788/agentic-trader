@@ -179,6 +179,20 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
         else:
             out.append(Check(key, label, ts, "ok", f"last ran {_ago(age)} ago"))
 
+    # Deployed-code drift. Not a scheduled job -- a different question about the
+    # same box: is the process running what is on disk? Absent probe -> nothing
+    # appended rather than a fabricated pass.
+    svcs = probes.get("deployed_code")
+    if svcs:
+        try:
+            import deployed                   # noqa: PLC0415
+            for d in deployed.evaluate(now, svcs):
+                out.append(Check(d["key"], d["label"], d["last_seen"],
+                                 d["status"], d["detail"]))
+        except Exception as e:                # noqa: BLE001
+            out.append(Check("deployed_code", "Deployed-code drift", None,
+                             "unknown", f"drift check failed: {e}"))
+
     return out
 
 
@@ -336,6 +350,16 @@ def _unprotected_probe(root: pathlib.Path):
     return (ts, tuple(d.get("unprotected") or ()), bool(d.get("suspect_empty_snapshot")))
 
 
+def _deployed_probe(root: pathlib.Path) -> list | None:
+    """Service records for deployed.evaluate(). None if it could not be read."""
+    try:
+        import deployed                       # noqa: PLC0415
+        units = [w["unit"] for w in deployed.WATCHED]
+        return deployed.gather(root, deployed.systemd_start_times(units))
+    except Exception:                         # noqa: BLE001
+        return None
+
+
 def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dict:
     """Collect the timestamps evaluate() judges. All failures degrade to None."""
     root = root or REPO
@@ -355,6 +379,11 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "newsletter":    _newest_in_dir(root / "research_store" / "newsletters", "*.sent"),
         "adaptive_tune": _last_actions_run() if use_network else SKIPPED,
         "unprotected_positions": _unprotected_probe(root),
+        # Is each long-running service running the code on disk? Scheduling
+        # liveness (everything above) cannot see this: a stale process keeps
+        # writing fresh artifacts, so every other check reads green while the
+        # process enforces last week's logic. See src/deployed.py.
+        "deployed_code": _deployed_probe(root),
     }
 
 
