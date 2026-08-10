@@ -58,6 +58,12 @@ ET = ZoneInfo("America/New_York")
 _LAST_DROPPED: frozenset | None = None
 _LAST_HALTED: bool | None = None      # log kill-switch mode on transition, not every tick
 
+# Unprotected-position invariant (spec 2026-08-09 §8): dedupe the phone push to
+# CHANGES in the finding, same fire-on-transition pattern as _LAST_DROPPED /
+# _LAST_HALTED above — not a re-push every 15s poll while the condition holds.
+_LAST_UNPROTECTED: frozenset = frozenset()
+_LAST_SUSPECT_EMPTY: bool = False
+
 
 def _now_et():
     return datetime.now(ET)
@@ -143,6 +149,39 @@ def _selftest() -> None:
     assert owned_symbols({"positions": "torn"}) is None
     print("monitor selftest OK: holdings filter (phantom-holding guard)")
 
+    # unprotected-position invariant (design spec 2026-08-09 §8): every held
+    # name has an agent-set stop, or it is loudly flagged. Pure classification.
+    protected = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
+                       targets=[120.0], target_weight=0.07)
+    no_stop = Thesis(symbol="TSLA", rank=2, verdict="buy", stop=None,
+                     targets=[], target_weight=0.05)
+    book = [protected, no_stop]
+    # held symbol with NO thesis at all (AAPL was never in the book)
+    out = unprotected_positions(book, {"NVDA", "AAPL"})
+    assert out["unprotected"] == ["AAPL"] and out["suspect_empty_snapshot"] is False, out
+    # held symbol whose thesis carries no stop
+    out = unprotected_positions(book, {"NVDA", "TSLA"})
+    assert out["unprotected"] == ["TSLA"] and out["suspect_empty_snapshot"] is False, out
+    # normal all-protected case -> nothing to flag
+    out = unprotected_positions(book, {"NVDA"})
+    assert out["unprotected"] == [] and out["suspect_empty_snapshot"] is False, out
+    # well-formed EMPTY snapshot while the book expects holdings -> suspect the
+    # snapshot, don't panic about stops (usually a stale/partial write)
+    out = unprotected_positions(book, set())
+    assert out["unprotected"] == [] and out["suspect_empty_snapshot"] is True, out
+    # well-formed empty snapshot with an EMPTY book too -> genuinely nothing wrong
+    flat_book = [Thesis(symbol="X", rank=1, verdict="hold", stop=None,
+                        targets=[], target_weight=0.0)]
+    out = unprotected_positions(flat_book, set())
+    assert out["unprotected"] == [] and out["suspect_empty_snapshot"] is False, out
+    # torn/unreadable snapshot (owned=None) -> caller already fails open and
+    # watches every thesis, so there is nothing NEW to flag here
+    out = unprotected_positions(book, None)
+    assert out["unprotected"] == [] and out["suspect_empty_snapshot"] is False, out
+    print("monitor selftest OK: unprotected-position invariant (held-no-thesis, "
+          "held-no-stop, empty-snapshot suspicion, torn-snapshot fail-open, "
+          "all-protected no-alert)")
+
 
 def _last_price(block: dict):
     """Extract a usable mark from one quote block, or None.
@@ -212,6 +251,40 @@ def owned_symbols(snap) -> set | None:
         except (TypeError, ValueError):
             continue
     return out
+
+
+def unprotected_positions(theses, owned) -> dict:
+    """Classify the invariant in docs/superpowers/specs/2026-08-09-agent-authority
+    -inversion-design.md §8: "every position has an agent-set stop, or it is
+    loudly flagged unprotected." Pure — no I/O.
+
+    `theses` = the current book's FULL thesis list (`prod.theses`, unfiltered —
+    not the `held` dict, which has already been narrowed to what we watch).
+    `owned` = `owned_symbols()`'s result: the set of symbols actually held per
+    the broker snapshot, or None when the snapshot could not be read (torn /
+    absent / wrong-shape). On None the caller already fails open and watches
+    every thesis, so there is nothing NEW to flag — this returns quiet.
+
+    Two distinct findings on purpose, because the operator's response differs:
+
+      "unprotected" — owned symbols with no thesis at all, or a thesis that
+        carries no stop, or a thesis whose weight has gone to zero. These are
+        genuinely unwatched right now: set a stop or exit by hand.
+
+      "suspect_empty_snapshot" — the snapshot is well-formed but reports ZERO
+        holdings while the book expects some (>=1 thesis with target_weight>0).
+        That combination is far more often a stale/partial/failed snapshot
+        write (prompts/exit.md step 7 rewrites this file after selling) than a
+        genuinely flat account — the right response is to check the snapshot,
+        not to panic about stops.
+    """
+    if owned is None:
+        return {"unprotected": [], "suspect_empty_snapshot": False}
+    watched = {t.symbol for t in theses if t.target_weight > 0 and t.stop}
+    if not owned:
+        expects_holdings = any(t.target_weight > 0 for t in theses)
+        return {"unprotected": [], "suspect_empty_snapshot": expects_holdings}
+    return {"unprotected": sorted(owned - watched), "suspect_empty_snapshot": False}
 
 
 def _load(path, default):
@@ -380,6 +453,48 @@ def check_once(cfg, client) -> int:
             if dropped:                       # phantom book names never bought
                 print(f"  not held — skipping stop-watch: {', '.join(sorted(dropped))}")
             _LAST_DROPPED = frozenset(dropped)
+
+    # Invariant (design spec §8): every position has an agent-set stop, or it
+    # is loudly flagged unprotected — checked every cycle, not just logged.
+    # `held` above is what we ARE watching; this is the converse — what we
+    # actually hold (per the broker snapshot) that isn't in that set, either
+    # because it has no current thesis, or a thesis with no stop / zero
+    # weight. Persisted every tick regardless of outcome so src/health.py can
+    # read it for the daily 08:00 check; the phone push itself only fires on
+    # a CHANGE (see _LAST_UNPROTECTED/_LAST_SUSPECT_EMPTY above), matching the
+    # _LAST_DROPPED/_LAST_HALTED fire-on-transition pattern rather than
+    # re-pushing every 15s poll while the condition persists.
+    unprot = unprotected_positions(prod.theses, owned)
+    _save(MON / "unprotected.json", {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "unprotected": unprot["unprotected"],
+        "suspect_empty_snapshot": unprot["suspect_empty_snapshot"],
+    })
+    global _LAST_UNPROTECTED, _LAST_SUSPECT_EMPTY
+    cur_unprot = frozenset(unprot["unprotected"])
+    if cur_unprot != _LAST_UNPROTECTED:
+        if cur_unprot:
+            names = ", ".join(sorted(cur_unprot))
+            print(f"  ⚠ UNPROTECTED — no stop being watched: {names}")
+            notify("🚨 Unprotected position(s) — no stop being watched",
+                   f"{names}: held per the broker snapshot but has no current thesis "
+                   f"or no stop, so the monitor is watching {'it' if len(cur_unprot) == 1 else 'them'} "
+                   f"for nothing. Set a stop or exit by hand.",
+                   tags="rotating_light")
+        _LAST_UNPROTECTED = cur_unprot
+    if unprot["suspect_empty_snapshot"] != _LAST_SUSPECT_EMPTY:
+        if unprot["suspect_empty_snapshot"]:
+            print("  ⚠ snapshot reports ZERO positions but the book expects holdings"
+                  " — check the snapshot, not the stops")
+            notify("⚠️ Snapshot reports zero positions but the book expects holdings",
+                   "research_store/rh/positions.json shows no holdings while the book "
+                   "has weighted theses. This usually means a stale, partial, or failed "
+                   "snapshot write (prompts/exit.md step 7 rewrites it after selling), "
+                   "not a genuinely flat account — check the snapshot before assuming "
+                   "stops are the problem.",
+                   tags="warning")
+        _LAST_SUSPECT_EMPTY = unprot["suspect_empty_snapshot"]
+
     try:
         _ov = json.loads((MON / "overrides.json").read_text())   # json already imported at module top
     except Exception:

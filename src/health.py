@@ -90,6 +90,7 @@ class Check:
     label: str
     last_seen: dt.datetime | None
     status: str      # "ok" | "stale" | "never" | "blocked" | "due" | "expired" | "unknown"
+                     # | "unprotected" | "empty_snapshot" (unprotected_positions only)
     detail: str
 
     @property
@@ -122,6 +123,14 @@ SPECS = {
     "signal_panel":  ("moomoo signal panel",    10,  "signal_panel journal event"),
     "newsletter":    ("Investor letter",        10,  "research_store/newsletters/"),
     "adaptive_tune": ("Adaptive tuner (CI)",    10,  "GitHub Actions run"),
+    # Design spec 2026-08-09 §8 invariant: "every position has an agent-set
+    # stop, or it is loudly flagged unprotected — checked every monitor cycle
+    # and in daily health." scripts/market_monitor.py writes this artifact
+    # every check_once() tick (not just on a change); the 4d window matches
+    # "monitor" above for the same reason — it only advances during RTH, so a
+    # normal Friday-close -> Monday-08:00 gap must not read stale.
+    "unprotected_positions": ("Unprotected positions", 4,
+                              "research_store/monitor/unprotected.json"),
 }
 
 
@@ -137,6 +146,13 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
         if ts == HALTED:
             out.append(Check(key, label, None, "unknown",
                              "kill-switch engaged — job intentionally stopped"))
+            continue
+
+        # unprotected_positions carries a different probe SHAPE (content, not
+        # just a "did it run" timestamp) because the thing being judged is a
+        # live safety condition, not job liveness — see _eval_unprotected.
+        if key == "unprotected_positions":
+            out.append(_eval_unprotected(key, label, ts, now, max_days, source))
             continue
 
         # A probe may be a bare timestamp, or (output_ts, log_ts) for the jobs
@@ -164,6 +180,47 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
             out.append(Check(key, label, ts, "ok", f"last ran {_ago(age)} ago"))
 
     return out
+
+
+def _eval_unprotected(key: str, label: str, probe, now: dt.datetime,
+                       max_days: int, source: str) -> Check:
+    """Judge the unprotected_positions probe: None (never written), or
+    (ts, unprotected_tuple, suspect_empty_snapshot_bool) from gather(). Pure.
+
+    Staleness still applies first — an artifact that stopped updating tells
+    you nothing about CURRENT protection, so it must not silently read "ok".
+    Below that, the artifact's own content decides: any currently-unprotected
+    symbol is the loud, distinct finding the spec's §8 invariant demands;
+    a well-formed-but-empty snapshot against a book that expects holdings is
+    the softer "check the snapshot" finding; otherwise it's a clean "ok".
+
+    Deliberately COUNT-ONLY, never symbol names: health_check.py forwards
+    Check.detail verbatim into the shared ops ntfy topic AND a PUBLIC GitHub
+    issue (--open-issue) under a stated "job names/ages only, never positions"
+    contract (scripts/health_check.py docstring + issue_body()'s PUBLIC-SAFETY
+    CONTRACT). The symbol-naming alert lives in scripts/market_monitor.py's
+    own notify() push instead, on the private book-carrying topic where every
+    other stop/target alert already names names.
+    """
+    if probe is None:
+        return Check(key, label, None, "never", f"no {source} has ever appeared")
+    ts, unprotected, suspect_empty = probe
+    age = now - ts
+    age_d = age.total_seconds() / 86400
+    if age_d > max_days:
+        return Check(key, label, ts, "stale",
+                     f"last checked {_ago(age)} ago (expected within {max_days}d)")
+    if unprotected:
+        n = len(unprotected)
+        return Check(key, label, ts, "unprotected",
+                     f"{n} position{'s' if n != 1 else ''} held with no stop being "
+                     "watched — see the monitor's phone alert or "
+                     "research_store/monitor/unprotected.json for which")
+    if suspect_empty:
+        return Check(key, label, ts, "empty_snapshot",
+                     "snapshot reports zero positions while the book expects "
+                     "holdings — check the snapshot, not the stops")
+    return Check(key, label, ts, "ok", f"last checked {_ago(age)} ago, all positions protected")
 
 
 def _ago(delta: dt.timedelta) -> str:
@@ -263,6 +320,22 @@ def _last_actions_run(workflow: str = "adaptive-tune") -> dt.datetime | None:
         return None
 
 
+def _unprotected_probe(root: pathlib.Path):
+    """Read market_monitor's unprotected.json -> (ts, unprotected, suspect) or
+    None. Thin I/O only — all judgement lives in _eval_unprotected."""
+    p = root / "research_store" / "monitor" / "unprotected.json"
+    ts = _mtime(p)
+    if ts is None:
+        return None
+    try:
+        d = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    return (ts, tuple(d.get("unprotected") or ()), bool(d.get("suspect_empty_snapshot")))
+
+
 def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dict:
     """Collect the timestamps evaluate() judges. All failures degrade to None."""
     root = root or REPO
@@ -281,6 +354,7 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "signal_panel":  _newest_journal_event(root, "signal_panel"),
         "newsletter":    _newest_in_dir(root / "research_store" / "newsletters", "*.sent"),
         "adaptive_tune": _last_actions_run() if use_network else SKIPPED,
+        "unprotected_positions": _unprotected_probe(root),
     }
 
 
@@ -416,6 +490,43 @@ def _selftest() -> None:
     # monitor artifact checks above). Guard against it creeping back silently.
     assert not any(c.key == "schwab_token" for c in evaluate(now, {})), \
         "schwab_token check should be gone with the adapter"
+
+    # unprotected_positions: design spec 2026-08-09 §8 — "checked every
+    # monitor cycle AND in daily health." Content-based, not a plain "did it
+    # run" timestamp, so it gets its own branch in evaluate() (_eval_unprotected).
+    fresh = now - dt.timedelta(hours=1)
+    # never written -> "never" (same shape as any other job that's never run)
+    r = {c.key: c for c in evaluate(now, {})}
+    assert r["unprotected_positions"].status == "never", r["unprotected_positions"]
+    assert r["unprotected_positions"].alertable
+    # fresh, nothing unprotected, snapshot not suspect -> ok
+    r = {c.key: c for c in evaluate(now, {"unprotected_positions": (fresh, (), False)})}
+    assert r["unprotected_positions"].status == "ok", r["unprotected_positions"]
+    assert r["unprotected_positions"].healthy
+    # a genuinely unprotected holding -> loud, distinct status. COUNT only, no
+    # symbol name: this Check.detail flows verbatim into scripts/health_check.py's
+    # shared ops ntfy push AND a PUBLIC GitHub issue (--open-issue) under a
+    # stated "job names/ages only, never positions" contract — the symbol-naming
+    # alert belongs on market_monitor's own private notify() push instead.
+    r = {c.key: c for c in evaluate(
+        now, {"unprotected_positions": (fresh, ("TSLA",), False)})}
+    c = r["unprotected_positions"]
+    assert c.status == "unprotected" and "1 position" in c.detail, c
+    assert "TSLA" not in c.detail, "symbol names must never reach the public issue path"
+    assert c.alertable and not c.healthy, c
+    # a well-formed empty snapshot the book didn't expect -> distinct softer
+    # finding ("check the snapshot"), not conflated with the unprotected case
+    r = {c.key: c for c in evaluate(
+        now, {"unprotected_positions": (fresh, (), True)})}
+    c = r["unprotected_positions"]
+    assert c.status == "empty_snapshot" and "snapshot" in c.detail, c
+    assert c.alertable and not c.healthy, c
+    assert c.status != "unprotected", "empty-snapshot and unprotected are distinct findings"
+    # stale artifact overrides content — an old "all clear" is not evidence of
+    # CURRENT protection, so it must not read "ok" just because it once was
+    old = now - dt.timedelta(days=10)
+    r = {c.key: c for c in evaluate(now, {"unprotected_positions": (old, (), False)})}
+    assert r["unprotected_positions"].status == "stale", r["unprotected_positions"]
 
     # healthy property tracks status
     assert Check("k", "l", now, "ok", "").healthy

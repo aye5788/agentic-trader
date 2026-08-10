@@ -241,9 +241,12 @@ CRON_SUBSTRINGS = {
 }
 
 # health.SPECS keys that are legitimately NOT cron lines:
-#   monitor       -> systemd service `agentic-monitor` (deploy/agentic-monitor.service)
-#   adaptive_tune -> GitHub Actions workflow (.github/workflows/adaptive-tune.yml)
-NOT_CRON = {"monitor", "adaptive_tune"}
+#   monitor               -> systemd service `agentic-monitor` (deploy/agentic-monitor.service)
+#   adaptive_tune         -> GitHub Actions workflow (.github/workflows/adaptive-tune.yml)
+#   unprotected_positions -> written by that same systemd service every
+#                            check_once() tick (scripts/market_monitor.py), not a
+#                            separately-scheduled job of its own
+NOT_CRON = {"monitor", "adaptive_tune", "unprotected_positions"}
 
 
 def check_scheduled_jobs_armed(root: pathlib.Path) -> list[str]:
