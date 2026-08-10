@@ -198,12 +198,15 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
     """Set YOUR stop and take-profit for a position. `reason` is required.
 
     This WRITES to the override file the monitor merges every poll -- it does
-    NOT force the monitor to act on it. scripts/market_monitor.py's
-    apply_overrides() is stricter-only: your stop is applied only if it RAISES
-    the thesis's current stop, and your target is applied only if its count
-    matches the thesis's existing targets and it LOWERS every one. If the
-    symbol has no thesis at all, the monitor is not watching it and NEITHER
-    level is enforced no matter what you set here.
+    NOT force the monitor to act on it. scripts/market_monitor.py only ever
+    looks at a symbol's overrides if it is in the monitor's `held` set, which
+    requires: a thesis with target_weight > 0 and a stop (the BOOK filter),
+    AND that the position is actually owned per the broker snapshot (the
+    OWNERSHIP filter) -- a name in tonight's book whose buy has not filled yet
+    is invisible to the monitor no matter what levels you set here. Within
+    that set, apply_overrides() is stricter-only: your stop is applied only if
+    it RAISES the thesis's current stop, and your target is applied only if
+    its count matches the thesis's existing targets and it LOWERS every one.
 
     Read the `enforcement` object in the response before assuming a position is
     protected -- `ok: true` only means the write succeeded, not that either
@@ -225,9 +228,15 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
             if str(t.symbol).strip().upper() == sym:
                 thesis = t
                 break
+
+    owned_set = decide.load_owned()
+    owned = None if owned_set is None else (sym in owned_set)
+
     enforcement = decide.evaluate_enforcement(
         stop=merged[sym]["stop"], target=merged[sym].get("target"),
         has_thesis=thesis is not None,
+        target_weight=getattr(thesis, "target_weight", None),
+        owned=owned,
         current_stop=getattr(thesis, "stop", None),
         current_targets=list(getattr(thesis, "targets", []) or []) if thesis else None,
     )
@@ -260,9 +269,11 @@ def _selftest() -> None:
     from research_store.models import Thesis, ResearchProduct
 
     orig_overrides = decide.OVERRIDES
+    orig_rh_positions = decide.RH_POSITIONS
     orig_read_current = globals()["read_current"]
     with tempfile.TemporaryDirectory() as td:
         decide.OVERRIDES = Path(td) / "overrides.json"
+        decide.RH_POSITIONS = Path(td) / "positions.json"
         try:
             # 1) symbol with no thesis at all -> neither level enforced, and the
             #    response says so (the unprotected-position case).
@@ -273,20 +284,30 @@ def _selftest() -> None:
             assert r["enforcement"]["target"]["enforced"] is False, r
             assert "no thesis" in r["enforcement"]["stop"]["note"], r
 
-            # thesis on file for NVDA: stop=100, one target=120
-            th = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0, targets=[120.0])
+            # broker snapshot: NVDA and MU actually held (qty > 0). Every
+            # scenario below that should reach the enforced/not-enforced
+            # arithmetic uses a symbol that IS in this set, so ownership is
+            # not what's under test there.
+            decide.RH_POSITIONS.write_text(json.dumps(
+                {"positions": {"NVDA": {"qty": 10}, "MU": {"qty": 5}}}))
+
+            # thesis on file for NVDA: stop=100, one target=120, held (weight>0)
+            th = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
+                       targets=[120.0], target_weight=0.1)
             globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th])
 
             # 2) stop LOOSER than the thesis's current stop -> not enforced.
             r = json.loads(set_levels("NVDA", 90.0, 0.0, "test: looser stop"))
             assert r["enforcement"]["stop"]["enforced"] is False, r
 
-            # 3) stop STRICTER (higher) -> enforced.
+            # 3) stop STRICTER (higher) -> enforced. NVDA IS held per the
+            #    snapshot above, so this is the genuinely-watched case.
             r = json.loads(set_levels("NVDA", 108.0, 0.0, "test: stricter stop"))
             assert r["enforcement"]["stop"]["enforced"] is True, r
 
             # 4) target count MISMATCHES the thesis's existing targets -> not enforced.
-            th2 = Thesis(symbol="MU", rank=2, verdict="buy", stop=50.0, targets=[60.0, 70.0])
+            th2 = Thesis(symbol="MU", rank=2, verdict="buy", stop=50.0,
+                        targets=[60.0, 70.0], target_weight=0.1)
             globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th2])
             r = json.loads(set_levels("MU", 45.0, 55.0, "test: target count mismatch"))
             assert r["enforcement"]["target"]["enforced"] is False, r
@@ -298,10 +319,88 @@ def _selftest() -> None:
             assert r["enforcement"]["target"]["enforced"] is True, r
         finally:
             decide.OVERRIDES = orig_overrides
+            decide.RH_POSITIONS = orig_rh_positions
             globals()["read_current"] = orig_read_current
     print("selftest OK: set_levels() reports actual enforcement (no-thesis, looser-stop, "
           "stricter-stop, target-count-mismatch, target-lowers) -- never a bare ok:true, "
           "and never touched the live overrides.json")
+
+    # --- coverage for the finding this fix closes: set_levels() must consult
+    # broker ownership too, not just the thesis, or it falsely claims
+    # enforcement for a symbol the monitor never looks at ---
+    orig_overrides = decide.OVERRIDES
+    orig_rh_positions = decide.RH_POSITIONS
+    orig_read_current = globals()["read_current"]
+    with tempfile.TemporaryDirectory() as td:
+        decide.OVERRIDES = Path(td) / "overrides.json"
+        decide.RH_POSITIONS = Path(td) / "positions.json"
+        try:
+            # snapshot only lists NVDA as held -- TSLA is confirmed NOT held.
+            decide.RH_POSITIONS.write_text(json.dumps(
+                {"positions": {"NVDA": {"qty": 10}}}))
+
+            # 6) THE REVIEWER'S CASE: a thesis for a symbol the broker
+            #    snapshot does not list. Book filter passes (weight>0, has a
+            #    stop) but the position isn't held -> neither level enforced,
+            #    with a note distinct from "no thesis".
+            th_tsla = Thesis(symbol="TSLA", rank=3, verdict="buy", stop=200.0,
+                             targets=[250.0], target_weight=0.1)
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th_tsla])
+            r = json.loads(set_levels("TSLA", 210.0, 240.0, "test: not held"))
+            assert r["enforcement"]["stop"]["enforced"] is False, r
+            assert r["enforcement"]["target"]["enforced"] is False, r
+            assert "not currently held" in r["enforcement"]["stop"]["note"], r
+            assert "no thesis" not in r["enforcement"]["stop"]["note"], r
+
+            # A genuinely held, watched symbol in the SAME snapshot still
+            # reports enforced: true where the arithmetic says so.
+            th_nvda = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
+                             targets=[120.0], target_weight=0.1)
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th_nvda])
+            r = json.loads(set_levels("NVDA", 108.0, 0.0, "test: held and watched"))
+            assert r["enforcement"]["stop"]["enforced"] is True, r
+
+            # 7) held (owned=True) but target_weight == 0 -> book filter
+            #    excludes it -> not enforced.
+            decide.RH_POSITIONS.write_text(json.dumps(
+                {"positions": {"AAPL": {"qty": 3}}}))
+            th_zero_w = Thesis(symbol="AAPL", rank=4, verdict="buy", stop=150.0,
+                               targets=[180.0], target_weight=0.0)
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th_zero_w])
+            r = json.loads(set_levels("AAPL", 160.0, 170.0, "test: zero weight"))
+            assert r["enforcement"]["stop"]["enforced"] is False, r
+            assert "target_weight" in r["enforcement"]["stop"]["note"], r
+
+            # 8) held (owned=True) but thesis carries NO stop -> book filter
+            #    excludes it -> not enforced.
+            decide.RH_POSITIONS.write_text(json.dumps(
+                {"positions": {"MSFT": {"qty": 2}}}))
+            th_no_stop = Thesis(symbol="MSFT", rank=5, verdict="buy", stop=None,
+                                targets=[300.0], target_weight=0.1)
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th_no_stop])
+            r = json.loads(set_levels("MSFT", 250.0, 260.0, "test: thesis has no stop"))
+            assert r["enforcement"]["stop"]["enforced"] is False, r
+            assert "no stop" in r["enforcement"]["stop"]["note"], r
+
+            # 9) ownership INDETERMINATE (no positions.json at all, torn read)
+            #    -> the monitor fails open and still watches a book-filtered
+            #    thesis -> enforcement follows the normal arithmetic, but the
+            #    note must flag that ownership was never confirmed.
+            decide.RH_POSITIONS.unlink()
+            th_indet = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
+                              targets=[120.0], target_weight=0.1)
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th_indet])
+            r = json.loads(set_levels("NVDA", 108.0, 0.0, "test: ownership indeterminate"))
+            assert r["enforcement"]["stop"]["enforced"] is True, r
+            assert "could not be verified" in r["enforcement"]["stop"]["note"], r
+        finally:
+            decide.OVERRIDES = orig_overrides
+            decide.RH_POSITIONS = orig_rh_positions
+            globals()["read_current"] = orig_read_current
+    print("selftest OK: set_levels() also consults broker ownership, not just the "
+          "thesis (not-held, zero-weight, no-stop, ownership-indeterminate, "
+          "genuinely-held-and-watched) -- and never touched the live "
+          "overrides.json or positions.json")
 
 
 if __name__ == "__main__":

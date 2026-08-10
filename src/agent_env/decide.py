@@ -55,24 +55,47 @@ def merge_levels(existing: dict, symbol: str, stop, target, reason: str, ts: str
     return out
 
 
-def evaluate_enforcement(stop: float, target, has_thesis: bool,
-                         current_stop, current_targets) -> dict:
+def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
+                         owned, current_stop, current_targets) -> dict:
     """Report what scripts/market_monitor.py's apply_overrides() will ACTUALLY do
-    with this stop/target at the next poll, given the symbol's thesis (or lack of
-    one). This does not enforce anything itself -- it mirrors that function's
-    logic exactly so the report can never drift from the real behaviour:
+    with this stop/target at the next poll. This does not enforce anything
+    itself -- it mirrors the stop/target arithmetic of apply_overrides() AND
+    the enclosing `held`-set construction that gates whether apply_overrides()
+    ever looks at this symbol at all, so the report can never drift from the
+    real behaviour:
 
-      - stop: applied only if the symbol has a thesis, that thesis has a stop
-        set, and the new stop RAISES it. A looser stop is silently ignored.
-      - target: applied only if the symbol has a thesis, `target` is not None,
-        and the resulting one-element list matches the LENGTH of the thesis's
-        existing targets list (only ever true for a thesis with exactly one
-        target) AND lowers it. Any count mismatch is silently ignored.
-      - no thesis at all -> the monitor is not watching this symbol -> NEITHER
-        level is enforced, regardless of what was just written.
+        held = {t.symbol: t for t in prod.theses if t.target_weight > 0 and t.stop}
+        owned = owned_symbols(_load(RH_POSITIONS, None))
+        if owned is not None:
+            held = {s: t for s, t in held.items() if s in owned}
+        held = apply_overrides(held, overrides)
+
+    So a level can be enforced only if ALL of these hold:
+      - the symbol has a thesis, that thesis's `target_weight` is positive, AND
+        it carries a (truthy) stop -- the monitor's BOOK filter. Any one of
+        these missing means the symbol is never placed in `held` at all, so
+        overrides for it are never evaluated, regardless of what was just
+        written.
+      - the position is currently OWNED per the broker snapshot
+        (research_store/rh/positions.json, the same file and interpretation
+        `owned_symbols()` uses) -- the monitor's OWNERSHIP filter. If ownership
+        is confirmed False, the symbol is dropped from `held` even though the
+        book filter passed, and neither level is enforced. If ownership could
+        not be determined at all (torn/absent snapshot), the monitor FAILS
+        OPEN and does not apply this filter -- watching proceeds as if owned,
+        and the note says so explicitly rather than silently claiming a clean
+        `enforced: true`.
+      - stop: the new stop RAISES the thesis's current stop. A looser stop is
+        silently ignored.
+      - target: `target` is not None and the resulting one-element list
+        matches the LENGTH of the thesis's existing targets list (only ever
+        true for a thesis with exactly one target) AND lowers it. Any count
+        mismatch is silently ignored.
 
     `current_stop`/`current_targets` are the thesis's own stop/targets (None /
-    [] when `has_thesis` is False).
+    [] when `has_thesis` is False). `owned` is a tri-state: True = confirmed
+    held, False = confirmed not held, None = ownership could not be determined
+    (mirrors `owned_symbols()` returning None on a torn/absent snapshot).
     """
     if not has_thesis:
         note = "no thesis for this symbol -- the monitor is not watching it at all"
@@ -82,18 +105,49 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool,
                       {"enforced": False, "note": "no target was set"},
         }
 
-    if current_stop is not None and isinstance(stop, (int, float)) and stop > current_stop:
+    if not (target_weight is not None and target_weight > 0):
+        note = ("thesis target_weight is not positive -- the monitor's book filter "
+                "(target_weight > 0 and stop) excludes this symbol from the watch-list "
+                "entirely, so overrides for it are never evaluated")
+        return {
+            "stop": {"enforced": False, "note": note},
+            "target": {"enforced": False, "note": note} if target is not None else
+                      {"enforced": False, "note": "no target was set"},
+        }
+
+    if not current_stop:
+        note = ("thesis has no stop set -- the monitor's book filter "
+                "(target_weight > 0 and stop) excludes this symbol from the watch-list "
+                "entirely, so overrides for it are never evaluated")
+        return {
+            "stop": {"enforced": False, "note": note},
+            "target": {"enforced": False, "note": note} if target is not None else
+                      {"enforced": False, "note": "no target was set"},
+        }
+
+    if owned is False:
+        note = ("position is not currently held per the broker snapshot -- the "
+                "monitor's ownership filter drops this symbol from the watch-list even "
+                "though it has a valid thesis, so overrides for it are never evaluated")
+        return {
+            "stop": {"enforced": False, "note": note},
+            "target": {"enforced": False, "note": note} if target is not None else
+                      {"enforced": False, "note": "no target was set"},
+        }
+
+    unverified = ("" if owned is True else
+                 " -- ownership could not be verified this call (broker snapshot "
+                 "unreadable); the monitor FAILS OPEN in that state and watches this "
+                 "thesis anyway, but confirm the position is really held")
+
+    if isinstance(stop, (int, float)) and stop > current_stop:
         stop_result = {"enforced": True,
                        "note": f"raises the thesis's current stop ({current_stop}) -- "
-                               "will be applied at the next monitor poll"}
-    elif current_stop is None:
-        stop_result = {"enforced": False,
-                       "note": "thesis has no stop set to compare against -- "
-                               "the monitor cannot verify a tightening, so this is ignored"}
+                               "will be applied at the next monitor poll" + unverified}
     else:
         stop_result = {"enforced": False,
                        "note": f"not stricter than the thesis's current stop ({current_stop}) "
-                               "-- the monitor only tightens stops, so this is ignored"}
+                               "-- the monitor only tightens stops, so this is ignored" + unverified}
 
     if target is None:
         target_result = {"enforced": False, "note": "no target was set"}
@@ -102,17 +156,66 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool,
         if len(cur) != 1:
             target_result = {"enforced": False,
                              "note": f"thesis has {len(cur)} target(s); a single target here "
-                                     "only matches a thesis with exactly 1 target -- ignored"}
+                                     "only matches a thesis with exactly 1 target -- ignored" + unverified}
         elif target < cur[0]:
             target_result = {"enforced": True,
                              "note": f"lowers the thesis's current target ({cur[0]}) -- "
-                                     "will be applied at the next monitor poll"}
+                                     "will be applied at the next monitor poll" + unverified}
         else:
             target_result = {"enforced": False,
                              "note": f"not lower than the thesis's current target ({cur[0]}) "
-                                     "-- the monitor only lowers targets, so this is ignored"}
+                                     "-- the monitor only lowers targets, so this is ignored" + unverified}
 
     return {"stop": stop_result, "target": target_result}
+
+
+RH_POSITIONS = REPO / "research_store" / "rh" / "positions.json"
+
+
+def owned_symbols(snap) -> set | None:
+    """Symbols actually held (qty>0) in an RH positions snapshot dict.
+
+    Exact functional duplicate of scripts/market_monitor.py's owned_symbols() --
+    NOT imported, because that module imports the moomoo SDK at load time and
+    only runs under system /usr/bin/python3 (3.10); this process runs under
+    .venv (3.12) and cannot import it (see CLAUDE.md, "Two Python runtimes").
+    Reads the SAME file (research_store/rh/positions.json) with the SAME
+    interpretation (qty>0) so the tool's claim can never drift from what the
+    monitor actually does -- if that function's logic ever changes, this one
+    must change with it.
+
+    Returns None when the snapshot can't be interpreted (absent / torn / wrong
+    shape) -- the caller then treats ownership as indeterminate, mirroring the
+    monitor's fail-open state.
+    """
+    if not isinstance(snap, dict) or not isinstance(snap.get("positions"), dict):
+        return None
+    out = set()
+    for sym, p in snap["positions"].items():
+        qty = p.get("qty") if isinstance(p, dict) else p   # {qty,...} or legacy dollars
+        try:
+            if float(qty or 0) > 0:
+                out.add(sym)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def load_owned(path: Path | None = None) -> set | None:
+    """Load + interpret the broker-ownership snapshot the monitor itself reads.
+
+    `path` defaults to the live module-level RH_POSITIONS, looked up at CALL
+    time (not bound as a default argument) so tests can redirect reads by
+    patching `decide.RH_POSITIONS` -- same pattern as `write_levels`'s `path`.
+    A missing or unparseable file degrades to None (indeterminate), never an
+    exception -- this is a read path the tool must never crash on.
+    """
+    path = path or RH_POSITIONS
+    try:
+        snap = json.loads(path.read_text()) if path.exists() else None
+    except Exception:
+        snap = None
+    return owned_symbols(snap)
 
 
 OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
@@ -185,42 +288,95 @@ def _selftest() -> None:
     print("selftest OK: merge_levels writes targets as a list (monitor-consumable shape)")
 
     # evaluate_enforcement: report what apply_overrides() will ACTUALLY do,
-    # mirroring its stricter-only-stop / count-matched-lower-only-target logic.
+    # mirroring its stricter-only-stop / count-matched-lower-only-target logic
+    # AND the enclosing held-set construction (book filter + ownership filter).
+    # Every scenario below that should reach the stop/target arithmetic is
+    # given a positive target_weight and owned=True so ownership is not what
+    # gates the result -- isolating exactly the property each test names.
     # 1) no thesis at all -> neither level enforced, and it says why.
     r = evaluate_enforcement(stop=108.0, target=118.0, has_thesis=False,
+                             target_weight=None, owned=None,
                              current_stop=None, current_targets=None)
     assert r["stop"]["enforced"] is False and r["target"]["enforced"] is False, r
     assert "no thesis" in r["stop"]["note"] and "no thesis" in r["target"]["note"], r
 
     # 2) stop LOOSER than the thesis's current stop -> not enforced, reported.
     r = evaluate_enforcement(stop=90.0, target=None, has_thesis=True,
+                             target_weight=0.1, owned=True,
                              current_stop=100.0, current_targets=[120.0])
     assert r["stop"]["enforced"] is False, r
     assert "100.0" in r["stop"]["note"], r
 
     # 3) stop STRICTER (higher) than the thesis's current stop -> enforced.
     r = evaluate_enforcement(stop=108.0, target=None, has_thesis=True,
+                             target_weight=0.1, owned=True,
                              current_stop=100.0, current_targets=[120.0])
     assert r["stop"]["enforced"] is True, r
 
     # 4) target count MISMATCHES the thesis's existing targets -> not enforced.
     r = evaluate_enforcement(stop=None, target=110.0, has_thesis=True,
+                             target_weight=0.1, owned=True,
                              current_stop=100.0, current_targets=[120.0, 140.0])
     assert r["target"]["enforced"] is False, r
     assert "2 target" in r["target"]["note"], r
 
     # 5) matching count AND lowers -> enforced.
     r = evaluate_enforcement(stop=None, target=110.0, has_thesis=True,
+                             target_weight=0.1, owned=True,
                              current_stop=100.0, current_targets=[120.0])
     assert r["target"]["enforced"] is True, r
 
     # matching count but does NOT lower -> not enforced.
     r = evaluate_enforcement(stop=None, target=130.0, has_thesis=True,
+                             target_weight=0.1, owned=True,
                              current_stop=100.0, current_targets=[120.0])
     assert r["target"]["enforced"] is False, r
     print("selftest OK: evaluate_enforcement mirrors apply_overrides() exactly "
           "(no-thesis, looser-stop, stricter-stop, target-count-mismatch, "
           "target-lowers)")
+
+    # --- coverage for the finding this fix closes: the held-set construction,
+    # not just the arithmetic, gates enforcement ---
+
+    # 6) thesis passes the book filter (weight>0, has a stop) but the broker
+    #    snapshot confirms the symbol is NOT held -> neither level enforced,
+    #    and the note is distinct from "no thesis" (different operator action).
+    r = evaluate_enforcement(stop=108.0, target=90.0, has_thesis=True,
+                             target_weight=0.1, owned=False,
+                             current_stop=100.0, current_targets=[120.0])
+    assert r["stop"]["enforced"] is False and r["target"]["enforced"] is False, r
+    assert "not currently held" in r["stop"]["note"], r
+    assert "no thesis" not in r["stop"]["note"], r
+
+    # 7) held (owned=True) with a thesis but target_weight == 0 -> the book
+    #    filter (`target_weight > 0 and stop`) excludes it -> not enforced.
+    r = evaluate_enforcement(stop=108.0, target=90.0, has_thesis=True,
+                             target_weight=0.0, owned=True,
+                             current_stop=100.0, current_targets=[120.0])
+    assert r["stop"]["enforced"] is False and r["target"]["enforced"] is False, r
+    assert "target_weight" in r["stop"]["note"], r
+
+    # 8) held (owned=True) with a thesis but NO stop -> the book filter
+    #    excludes it too -> not enforced, distinct note.
+    r = evaluate_enforcement(stop=108.0, target=90.0, has_thesis=True,
+                             target_weight=0.1, owned=True,
+                             current_stop=None, current_targets=[120.0])
+    assert r["stop"]["enforced"] is False and r["target"]["enforced"] is False, r
+    assert "no stop" in r["stop"]["note"], r
+
+    # 9) ownership INDETERMINATE (torn/absent broker snapshot) -> the monitor
+    #    fails open and still watches a book-filtered thesis, so enforcement
+    #    follows the normal arithmetic -- but the note must say plainly that
+    #    ownership was never confirmed, not silently claim a clean result.
+    r = evaluate_enforcement(stop=108.0, target=None, has_thesis=True,
+                             target_weight=0.1, owned=None,
+                             current_stop=100.0, current_targets=[120.0])
+    assert r["stop"]["enforced"] is True, r
+    assert "could not be verified" in r["stop"]["note"], r
+    print("selftest OK: evaluate_enforcement also mirrors the held-set "
+          "construction (book filter: target_weight>0 and stop; ownership "
+          "filter: not-held vs indeterminate-fails-open) -- not just the "
+          "stop/target arithmetic")
 
 
 if __name__ == "__main__":
