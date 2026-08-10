@@ -248,6 +248,26 @@ def write_levels(symbol: str, stop, target, reason: str, ts: str,
     return merged
 
 
+def decision_entry(symbol: str, action: str, reason: str, ts: str) -> dict:
+    """Build the journal event for one agent decision. Pure.
+
+    Every field is required. An action with no reason is exactly the thing that
+    makes a later review impossible.
+    """
+    sym = str(symbol or "").strip().upper()
+    act = str(action or "").strip().lower()
+    why = str(reason or "").strip()
+    if not sym:
+        raise ValueError("symbol is required")
+    if not act:
+        raise ValueError("action is required")
+    if not why:
+        raise ValueError("reason is required: an action with no stated why cannot "
+                         "be reviewed")
+    return {"event": "agent_decision", "ts": ts, "symbol": sym,
+            "action": act, "reason": why}
+
+
 def _selftest() -> None:
     base = {"AAA": {"stop": 10.0, "target": 20.0, "reason": "old", "ts": "t0"}}
     out = merge_levels(base, "BBB", 5.0, 9.0, "broke out on volume", "t1")
@@ -377,6 +397,20 @@ def _selftest() -> None:
           "construction (book filter: target_weight>0 and stop; ownership "
           "filter: not-held vs indeterminate-fails-open) -- not just the "
           "stop/target arithmetic")
+
+    # decision_entry: every decision must carry a reason (pure builder for
+    # journal events)
+    e = decision_entry("aaa", "OPEN", "strongest score, terrain supports a 3s target", "t1")
+    assert e["event"] == "agent_decision" and e["symbol"] == "AAA", e
+    assert e["action"] == "open" and e["ts"] == "t1", e
+    assert e["reason"].startswith("strongest score"), e
+    for bad in [("AAA", "open", ""), ("AAA", "", "r"), ("", "open", "r")]:
+        try:
+            decision_entry(*bad, "t")
+            raise AssertionError(f"should have rejected {bad}")
+        except ValueError:
+            pass
+    print("selftest OK: merge_levels is pure, reason mandatory, levels sane")
 
 
 if __name__ == "__main__":

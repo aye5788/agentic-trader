@@ -21,6 +21,7 @@ from mcp.server.fastmcp import FastMCP   # noqa: E402
 
 import marks                                    # noqa: E402
 from research_store import read_current         # noqa: E402
+from research_store import store                # noqa: E402
 from agent_env import state                           # noqa: E402  sibling module
 from agent_env import screen                          # noqa: E402  sibling module
 from agent_env import terrain as terrain_mod          # noqa: E402  sibling module
@@ -242,6 +243,25 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
     )
     return json.dumps({"ok": True, "symbol": sym, "written": merged[sym],
                        "enforcement": enforcement}, indent=2)
+
+
+@mcp.tool()
+def record_decision(symbol: str, action: str, reason: str) -> str:
+    """Record a decision and WHY, to the append-only journal.
+
+    Call this for anything you decide, including deciding NOT to act — a
+    considered pass is a decision, and a later session cannot tell the difference
+    between 'ruled this out' and 'never looked' unless you say so.
+
+    action is free text: open, add, trim, exit, hold, skip, tighten_stop, …
+    """
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        entry = decide.decision_entry(symbol, action, reason, ts)
+    except ValueError as e:
+        return json.dumps({"ok": False, "error": str(e)}, indent=2)
+    store.append_journal(entry)
+    return json.dumps({"ok": True, "recorded": entry}, indent=2)
 
 
 def _selftest() -> None:
