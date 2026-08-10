@@ -4,7 +4,7 @@
 
 **Goal:** Give the deployed agent a charter it cannot be surprised by, a tool surface it cannot escape, and a gate it cannot bypass — replacing `prompts/fast_loop.md`'s procedural "you are the hands, not the brain" framing.
 
-**Architecture:** A static charter rendered from the constants that enforce it, plus a per-session facts brief gathered *after* a `flock` is held. Sessions run as `claude -p` children with **no built-in tools at all** (`--tools ""`) and an explicit MCP allowlist. A `PreToolUse` hook validates every order before placement. A SHA-256 tripwire proves the capability removal held.
+**Architecture:** A static charter rendered from the constants that enforce it, plus a per-session facts brief gathered *after* a `flock` is held. NEW sessions run as `claude -p` children with **no built-in tools at all** (`--tools ""`) and an explicit MCP allowlist. LEGACY loops keep the Bash they need but lose arbitrary write and secret read. A `PreToolUse` hook validates every order. A SHA-256 tripwire proves the capability removal held.
 
 **Tech Stack:** Python 3.12 (`.venv`) except moomoo paths; `fcntl.flock`; Claude Code CLI 2.x; FastMCP (`src/agent_env/server.py`, 29 tools); Robinhood MCP (10 allowlisted tools).
 
@@ -12,228 +12,156 @@
 
 - **Execution is Robinhood only, `agentic_allowed=true` only.** Every other account is read-only. moomoo is DATA; it can trade via `unlock_trade` and this repo never calls it.
 - **This is live money.** Never anchor on account size; judge risk by mechanism and consequence.
+- **⚠️ THE LEGACY LOOPS ARE LIVE AND ARMED.** `run_risk_review.sh` runs 12:00 and 15:45 ET weekdays and places real trades; `run_fast_loop.sh` runs 10:00 ET. **`--tools ""` MUST NOT be applied to them** — all three prompts drive `python3 scripts/*.py` through Bash, so removing Bash breaks them silently in the safe-looking direction (no trades, looks like a quiet day). The full lockdown belongs to the NEW session runner (Task 7) only.
+- **Never deploy a change to a `run_*.sh` within 30 minutes of its cron time.** Check `date` against `deploy/crontab.template` before touching one.
 - **`ANTHROPIC_API_KEY` must stay unset.** `deploy/*.sh` refuse to run if set (billing footgun).
 - **Secrets never leave the box.** Never print `.env` or `secrets/`.
 - **`src/repo_checks.py` output is published verbatim into a PUBLIC GitHub issue.** A failure message may contain ONLY a `file:line`, fixed prose written in that module, or an identifier from its own constants. Never interpolate scanned file content.
 - **Check contract:** `def check_<name>(root: pathlib.Path) -> list[str]`, empty list = pass, never raises/prints/exits. Append to the `CHECKS` tuple at `src/repo_checks.py:967`.
 - **Every commit gated on `bash deploy/run_selftests.sh` exiting 0.** Do not commit on a red suite.
-- **`gates()` WRITES `research_store/governance/state.json`** via `update_peak` (`src/governance.py:206 → 113 → 132 → 77`). Never call it from a hook or a read-only path. Write-free: `kill_switch_active` (57), `halt_entries_active` (62), `live_approved` (68), `vet_plan` (383), `liquidity_ok` (268), `assert_agentic_account` (144), `mandate_action` (312).
-- **Model pinned:** `--model claude-opus-4-8` (as in `deploy/run_fast_loop.sh:22`). Do not ride the box default.
+- **`gates()` WRITES `research_store/governance/state.json`** via `update_peak` (`src/governance.py:206 → 113 → 132 → 77`). Never call it from a hook. Write-free: `kill_switch_active` (57), `halt_entries_active` (62), `live_approved` (68), `vet_plan` (383), `liquidity_ok` (268), `assert_agentic_account` (144), `mandate_action` (312).
+- **Model pinned:** `--model claude-opus-4-8`.
 
 ---
 
-## Task 1: Lock down the tool surface (SHIP FIRST — closes a live exposure)
+## Task 1: Revoke arbitrary write and secret read from the legacy loops (SHIP FIRST)
 
-Today all three headless loops run `claude -p --model claude-opus-4-8 "$(cat prompts/…)"` with **no tool restrictions**, and `.claude/settings.json` grants bare `Read`, bare `Write`, and `Bash(.venv/bin/python *)`. That is arbitrary code execution and credential read access, three times per weekday. The reference system measured that `Bash(python3:*)` alone makes the whole tree writable with no Edit rule present.
+**This does NOT remove Bash.** All three legacy prompts need it. What it removes is the part with no legitimate use: bare `Write` (any file, including `config/mandate.toml` and `src/governance.py`), and read access to `.env`/`secrets/`.
+
+Current state, verified: `.claude/settings.json` grants bare `Read`, bare `Write`, and `Edit(docs/OPSLOG.md)`; `.claude/settings.local.json` adds `Bash(.venv/bin/python *)` and `Bash(/opt/agentic-trader/.venv/bin/python *)` — wildcards that are arbitrary code execution. No `deny` rules exist anywhere and no `defaultMode` is set.
 
 **Files:**
-- Create: `deploy/session_tools.sh`
-- Modify: `deploy/run_fast_loop.sh:22`, `deploy/run_risk_review.sh:23`, `deploy/run_newsletter.sh:20`
-- Modify: `src/repo_checks.py` (new check + `CHECKS` tuple at :967 + selftest)
+- Modify: `.claude/settings.json` (remove bare `Write`; add `deny`)
+- Modify: `.claude/settings.local.json` (remove the two python wildcards)
+- Modify: `src/repo_checks.py` (new check + `CHECKS` at :967 + selftest)
 
 **Interfaces:**
-- Produces: `deploy/session_tools.sh` exporting `SESSION_TOOL_ARGS` (a bash array) consumed by every `run_*.sh`.
-- Produces: `check_headless_tool_lockdown(root) -> list[str]` appended to `CHECKS`.
+- Produces: `check_settings_deny_secrets(root) -> list[str]` appended to `CHECKS`.
 
-- [ ] **Step 1: Write the failing repo check test**
+- [ ] **Step 1: Confirm no loop is due within 30 minutes**
 
-Add to `src/repo_checks.py` `_selftest()`, after the last existing banner:
+Run: `date "+%H:%M %Z"` and compare against `deploy/crontab.template:41,57,58`.
+If within 30 minutes of 10:00, 12:00 or 15:45 ET, **STOP and wait.**
+
+- [ ] **Step 2: Write the failing repo check test**
+
+Add to `src/repo_checks.py` `_selftest()`:
 
 ```python
-    # -------------------- check 7: check_headless_tool_lockdown --------------------
+    # -------------------- check 7: check_settings_deny_secrets --------------------
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        _write(root, "deploy/run_fast_loop.sh",
-               'claude -p --model claude-opus-4-8 "$(cat prompts/fast_loop.md)"\n')
-        out = check_headless_tool_lockdown(root)
-        assert any("run_fast_loop.sh" in f and "--tools" in f for f in out), out
+        _write(root, ".claude/settings.json",
+               '{"permissions": {"allow": ["Read", "Write"]}}')
+        out = check_settings_deny_secrets(root)
+        assert any("Write" in f for f in out), out
+        assert any(".env" in f for f in out), out
 
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        _write(root, "deploy/run_fast_loop.sh",
-               'source deploy/session_tools.sh\n'
-               'claude -p --model claude-opus-4-8 "${SESSION_TOOL_ARGS[@]}" "$BRIEF"\n')
-        _write(root, "deploy/session_tools.sh",
-               'SESSION_TOOL_ARGS=(--tools "" --permission-mode dontAsk)\n')
-        assert check_headless_tool_lockdown(root) == []
+        _write(root, ".claude/settings.json",
+               '{"permissions": {"allow": ["Read"], '
+               '"deny": ["Read(./.env)", "Read(./secrets/**)", "Write"]}}')
+        assert check_settings_deny_secrets(root) == []
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [ ] **Step 3: Run to verify it fails**
 
 Run: `.venv/bin/python src/repo_checks.py --selftest`
-Expected: `NameError: name 'check_headless_tool_lockdown' is not defined`
+Expected: `NameError: name 'check_settings_deny_secrets' is not defined`
 
-- [ ] **Step 3: Implement the check**
-
-Add above the `CHECKS` tuple in `src/repo_checks.py`:
+- [ ] **Step 4: Implement the check**
 
 ```python
-_CLAUDE_INVOKE_RE = re.compile(r"^\s*claude\s+-p\b")
+_REQUIRED_DENIES = ("Read(./.env)", "Read(./secrets/**)", "Write")
 
 
-def check_headless_tool_lockdown(root: pathlib.Path) -> list[str]:
-    """Every headless `claude -p` invocation must restrict its tool surface.
+def check_settings_deny_secrets(root: pathlib.Path) -> list[str]:
+    """Claude settings must DENY secret reads and arbitrary writes.
 
-    THE FAILURE THIS CATCHES: a cron-launched agent with the default tool set
-    holds Bash, Write and Edit. It can rewrite config/mandate.toml, delete the
-    kill switch, or read .env. Measured on the reference system 2026-07-29:
-    granting ANY Edit(...) rule makes the entire cwd tree writable, and
-    Bash(python3:*) wrote into the repo with no Edit rule present at all. Prose
-    in a prompt does not constrain a capability that exists.
+    THE FAILURE THIS CATCHES: the cron loops run headless with whatever these
+    files allow. Bare `Write` lets an agent overwrite config/mandate.toml or
+    src/governance.py -- its own guardrails. Unscoped `Read` reaches .env. Deny
+    rules override allow rules, so an explicit deny is the only durable control;
+    an allowlist that merely omits something reopens the moment anyone adds a
+    broad rule.
 
-    The rule: a line invoking `claude -p` must pass `--tools` (to close the
-    built-in surface) and `--permission-mode` (so an unlisted tool is refused
-    rather than hanging on a prompt nobody can answer).
-
-    WHAT THIS DOES NOT COVER: it does not evaluate the resulting permission set,
-    verify the MCP allowlist is correct, or read .claude/settings.json. It
-    asserts the flags are present, not that their values are right. A settings
-    file granting bare Write is invisible here.
+    WHAT THIS DOES NOT COVER: it does not evaluate the effective permission set,
+    does not inspect ~/.claude/settings.json (outside the repo), and does not
+    police Bash rules -- the legacy prompts legitimately drive python through
+    Bash, and a wildcard there is judged by check_settings_no_exec_wildcard.
     """
     failures: list[str] = []
-    dep = root / "deploy"
-    if not dep.is_dir():
+    path = root / ".claude" / "settings.json"
+    if not path.is_file():
         return failures
-    for path in sorted(dep.glob("run_*.sh")):
-        for lineno, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
-            if not _CLAUDE_INVOKE_RE.match(line):
-                continue
-            if "SESSION_TOOL_ARGS" in line:
-                continue
-            if "--tools" not in line or "--permission-mode" not in line:
-                failures.append(
-                    f"deploy/{path.name}:{lineno} headless `claude -p` runs with "
-                    f"an unrestricted tool surface — no --tools/--permission-mode "
-                    f"and no SESSION_TOOL_ARGS; the agent can edit its own "
-                    f"guardrails and read secrets"
-                )
+    try:
+        data = json.loads(path.read_text(errors="ignore"))
+    except ValueError:
+        return [".claude/settings.json is not valid JSON"]
+    deny = set(data.get("permissions", {}).get("deny") or ())
+    for rule in _REQUIRED_DENIES:
+        if rule not in deny:
+            failures.append(
+                f".claude/settings.json missing required deny rule {rule!r} — "
+                f"a headless loop can write its own guardrails or read secrets"
+            )
     return failures
 ```
 
-Append `check_headless_tool_lockdown,` to the `CHECKS` tuple at `src/repo_checks.py:967`.
+`json` is already imported at the top of `repo_checks.py`. Append `check_settings_deny_secrets,` to `CHECKS` at :967.
 
-- [ ] **Step 4: Run the selftest to verify it passes**
+- [ ] **Step 5: Run to verify it passes**
 
 Run: `.venv/bin/python src/repo_checks.py --selftest`
-Expected: prints the existing selftest OK line, exits 0.
+Expected: exits 0.
 
-- [ ] **Step 5: Create the shared tool arguments**
+- [ ] **Step 6: Apply the settings change**
 
-Create `deploy/session_tools.sh`:
+In `.claude/settings.json`: remove `"Write"` from `allow`, and add:
 
-```bash
-# Shared tool surface for every headless `claude -p` run. Sourced, not executed.
-#
-# `--tools ""` disables EVERY built-in tool (verified: `claude --help` states
-# 'Use "" to disable all tools'). This is an allowlist by construction: no Bash,
-# no Read, no Write, no Edit, no WebFetch exist at all, so the surface cannot
-# silently grow when a new built-in ships. A denylist has the opposite property.
-#
-# `--permission-mode dontAsk` auto-DENIES anything not allowed instead of
-# prompting. Headless there is nobody to answer a prompt, and `default` would
-# hang until the timeout — a silent no-trade day.
-#
-# MCP tools are named individually. Robinhood exposes 53; the agent needs 10.
-# place_option_order is absent, so options are unreachable rather than merely
-# forbidden.
-SESSION_TOOL_ARGS=(
-  --tools ""
-  --permission-mode dontAsk
-  --allowedTools
-    "mcp__agentic-trader__brief"
-    "mcp__agentic-trader__positions"
-    "mcp__agentic-trader__account"
-    "mcp__agentic-trader__performance"
-    "mcp__agentic-trader__mandate_status"
-    "mcp__agentic-trader__halt_status"
-    "mcp__agentic-trader__candidates"
-    "mcp__agentic-trader__universe"
-    "mcp__agentic-trader__leaders"
-    "mcp__agentic-trader__sectors"
-    "mcp__agentic-trader__quote"
-    "mcp__agentic-trader__depth"
-    "mcp__agentic-trader__terrain"
-    "mcp__agentic-trader__earnings"
-    "mcp__agentic-trader__macro"
-    "mcp__agentic-trader__macro_calendar"
-    "mcp__agentic-trader__news"
-    "mcp__agentic-trader__check_order"
-    "mcp__agentic-trader__set_levels"
-    "mcp__agentic-trader__record_decision"
-    "mcp__agentic-trader__research_log"
-    "mcp__agentic-trader__rule_out"
-    "mcp__agentic-trader__revisit"
-    "mcp__agentic-trader__open_question"
-    "mcp__agentic-trader__close_question"
-    "mcp__agentic-trader__wake_register"
-    "mcp__agentic-trader__wake_status"
-    "mcp__agentic-trader__wake_deregister"
-    "mcp__agentic-trader__ping"
-    "mcp__robinhood-trading__get_accounts"
-    "mcp__robinhood-trading__get_equity_positions"
-    "mcp__robinhood-trading__get_portfolio"
-    "mcp__robinhood-trading__get_equity_quotes"
-    "mcp__robinhood-trading__get_equity_orders"
-    "mcp__robinhood-trading__get_realized_pnl"
-    "mcp__robinhood-trading__get_pnl_trade_history"
-    "mcp__robinhood-trading__review_equity_order"
-    "mcp__robinhood-trading__place_equity_order"
-    "mcp__robinhood-trading__cancel_equity_order"
-)
+```json
+"deny": ["Read(./.env)", "Read(./secrets/**)", "Write", "Bash(cat .env*)", "mcp__robinhood-trading__place_option_order"]
 ```
 
-- [ ] **Step 6: Wire it into the three runners**
+In `.claude/settings.local.json`: remove `"Bash(.venv/bin/python *)"` and `"Bash(/opt/agentic-trader/.venv/bin/python *)"`. The specific rules in `settings.json` (`Bash(.venv/bin/python scripts/record_fills.py)` etc.) already cover what the prompts actually run.
 
-In `deploy/run_fast_loop.sh`, replace line 22:
+⚠️ Options are currently blocked only by OMISSION from the allow list. The explicit deny above makes that structural, so a later broad rule cannot silently reopen it.
 
-```bash
-source deploy/session_tools.sh
-claude -p --model claude-opus-4-8 "${SESSION_TOOL_ARGS[@]}" "$(cat prompts/fast_loop.md)"
-```
+- [ ] **Step 7: Verify the legacy loops still work**
 
-Apply the identical change to `deploy/run_risk_review.sh:23` (`prompts/risk_review.md`) and `deploy/run_newsletter.sh:20` (`prompts/newsletter.md`).
+Run: `bash -n deploy/run_fast_loop.sh && bash -n deploy/run_risk_review.sh`
+Then, OUTSIDE the 30-minute window, dry-run the facts step the risk review depends on:
+Run: `/usr/bin/python3 scripts/risk_review.py --facts`
+Expected: writes `research_store/rh/risk_review_facts.json`, exits 0.
 
-⚠️ The newsletter WRITES a file (`newsletter/*.html`) and appends to `docs/OPSLOG.md`. With `--tools ""` it cannot. Before changing `run_newsletter.sh`, confirm whether its write path goes through a tool or a Bash call; if it needs a write, give that runner its own array with a single scoped `Edit(...)` rule and record in the file that the rule does NOT sandbox the tree.
+**Do not simulate a full loop with `claude -p`** — it would place real orders.
 
-- [ ] **Step 7: Verify a locked-down session still reaches its tools**
+- [ ] **Step 8: Watch the next real run**
 
-Run:
-```bash
-cd /opt/agentic-trader && source deploy/session_tools.sh && \
-timeout 180 claude -p --model claude-opus-4-8 "${SESSION_TOOL_ARGS[@]}" \
-  'Call halt_status and reply with only the value of can_buy.'
-```
-Expected: replies `true`. If it reports it cannot call the tool, the allowlist spelling is wrong — fix before proceeding.
-
-- [ ] **Step 8: Verify Bash is genuinely gone**
-
-Run:
-```bash
-cd /opt/agentic-trader && source deploy/session_tools.sh && \
-timeout 180 claude -p --model claude-opus-4-8 "${SESSION_TOOL_ARGS[@]}" \
-  'Run the shell command `id` and report the output.'
-```
-Expected: it states it has no shell/Bash tool available. **It must NOT print a uid line.** If it does, STOP — the lockdown is not in effect and nothing else in this plan is safe to ship.
+After the next scheduled `run_risk_review.sh`, run:
+`tail -30 logs/risk_review.log`
+Expected: the run completes as before. If it reports a missing tool, restore the removed rules immediately (`git checkout .claude/`) and re-plan — a broken risk review fails in the direction that LOOKS quiet.
 
 - [ ] **Step 9: Commit**
 
 ```bash
 bash deploy/run_selftests.sh && .venv/bin/python src/repo_checks.py && \
-git add deploy/session_tools.sh deploy/run_fast_loop.sh deploy/run_risk_review.sh \
-        deploy/run_newsletter.sh src/repo_checks.py && \
-git commit -m "fix(deploy): headless sessions lose Bash, Write and Edit
+git add .claude/settings.json .claude/settings.local.json src/repo_checks.py && \
+git commit -m "fix(settings): headless loops lose arbitrary write and secret read
 
-All three cron loops ran claude -p with NO tool restriction, and
-.claude/settings.json granted bare Read, bare Write and Bash(.venv/bin/python *)
--- arbitrary code execution and credential read access, three times per weekday.
-An agent that can edit its own guardrails has none.
+No deny rules existed anywhere. .claude/settings.json granted bare Read and bare
+Write, and settings.local.json granted Bash(.venv/bin/python *) -- arbitrary code
+execution -- to loops that run three times per weekday. An agent that can edit its
+own guardrails has none.
 
---tools \"\" closes the built-in surface by construction rather than by denylist.
-Measured on the reference system 2026-07-29: ANY Edit(...) rule makes the whole
-cwd tree writable, and Bash(python3:*) wrote into the repo with no Edit rule at
-all. Capability removal is the control.
+Bash is deliberately KEPT: all three legacy prompts drive python3 scripts/*.py
+through it, and removing it would break them in the direction that looks like a
+quiet day. The full --tools \"\" lockdown belongs to the new session runner, which
+needs no shell because everything it needs is an MCP tool.
 
-Verified: halt_status still answers; a request to run a shell command is refused."
+Deny rules override allow rules, so place_option_order is now structurally
+unreachable rather than merely absent from the allowlist."
 ```
 
 ---
@@ -359,7 +287,7 @@ CHANGED, never as clean."
 
 The reference system's rule, paid for once: *"On 2026-07-27 a capability was built and registered on the server while this array did not name it. The tool existed, the session could not see it, and the session reported it had skipped the work — indistinguishable from the capability not existing."*
 
-Task 1's `session_tools.sh` hardcodes 29 tool names. That list will rot the first time a tool is added. This task makes it derived.
+The new session runner (Task 7) needs an MCP allowlist. Hardcoding it would rot the first time a tool is added; this task makes it derived. `deploy/session_tools.sh` is CREATED here, and is consumed only by the new runner — never by the legacy loops, which keep their existing surface (Task 1).
 
 **Files:**
 - Create: `scripts/session_tools.py`
