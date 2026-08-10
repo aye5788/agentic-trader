@@ -1,25 +1,38 @@
 #!/usr/bin/env bash
-# Run every in-repo --selftest under the project venv.
+# Run every in-repo --selftest under the interpreter it actually needs.
 #
-# Why this exists: the scripts need Python 3.11+ (tomllib) and the venv's deps.
-# Invoking them with a bare `python3` (system 3.10) fails on `import tomllib` and
-# looks like a broken test when it's just the wrong interpreter. This pins the
-# venv Python so a pass means the logic is sound, not that the env happened to fit.
+# TWO runtimes, and they are NOT interchangeable:
+#   - .venv/bin/python (3.12) has tomllib (stdlib 3.11+) and every repo dep.
+#     Most modules need this.
+#   - system /usr/bin/python3 (3.10) is the ONLY place the moomoo SDK is
+#     installed. A module that `import moomoo`s at module scope (currently
+#     only scripts/market_monitor.py) CANNOT run under .venv — it fails with
+#     ModuleNotFoundError before a single assertion runs, which used to look
+#     like a broken test when it was just the wrong interpreter. Conversely,
+#     system python3 has no tomllib, so anything reaching strategy.py (via
+#     src/mandate.py etc.) must NOT be run there.
+#   Some modules (scripts/fast_loop.py, scripts/universe_refresh.py) import
+#   moomoo lazily inside a function body, not at module scope, so their
+#   --selftest never touches it and they run fine under .venv.
 #
 # Usage:  deploy/run_selftests.sh        (exit 0 = all passed)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-PY="./.venv/bin/python"
+PY_VENV="./.venv/bin/python"
+PY_SYS="/usr/bin/python3"
 
-if [[ ! -x "$PY" ]]; then
-    echo "FAIL: $PY not found — create the venv first (python3.12 -m venv .venv)" >&2
+if [[ ! -x "$PY_VENV" ]]; then
+    echo "FAIL: $PY_VENV not found — create the venv first (python3.12 -m venv .venv)" >&2
+    exit 2
+fi
+if [[ ! -x "$PY_SYS" ]]; then
+    echo "FAIL: $PY_SYS not found — moomoo-importing selftests cannot run" >&2
     exit 2
 fi
 
-# Scripts that expose a --selftest entrypoint. Add new ones here.
-SELFTESTS=(
-    "scripts/market_monitor.py"
+# Scripts that expose a --selftest entrypoint and run under the project venv.
+VENV_SELFTESTS=(
     "scripts/fast_loop.py"
     "scripts/universe_refresh.py"
     "src/concentration.py"
@@ -27,12 +40,21 @@ SELFTESTS=(
     "src/health.py"
     "scripts/health_check.py"
     "src/repo_checks.py"
+    "src/mandate.py"
+    "src/governance.py"
+    "scripts/record_fills.py"
+)
+
+# Scripts that `import moomoo` at module scope — MUST run under system python3.
+SYS_SELFTESTS=(
+    "scripts/market_monitor.py"
 )
 
 fail=0
-for s in "${SELFTESTS[@]}"; do
-    echo "=== $s --selftest ==="
-    if "$PY" "$s" --selftest; then
+
+for s in "${VENV_SELFTESTS[@]}"; do
+    echo "=== $s --selftest (.venv) ==="
+    if "$PY_VENV" "$s" --selftest; then
         echo "  PASS"
     else
         echo "  FAIL ($s)" >&2
@@ -40,6 +62,29 @@ for s in "${SELFTESTS[@]}"; do
     fi
     echo
 done
+
+for s in "${SYS_SELFTESTS[@]}"; do
+    echo "=== $s --selftest (system python3) ==="
+    if "$PY_SYS" "$s" --selftest; then
+        echo "  PASS"
+    else
+        echo "  FAIL ($s)" >&2
+        fail=1
+    fi
+    echo
+done
+
+# src/research_store/validate.py uses a relative import (`from .models import
+# ...`), so it cannot be invoked as a standalone script — it must be imported
+# as a package member.
+echo "=== src/research_store/validate.py _selftest() (.venv) ==="
+if "$PY_VENV" -c "import sys; sys.path.insert(0,'src'); from research_store import validate; validate._selftest()"; then
+    echo "  PASS"
+else
+    echo "  FAIL (src/research_store/validate.py)" >&2
+    fail=1
+fi
+echo
 
 if [[ "$fail" -ne 0 ]]; then
     echo "SELFTESTS FAILED" >&2
