@@ -21,8 +21,28 @@ from mcp.server.fastmcp import FastMCP   # noqa: E402
 import marks                                    # noqa: E402
 from research_store import read_current         # noqa: E402
 from agent_env import state                           # noqa: E402  sibling module
+import mandate                                  # noqa: E402
+import pandas as pd                             # noqa: E402
 
 mcp = FastMCP("agentic-trader")
+
+EQUITY = REPO / "research_store" / "history" / "equity.jsonl"
+JOURNAL = REPO / "research_store" / "journal.jsonl"
+CLOSES = REPO / "research_store" / "prices" / "closes.parquet"
+
+
+def _outcomes() -> list:
+    if not JOURNAL.exists():
+        return []
+    rows = []
+    for line in JOURNAL.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+    return rows
 
 
 @mcp.tool()
@@ -55,6 +75,30 @@ def account() -> str:
     return json.dumps({k: v.get(k) for k in
                        ("account_number", "account_value", "cash", "invested",
                         "as_of", "marked_at")}, indent=2, default=str)
+
+
+@mcp.tool()
+def mandate_status() -> str:
+    """All four mandate criteria with real numbers and the room left on each.
+
+    Blocking criteria (drawdown, concentration) gate trading. Informational ones
+    (P&L concentration, relative return) judge whether the approach is working and
+    never gate an order. A criterion reporting INSUFFICIENT_DATA is NOT a pass.
+    """
+    v = marks.load()
+    eq = state.equity_series(EQUITY)
+    bench = []
+    if CLOSES.exists():
+        try:
+            spy = pd.read_parquet(CLOSES)["SPY"].dropna().tolist()
+            bench = spy[-len(eq):] if eq else []
+        except Exception:
+            bench = []
+    if len(bench) != len(eq):
+        bench = [0.0] * len(eq)      # misaligned -> criterion 4 reports INSUFFICIENT
+    s = mandate.status(eq, bench, v["positions"], v["account_value"],
+                       _outcomes(), v["as_of"])
+    return json.dumps(s, indent=2, default=str)
 
 
 def _selftest() -> None:

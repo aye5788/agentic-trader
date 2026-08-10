@@ -47,6 +47,23 @@ def holdings(valued: dict, theses: list) -> dict:
     return out
 
 
+def equity_series(path: Path) -> list:
+    """Ordered daily equity closes, oldest first. Skips malformed rows rather
+    than raising — mandate.drawdown() applies its own missing-data discipline."""
+    import json
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line)["value"])
+        except Exception:
+            continue
+    return out
+
+
 def _selftest() -> None:
     import types
     T = lambda s, stop, tgts: types.SimpleNamespace(
@@ -88,6 +105,15 @@ def _selftest() -> None:
     # FIX 2: valued=None (no snapshot yet) must degrade to an empty dict, not raise.
     assert holdings(None, []) == {}
     assert holdings(None, [T("AAA", 55.0, [70.0, 80.0])]) == {}
+
+    import tempfile, json as _json
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / "equity.jsonl"
+        f.write_text('{"date":"2026-08-01","value":100.0}\n'
+                     'not json\n'
+                     '{"date":"2026-08-02","value":95.0}\n')
+        assert equity_series(f) == [100.0, 95.0], equity_series(f)
+        assert equity_series(Path(d) / "absent.jsonl") == []
 
     print("selftest OK: holdings merges marks with agent levels, unwatched visible")
 
