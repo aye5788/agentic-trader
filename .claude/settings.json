@@ -15,12 +15,33 @@
       "Bash(.venv/bin/python scripts/fast_loop.py)",
       "Bash(.venv/bin/python scripts/record_fills.py)",
       "Bash(python3 scripts/record_fills.py)",
+      "Bash(python scripts/record_fills.py)",
+      "Bash(.venv/bin/python scripts/reconcile_ledger.py)",
+      "Bash(python3 scripts/reconcile_ledger.py)",
+      "Bash(.venv/bin/python scripts/record_rotation_outcome.py)",
+      "Bash(.venv/bin/python scripts/letter_facts.py)",
       "Bash(/usr/bin/python3 scripts/fast_loop.py)",
       "Bash(/usr/bin/python3 scripts/risk_review.py --facts)",
       "Bash(/usr/bin/python3 scripts/risk_review.py --apply)",
       "Read",
-      "Edit(docs/OPSLOG.md)"
+      "Edit(docs/OPSLOG.md)",
+      "Write(./research_store/**)"
     ],
-    "deny": ["Read(./.env)", "Read(./secrets/**)", "Write", "Bash(cat .env*)", "mcp__robinhood-trading__place_option_order"]
+    "deny": [
+      "Read(./.env)",
+      "Read(./secrets/**)",
+      "Bash(cat .env*)",
+      "Write(./src/**)",
+      "Write(./scripts/**)",
+      "Write(./config/**)",
+      "Write(./deploy/**)",
+      "Write(./prompts/**)",
+      "Write(./.claude/**)",
+      "Write(./.github/**)",
+      "Write(./research_store/current.json)",
+      "Write(./research_store/journal.jsonl)",
+      "Write(./research_store/archive/**)",
+      "mcp__robinhood-trading__place_option_order"
+    ]
   }
 }

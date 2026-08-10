@@ -127,8 +127,10 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
    journal is still incomplete. Do not suppress its exit code.
 9b. **Record rotation-close outcomes (the learning label).** For each symbol you
     sold to a FULL close this run (position now zero — a rotation OUT of the book;
-    the stop/take-profit path is handled separately by `prompts/exit.md`), compute
-    and journal its outcome. In one short `.venv/bin/python` snippet:
+    the stop/take-profit path is handled separately by `prompts/exit.md`), journal
+    its outcome. Write `research_store/rh/rotation_closes.json` — a JSON array of
+    `{"symbol","entry_price","exit_price","exit_date","exit_reason"}` — then run
+    `.venv/bin/python scripts/record_rotation_outcome.py`:
       - entry_price = that symbol's average cost from the **step-4** positions
         snapshot — the PRE-sell cost. Step 8 overwrote `positions.json` to
         post-sell state and drops fully-closed names, so use the value you saw
@@ -136,13 +138,13 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
       - exit_price  = the sell's `average_price` from step 8's `get_equity_orders`.
       - exit_date   = today (YYYY-MM-DD); exit_reason = `"rebalanced"` (or
         `"regime_off"` if the whole book was closed because regime flipped off).
-      `from research_store import record_rotation_outcome` (add `src` to sys.path),
-      then `record_rotation_outcome(symbol, entry_price=<pre-sell cost>,
-      exit_price=<sell avg>, exit_date="<YYYY-MM-DD>", now_iso="<now iso>")`. It
-      finds the symbol's last-held archived thesis, computes the outcome, and
-      attaches it to that thesis by `decision_id` + appends an `outcome` event.
-      Idempotent (safe to re-run). Partial (trim) sells: skip — only FULL closes
-      get an outcome (same first-cut rule as exit.md 7c). Do NOT hand-edit
-      `journal.jsonl`; this helper is the only writer.
+      The script finds each symbol's last-held archived thesis, computes the
+      outcome, and attaches it to that thesis by `decision_id` + appends an
+      `outcome` event. Idempotent (safe to re-run). A symbol it reports
+      `UNANCHORED` had no held thesis to attach to — report it, do not retry it.
+      Nothing fully closed this run → skip this step entirely (do not write an
+      empty file). Partial (trim) sells: skip — only FULL closes get an outcome
+      (same first-cut rule as exit.md 7c). Do NOT hand-edit `journal.jsonl` and do
+      NOT write your own python snippet; this helper is the only writer.
 10. **Report** concisely: account value, orders placed, any blocked/failed, and
     the resulting book. That is your entire output.

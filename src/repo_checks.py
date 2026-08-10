@@ -965,38 +965,215 @@ def check_workflow_toplevel_indent(root: pathlib.Path) -> list[str]:
 
 # ---------------------------------------------------------------- check 7
 
-_REQUIRED_DENIES = ("Read(./.env)", "Read(./secrets/**)", "Write")
+# The two settings files a checkout can carry. `settings.local.json` is
+# git-ignored, so it is absent on a runner and present on the droplet — every
+# reader below treats "missing" as clean and only judges what is there.
+_SETTINGS_JSON = ".claude/settings.json"
+_SETTINGS_LOCAL_JSON = ".claude/settings.local.json"
+_SETTINGS_FILES = (_SETTINGS_JSON, _SETTINGS_LOCAL_JSON)
+
+# Deny rules must be PATH-SCOPED, not blanket. A bare `Write` deny cannot be
+# exempted by any allow rule (deny always wins), and the three legacy prompts
+# legitimately write JSON into research_store/ — so a blanket deny does not stop
+# the loops, it makes them run with a stale snapshot and place wrong orders.
+# What actually has to be unwritable is the guardrail surface: the code that
+# decides and gates trades, the config it reads, the wrappers cron runs, the
+# prompts themselves, the permission files, and the CI that watches all of it.
+_REQUIRED_DENIES = (
+    "Read(./.env)",
+    "Read(./secrets/**)",
+    "Write(./src/**)",
+    "Write(./scripts/**)",
+    "Write(./config/**)",
+    "Write(./deploy/**)",
+    "Write(./prompts/**)",
+    "Write(./.claude/**)",
+    "Write(./.github/**)",
+    # research_store/ is otherwise WRITABLE — every prompt's snapshots, fills and
+    # decisions land there. These three are the exceptions: current.json is the
+    # target book the fast loop diffs against (writable = the agent picks its own
+    # trades), and journal.jsonl + archive/ are the append-only ledger every
+    # prompt is already told never to hand-edit. Deterministic code still writes
+    # all three through research_store.store — a deny binds the Write TOOL only.
+    "Write(./research_store/current.json)",
+    "Write(./research_store/journal.jsonl)",
+    "Write(./research_store/archive/**)",
+)
+
+
+def _load_settings(root: pathlib.Path, rel: str) -> tuple[dict | None, list[str]]:
+    """-> (parsed settings mapping or None, failures).
+
+    None means "nothing to judge": the file is absent, or it is valid JSON that
+    is not an object (`[]`, `"x"`, `null`) and therefore carries no permissions.
+    A non-object used to reach `.get` and raise AttributeError, which took down
+    the whole sweep — every other check included — instead of reporting one
+    finding. `rel` is a module constant, so echoing it is publishable.
+    """
+    path = root / rel
+    if not path.is_file():
+        return None, []
+    try:
+        data = json.loads(path.read_text(errors="ignore"))
+    except ValueError:
+        return None, [f"{rel} is not valid JSON"]
+    if not isinstance(data, dict):
+        return None, [
+            f"{rel} is valid JSON but not an object, so it declares no "
+            f"permissions at all — every deny rule this repo relies on is absent"
+        ]
+    return data, []
+
+
+def _permission_list(data: dict, key: str) -> list[str]:
+    """`permissions.<key>` as a list of strings; anything else -> empty.
+
+    Defensive on purpose: these files are edited by hand AND written back
+    automatically by Claude Code's "don't ask again", so any shape can arrive.
+    A malformed section must read as "grants nothing / denies nothing" rather
+    than raise.
+    """
+    perms = data.get("permissions")
+    if not isinstance(perms, dict):
+        return []
+    rules = perms.get(key)
+    if not isinstance(rules, list):
+        return []
+    return [r for r in rules if isinstance(r, str)]
 
 
 def check_settings_deny_secrets(root: pathlib.Path) -> list[str]:
-    """Claude settings must DENY secret reads and arbitrary writes.
+    """Claude settings must DENY secret reads and writes to the guardrail paths.
 
     THE FAILURE THIS CATCHES: the cron loops run headless with whatever these
-    files allow. Bare `Write` lets an agent overwrite config/mandate.toml or
-    src/governance.py -- its own guardrails. Unscoped `Read` reaches .env. Deny
-    rules override allow rules, so an explicit deny is the only durable control;
-    an allowlist that merely omits something reopens the moment anyone adds a
-    broad rule.
+    files allow. An unscoped `Write` lets an agent overwrite config/strategy.toml
+    or src/governance.py -- its own guardrails. Unscoped `Read` reaches .env.
+    Deny rules override allow rules, so an explicit deny is the only durable
+    control; an allowlist that merely omits something reopens the moment anyone
+    adds a broad rule (and Claude Code's "don't ask again" adds them by itself).
+
+    WHY THE DENIES ARE PATH-SCOPED AND NOT A BARE `Write`: see _REQUIRED_DENIES.
+    A bare `Write` deny is unexemptable and breaks the loops in the dangerous
+    direction -- scripts/fast_loop.py still runs, marks.load() has no freshness
+    check, so a refused positions.json write means planning against a STALE book
+    with the place tools still allowed. Wrong orders, not zero orders.
 
     WHAT THIS DOES NOT COVER: it does not evaluate the effective permission set,
     does not inspect ~/.claude/settings.json (outside the repo), and does not
     police Bash rules -- the legacy prompts legitimately drive python through
-    Bash, and a wildcard there is judged by check_settings_no_exec_wildcard.
+    Bash, so a wildcard there is judged by check_settings_no_exec_wildcard below.
+    It reads only .claude/settings.json: settings.local.json is git-ignored and
+    therefore cannot carry a guarantee across a re-clone, so it is not allowed to
+    SATISFY this check (it is still scanned for wildcards by check 8).
+
+    Publishing rule: file name from a module constant, rule text from
+    _REQUIRED_DENIES. Nothing read out of the scanned file is echoed.
     """
-    failures: list[str] = []
-    path = root / ".claude" / "settings.json"
-    if not path.is_file():
+    data, failures = _load_settings(root, _SETTINGS_JSON)
+    if data is None:
         return failures
-    try:
-        data = json.loads(path.read_text(errors="ignore"))
-    except ValueError:
-        return [".claude/settings.json is not valid JSON"]
-    deny = set(data.get("permissions", {}).get("deny") or ())
+    deny = set(_permission_list(data, "deny"))
     for rule in _REQUIRED_DENIES:
         if rule not in deny:
             failures.append(
-                f".claude/settings.json missing required deny rule {rule!r} — "
+                f"{_SETTINGS_JSON} missing required deny rule {rule!r} — "
                 f"a headless loop can write its own guardrails or read secrets"
+            )
+    return failures
+
+
+# ---------------------------------------------------------------- check 8
+
+# Programs that run code they are HANDED rather than doing one fixed job. Matched
+# on basename, so `.venv/bin/python`, `/usr/bin/python3` and `python3.12` all
+# land on the same entry.
+_INTERPRETERS = (
+    "python", "python2", "python3", "python3.10", "python3.11", "python3.12",
+    "bash", "sh", "zsh", "ksh", "dash", "fish",
+    "node", "deno", "bun", "perl", "ruby", "php", "lua", "Rscript",
+    "eval", "exec", "env", "xargs", "nohup", "setsid", "timeout", "nice",
+    "sudo", "doas", "ssh", "docker", "make", "osascript", "awk",
+)
+
+_RULE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\((.*)\)$", re.DOTALL)
+
+
+def _exec_wildcard_reason(rule: str) -> str | None:
+    """-> a label (built only from this module's constants) for why `rule` grants
+    arbitrary code execution, or None if it does not.
+
+    The distinction is the wildcard, not the interpreter. `Bash(python3
+    scripts/fast_loop.py)` is an EXACT command and is exactly what the loops are
+    supposed to have. `Bash(python3 -c ' *)` and `Bash(.venv/bin/python *)` mean
+    "run any program you compose", which is the whole guardrail surface handed
+    back. Both wildcard spellings are recognised: the trailing-space form used in
+    this repo and the documented `Bash(python3:*)` prefix form.
+    """
+    stripped = rule.strip()
+    if stripped == "Bash":
+        return "bare Bash"
+    m = _RULE_RE.match(stripped)
+    if not m or m.group(1) != "Bash":
+        return None
+    body = m.group(2).strip()
+    if body in ("", "*", ":*"):
+        return "Bash(*)"
+    if "*" not in body:
+        return None                       # an exact command — the intended shape
+    first = body.split()[0]
+    prog = first.rsplit("/", 1)[-1].strip("'\"")
+    if prog.endswith(":*"):
+        prog = prog[:-2]
+    prog = prog.rstrip("*")
+    if prog in _INTERPRETERS:
+        return f"interpreter {prog!r} with a wildcard argument"
+    return None
+
+
+def check_settings_no_exec_wildcard(root: pathlib.Path) -> list[str]:
+    """No settings file may ALLOW a Bash rule that runs caller-composed code.
+
+    THE FAILURE THIS CATCHES, and why it is not covered by check 7: deny rules
+    are per-TOOL. `Write(./src/**)` constrains the Write tool and nothing else,
+    so a single `Bash(python3 -c ' *)` allow rule walks straight past it --
+    `python3 -c 'open("src/governance.py","w").write(...)'` writes the guardrail,
+    `python3 -c 'print(open(".env").read())'` prints the secret. Every deny rule
+    in this repo is worth exactly as much as this check. That is why it scans
+    settings.local.json too: it is git-ignored, so it never appears in a diff and
+    never reaches review, AND Claude Code writes "don't ask again" grants back
+    into it automatically -- the wildcard can return without anyone deciding to
+    bring it back.
+
+    WHAT THIS DOES NOT COVER: ~/.claude/settings.json and enterprise/CLI-flag
+    settings (all outside the repo); `--allowedTools` passed on a command line
+    (e.g. .github/workflows/claude.yml, which runs off-box with no broker access);
+    and non-interpreter programs that can still be levered into writing a file
+    (`Bash(cp * )`, `Bash(tee *)`). It targets the shape that actually appeared
+    here and the obvious neighbours -- see _INTERPRETERS.
+
+    Publishing rule: file name from a module constant, the allow-list INDEX (a
+    number), and a reason string assembled from _INTERPRETERS / fixed prose. The
+    interpreter name is echoed only after matching a module constant, so it is a
+    constant of ours, not content from the scanned file. The rule text itself is
+    never echoed -- a Bash rule can embed a path, a host, or a token.
+    """
+    failures: list[str] = []
+    for rel in _SETTINGS_FILES:
+        data, problems = _load_settings(root, rel)
+        failures.extend(problems)
+        if data is None:
+            continue
+        for i, rule in enumerate(_permission_list(data, "allow")):
+            reason = _exec_wildcard_reason(rule)
+            if reason is None:
+                continue
+            failures.append(
+                f"{rel}: permissions.allow entry #{i} grants ARBITRARY code "
+                f"execution ({reason}) — a deny rule is per-tool and does not "
+                f"constrain code run through Bash, so this defeats every "
+                f"Read/Write deny in these files; replace it with the exact "
+                f"command the prompt needs (rule text withheld — this output is "
+                f"published; open the file to see it)"
             )
     return failures
 
@@ -1011,6 +1188,7 @@ CHECKS = (
     check_workflow_toplevel_indent,
     check_no_api_key,
     check_settings_deny_secrets,
+    check_settings_no_exec_wildcard,
 )
 
 
@@ -1793,20 +1971,127 @@ jobs:
         check_workflow_toplevel_indent(REPO)
 
     # -------------------- check 7: check_settings_deny_secrets --------------------
+    _all_denies = json.dumps(list(_REQUIRED_DENIES))
+
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
         _write(root, ".claude/settings.json",
                '{"permissions": {"allow": ["Read", "Write"]}}')
         out = check_settings_deny_secrets(root)
-        assert any("Write" in f for f in out), out
+        assert len(out) == len(_REQUIRED_DENIES), out
+        assert any("Write(./src/**)" in f for f in out), out
         assert any(".env" in f for f in out), out
 
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
         _write(root, ".claude/settings.json",
-               '{"permissions": {"allow": ["Read"], '
-               '"deny": ["Read(./.env)", "Read(./secrets/**)", "Write"]}}')
+               '{"permissions": {"allow": ["Read"], "deny": ' + _all_denies + '}}')
         assert check_settings_deny_secrets(root) == []
+
+    # a BLANKET `Write` deny does not satisfy the path-scoped requirement. It is
+    # not merely weaker -- it is unexemptable, so it stops the loops writing
+    # research_store/ while leaving scripts/fast_loop.py and the RH place tools
+    # armed: stale book in, real orders out. It must still read as FAILING.
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        _write(root, ".claude/settings.json",
+               '{"permissions": {"deny": ["Read(./.env)", "Read(./secrets/**)", '
+               '"Write"]}}')
+        out = check_settings_deny_secrets(root)
+        assert out and all("Write(./" in f for f in out), out
+
+    # valid JSON that is not an object (`[]`, a string, null) must REPORT, not
+    # raise: `.get` on a list is an AttributeError that took down all 8 checks.
+    for payload in ("[]", '"nope"', "null", "3"):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            _write(root, ".claude/settings.json", payload)
+            out = check_settings_deny_secrets(root)
+            assert len(out) == 1 and "not an object" in out[0], (payload, out)
+            # and the aggregator survives it too
+            assert any("not an object" in f for f in checks(root)), payload
+
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        _write(root, ".claude/settings.json", "{not json")
+        out = check_settings_deny_secrets(root)
+        assert len(out) == 1 and "not valid JSON" in out[0], out
+
+    # malformed permissions sections read as "denies nothing", never as a crash
+    for payload in ('{"permissions": []}', '{"permissions": {"deny": "Write"}}',
+                    '{"permissions": {"deny": [1, 2]}}', "{}"):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            _write(root, ".claude/settings.json", payload)
+            assert len(check_settings_deny_secrets(root)) == len(_REQUIRED_DENIES), payload
+
+    # no settings file at all -> clean (a fresh clone before setup)
+    with tempfile.TemporaryDirectory() as d:
+        assert check_settings_deny_secrets(pathlib.Path(d)) == []
+
+    # THE REGRESSION GUARD: the real repo's real settings file must satisfy this.
+    # Without it the check only ever proves itself against fixtures, and a future
+    # edit to .claude/settings.json that drops a deny goes unnoticed here.
+    assert check_settings_deny_secrets(REPO) == [], check_settings_deny_secrets(REPO)
+
+    # -------------------- check 8: check_settings_no_exec_wildcard ----------
+    # the exact rule that was live in this repo, plus its neighbours
+    for rule in ("Bash(python3 -c ' *)", "Bash(.venv/bin/python *)",
+                 "Bash(/opt/agentic-trader/.venv/bin/python *)",
+                 "Bash(python3:*)", "Bash(bash -c *)", "Bash(sh *)",
+                 "Bash(node -e *)", "Bash(sudo *)", "Bash(xargs *)",
+                 "Bash(*)", "Bash"):
+        assert _exec_wildcard_reason(rule) is not None, rule
+
+    # ...and the shapes that must stay SILENT: exact commands (including an exact
+    # `-c` one-liner, which executes only the code written in the rule itself),
+    # and wildcards on programs that do one fixed job.
+    for rule in ("Bash(.venv/bin/python scripts/record_fills.py)",
+                 "Bash(/usr/bin/python3 scripts/risk_review.py --facts)",
+                 "Bash(python3 -c \"import json; print(1)\")",
+                 "Bash(systemctl restart *)", "Bash(git add *)",
+                 "Bash(journalctl -u agentic-monitor.service -n 20 --no-pager)",
+                 "Read", "Read(//tmp/**)", "WebFetch(domain:example.com)",
+                 "Skill(update-config)", "mcp__robinhood-trading__get_accounts"):
+        assert _exec_wildcard_reason(rule) is None, rule
+
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        _write(root, ".claude/settings.json",
+               '{"permissions": {"allow": ["Read", "Bash(python3 -c \' *)"]}}')
+        out = check_settings_no_exec_wildcard(root)
+        assert len(out) == 1, out
+        assert ".claude/settings.json" in out[0] and "entry #1" in out[0], out
+        assert "python3" in out[0], out
+        # publishing rule: the rule TEXT itself never reaches the output
+        assert "-c '" not in out[0], out
+
+    # the git-ignored local file is scanned too — that is where the wildcard
+    # actually lived, and where "don't ask again" writes new ones back
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        _write(root, ".claude/settings.json",
+               '{"permissions": {"allow": ["Read"], "deny": ' + _all_denies + '}}')
+        _write(root, ".claude/settings.local.json",
+               '{"permissions": {"allow": ["Bash(.venv/bin/python *)"]}}')
+        out = check_settings_no_exec_wildcard(root)
+        assert len(out) == 1 and ".claude/settings.local.json" in out[0], out
+        # ...and check 7 stays clean: the local file cannot break the deny check
+        assert check_settings_deny_secrets(root) == []
+
+    # non-object / malformed / absent settings -> report or stay silent, never raise
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        _write(root, ".claude/settings.local.json", "[]")
+        out = check_settings_no_exec_wildcard(root)
+        assert len(out) == 1 and "not an object" in out[0], out
+    with tempfile.TemporaryDirectory() as d:
+        assert check_settings_no_exec_wildcard(pathlib.Path(d)) == []
+
+    # THE REGRESSION GUARD, same reasoning as check 7's: the real settings files
+    # on this box must be clean, or the wildcard has come back.
+    assert check_settings_no_exec_wildcard(REPO) == [], \
+        check_settings_no_exec_wildcard(REPO)
 
     # -------------------- checks() aggregator + main() plumbing --------
     with tempfile.TemporaryDirectory() as td:
