@@ -26,6 +26,7 @@ from agent_env import state                           # noqa: E402  sibling modu
 from agent_env import screen                          # noqa: E402  sibling module
 from agent_env import terrain as terrain_mod          # noqa: E402  sibling module
 from agent_env import decide                          # noqa: E402  sibling module
+from agent_env import live as live_mod                # noqa: E402  sibling module
 import mandate                                  # noqa: E402
 import governance as gov                        # noqa: E402
 import strategy as strat                        # noqa: E402
@@ -366,6 +367,62 @@ def check_order(symbol: str, side: str, amount: float) -> str:
     return json.dumps({"allowed": not reasons, "symbol": sym, "side": sd,
                        "amount": float(amount), "reasons": reasons,
                        "liquidity_advisory": liquidity_advisory}, indent=2)
+
+
+def _symlist(symbols) -> list:
+    """Accept 'NVDA,MU', 'NVDA MU', ['NVDA','MU'] -- agents pass all three."""
+    if symbols is None:
+        return []
+    if isinstance(symbols, str):
+        return [s for s in symbols.replace(",", " ").split() if s]
+    return [str(s).strip() for s in symbols if str(s).strip()]
+
+
+@mcp.tool()
+def quote(symbols: str) -> str:
+    """The LIVE price of any US symbol, right now, straight from moomoo.
+
+    Accepts one symbol or many ('NVDA' or 'NVDA,MU,SPY') -- up to 400 in a single
+    unmetered call, so asking for the whole universe costs the same as asking for
+    one. Works for names you do NOT hold and names outside the universe: this is
+    how you price a candidate before deciding anything.
+
+    Returns last, open, prev_close, day high/low, change_pct, volume, turnover,
+    52-week high/low and pct_below_52w_high, plus `update_time` so you can see how
+    fresh the tick is. Outside market hours the last trade is the previous
+    session's close.
+
+    If the feed is down you get an `error` -- never a stale price dressed up as a
+    live one. A symbol moomoo does not recognise lands in `unavailable` with a
+    reason and does NOT prevent the others from returning.
+    """
+    return json.dumps(live_mod.quotes(_symlist(symbols)), indent=2, default=str)
+
+
+@mcp.tool()
+def earnings(symbols: str = "", weeks: int = 6) -> str:
+    """When these names next report, from moomoo's live US earnings calendar.
+
+    Pass symbols ('NVDA,MU') or leave blank to cover what you currently hold.
+    Returns the date, `days_until`, and whether the report lands BEFORE the open
+    or AFTER the close -- an AFTER report means the move happens overnight, while
+    the stop watcher is not running.
+
+    `none_scheduled` means nothing falls inside the weeks scanned, NOT that no
+    report is coming. ETFs never appear.
+
+    These are dates, not instructions. Nothing here blocks a trade or closes a
+    position; what to do about a report is your call.
+    """
+    syms = _symlist(symbols)
+    if not syms:
+        v = marks.load() or {}
+        syms = sorted(state.holdings(v, []).keys())
+        if not syms:
+            return json.dumps({"earnings": {},
+                               "note": "no symbols given and no positions held"},
+                              indent=2)
+    return json.dumps(live_mod.earnings(syms, weeks=weeks), indent=2, default=str)
 
 
 @mcp.tool()

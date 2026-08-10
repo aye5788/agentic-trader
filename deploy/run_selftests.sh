@@ -44,6 +44,7 @@ VENV_SELFTESTS=(
     "src/governance.py"
     "src/marks.py"
     "scripts/record_fills.py"
+    "src/agent_env/live.py"
     "src/agent_env/state.py"
     "src/agent_env/screen.py"
     "src/agent_env/terrain.py"
