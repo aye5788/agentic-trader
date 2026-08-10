@@ -56,6 +56,7 @@ ET = ZoneInfo("America/New_York")
 # Remembers the last-logged "not held" set so we log it once per change, not every
 # 15s poll (the set is static all day — logging it each tick just floods journald).
 _LAST_DROPPED: frozenset | None = None
+_LAST_SUSPECT_ACTION: frozenset = frozenset()
 _LAST_HALTED: bool | None = None      # log kill-switch mode on transition, not every tick
 
 # Unprotected-position invariant (spec 2026-08-09 §8): dedupe the phone push to
@@ -178,6 +179,28 @@ def _selftest() -> None:
     # watches every thesis, so there is nothing NEW to flag here
     out = unprotected_positions(book, None)
     assert out["unprotected"] == [] and out["suspect_empty_snapshot"] is False, out
+    # --- corporate-action guard (2026-08-10) --------------------------------
+    # An ordinary breach must STILL fire — the guard must not blunt the stop.
+    assert corporate_action_suspected(99.0, 100.0, 130.0) is None
+    assert corporate_action_suspected(90.0, 100.0, 130.0) is None
+    assert corporate_action_suspected(60.0, 100.0, 130.0) is None, \
+        "a 40% gap is a crash, not a split — must still sell"
+    # A 2:1 split lands at ~50% of the stop -> suspected, not actioned.
+    assert corporate_action_suspected(50.0, 100.0, 130.0)
+    assert "split" in corporate_action_suspected(25.0, 100.0, 130.0)   # 4:1
+    # Reverse split multiplies -> must not read as a target hit.
+    assert corporate_action_suspected(1300.0, 100.0, 130.0)            # 1:10
+    assert corporate_action_suspected(260.0, 100.0, 130.0)             # 1:2
+    assert corporate_action_suspected(140.0, 100.0, 130.0) is None, \
+        "a normal target overshoot must still take profit"
+    # Degenerate inputs must not raise or suppress.
+    assert corporate_action_suspected(None, 100.0, 130.0) is None
+    assert corporate_action_suspected(0.0, 100.0, 130.0) is None
+    assert corporate_action_suspected(50.0, None, None) is None
+    assert corporate_action_suspected(50.0, 0.0, 0.0) is None
+    print("monitor selftest OK: corporate-action guard (split suppressed, "
+          "real crash and real target still act)")
+
     print("monitor selftest OK: unprotected-position invariant (held-no-thesis, "
           "held-no-stop, empty-snapshot suspicion, torn-snapshot fail-open, "
           "all-protected no-alert)")
@@ -389,6 +412,44 @@ def run_executor(timeout_secs: int = 300) -> dict:
     return _load(EXIT_RES, {"sold": []})
 
 
+# A price this far from its own level is not a market move. Stops sit BELOW the
+# entry already, so reaching 55% of the stop means the name roughly halved in a
+# single 15s tick — LULD halts trading long before that prints. A 2:1 split lands
+# at exactly 50%, a 4:1 at 25%. Reverse splits multiply, which is why the upside
+# is guarded too: a 1:10 reverse makes px 10x and would "hit" every target.
+SPLIT_LOW_RATIO = 0.55
+SPLIT_HIGH_RATIO = 1.90
+
+
+def corporate_action_suspected(px, stop, target) -> str | None:
+    """Is this 'breach' a corporate action or bad tick rather than a real move?
+
+    Pure — no I/O, no clock. Returns a reason string, or None if the move is
+    plausible and should be acted on normally.
+
+    Why this exists: the panel and every stored level are UNADJUSTED
+    (`AuType.NONE` in the moomoo adapter, load-bearing so the series splices with
+    Schwab-era history). Nothing in this repo processes corporate actions. So on
+    a 4:1 split the quote drops ~75% while the stored stop stays pre-split, and
+    `px <= stop` fires a 100% market sell on a move that never happened. That is
+    a real, mechanical path to an erroneous live sale.
+
+    The trade this makes: on a genuine >45% single-tick collapse it alerts a human
+    instead of selling. That is the right side to err on — a phantom sale is
+    immediate and irreversible, while a real crash still gets a loud phone push
+    and a person who is watching. It refuses to ACT; it never hides the event.
+    """
+    if px is None or px <= 0:
+        return None
+    if stop and px <= stop * SPLIT_LOW_RATIO:
+        return (f"price {px:.4f} is {px / stop:.0%} of its stop {stop:.4f} — "
+                "implausible in one tick; a forward split or a bad print")
+    if target and px >= target * SPLIT_HIGH_RATIO:
+        return (f"price {px:.4f} is {px / target:.1f}x its target {target:.4f} — "
+                "implausible in one tick; a reverse split or a bad print")
+    return None
+
+
 def refire_gate(triggers, unresolved, now_dt, retry_secs, escalate_n):
     """Throttle re-firing breaches whose exit keeps FAILING. Pure — no I/O.
 
@@ -524,9 +585,16 @@ def check_once(cfg, client) -> int:
                    "prices": prices})
 
     triggers = []
+    suspect = {}
     for sym, th in held.items():
         px = prices.get(sym)
         if px is None:
+            continue
+        # Corporate action / bad print: refuse to ACT, but never go quiet.
+        why = corporate_action_suspected(px, th.stop,
+                                         th.targets[-1] if th.targets else None)
+        if why:
+            suspect[sym] = why
             continue
         fired = set(st["fired"].get(sym, []))
         if m.get("enable_stops", True) and px <= th.stop and "stop" not in fired:
@@ -539,6 +607,22 @@ def check_once(cfg, client) -> int:
             elif px >= th.targets[0] and "t1" not in fired:
                 triggers.append({"symbol": sym, "reason": "target1", "fraction": 0.5,
                                  "price": px, "level": th.targets[0]})
+
+    # Suspected corporate action: loud, distinct, and fire-on-CHANGE (matching
+    # _LAST_DROPPED/_LAST_HALTED) so a split does not re-push every 15s all day.
+    global _LAST_SUSPECT_ACTION
+    cur_suspect = frozenset(suspect)
+    if cur_suspect != _LAST_SUSPECT_ACTION:
+        if cur_suspect:
+            for s in sorted(cur_suspect):
+                print(f"  ⚠ NOT ACTING on {s}: {suspect[s]}")
+            notify("🚨 Suspected split/bad print — stop NOT actioned",
+                   f"{', '.join(sorted(cur_suspect))}: the quote is implausibly far "
+                   f"from its stored level, so no order was placed. Levels are "
+                   f"UNADJUSTED — if this is a split, re-base the stop before the "
+                   f"position is watched again. Verify by hand.",
+                   tags="rotating_light")
+        _LAST_SUSPECT_ACTION = cur_suspect
 
     # drop unresolved entries whose breach has cleared (price recovered above stop)
     unresolved = st.setdefault("unresolved", {})
