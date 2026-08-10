@@ -135,12 +135,38 @@ def candidates(n: int = 10) -> str:
 
 @mcp.tool()
 def universe() -> str:
-    """The FULL ranked list — every name in config/universe.csv plus the ETF
-    sleeve, scored and sorted. Call this when the top candidates do not suit and
-    you want to see everything available."""
+    """Ranked momentum screen with full transparency: scores names with sufficient
+    price history and reports those that lack it. Call this when the top candidates
+    do not suit and you want to see the full picture — including what's excluded
+    and why.
+
+    Returns a JSON object with two parts:
+    - "ranked": scored and sorted names with their R, sigma, trend, score, eligible, rank
+    - "unscoreable": names from config/universe.csv + ETF sleeve that exist in the price
+      panel but lack sufficient history to compute momentum (need 252+ trading days for
+      the 12-month return, 200 for the trend moving average)
+    """
     panel = _panel()
-    r = screen.rank(panel, panel.index[-1], _all_tickers())
-    return r.round(4).to_json(orient="index", indent=2)
+    all_tickers = _all_tickers()
+
+    # Get the ranked results
+    r = screen.rank(panel, panel.index[-1], all_tickers)
+
+    # Find which tickers were requested but not scored:
+    # these exist in the panel but were dropped by momentum.compute() due to insufficient history
+    tickers_in_panel = [c for c in all_tickers if c in panel.columns]
+    unscoreable = sorted([t for t in tickers_in_panel if t not in r.index])
+
+    # Build the result with both ranked names and unscoreable list
+    ranked_json = json.loads(r.round(4).to_json(orient="index"))
+    result = {
+        "ranked": ranked_json,
+        "unscoreable": [
+            {"ticker": t, "reason": "insufficient price history (need 252+ trading days)"}
+            for t in unscoreable
+        ]
+    }
+    return json.dumps(result, indent=2)
 
 
 def _selftest() -> None:
