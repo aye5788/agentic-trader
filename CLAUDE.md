@@ -294,6 +294,17 @@ src/event_calendar/     Earnings/event calendar compiler (timing + risk spine).
                         RH snapshot; tags confirmed/estimated, logs date revisions.
                         (Named `event_calendar`, NOT `calendar` — avoids shadowing
                         the Python stdlib module, which breaks imports.)
+src/agent_env/          THE AGENT'S ENVIRONMENT (Plan 2 of the inversion) — a
+                        FastMCP server exposing what the agent can SEE and DO:
+                        brief(), positions(), account(), mandate_status(),
+                        candidates(n)/universe(), terrain(symbol),
+                        set_levels(sym,stop,target,reason), record_decision(),
+                        check_order(). Runs under .venv (3.12) with mcp==1.28.1;
+                        needs NO moomoo (quotes reach disk via the monitor).
+                        Registered in .mcp.json. NOT yet used by any cron job —
+                        the live loops still run the old procedural prompts.
+                        server.py = tools; state/screen/terrain/decide = pure
+                        helpers, each selftested.
 scripts/                One-off + weekly auth and API-scope probe scripts
 docs/OPSLOG.md          Dated ops & maintainer log (newest first). Technical/
                         plumbing material goes HERE, never in the investor

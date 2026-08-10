@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agentic-trader": {
+      "command": "/opt/agentic-trader/.venv/bin/python",
+      "args": ["/opt/agentic-trader/src/agent_env/server.py"]
+    }
+  }
+}
