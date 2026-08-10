@@ -45,6 +45,7 @@ VENV_SELFTESTS=(
     "src/governance.py"
     "src/marks.py"
     "scripts/record_fills.py"
+    "src/integrity.py"
     "src/agent_env/live.py"
     "src/agent_env/memory.py"
     "src/agent_env/wakes.py"
