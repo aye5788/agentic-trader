@@ -26,7 +26,8 @@
       "Bash(/usr/bin/python3 scripts/risk_review.py --apply)",
       "Read",
       "Edit(docs/OPSLOG.md)",
-      "Write(./research_store/**)"
+      "Write(./research_store/**)",
+      "Edit(./research_store/**)"
     ],
     "deny": [
       "Read(./.env)",
@@ -42,7 +43,17 @@
       "Write(./research_store/current.json)",
       "Write(./research_store/journal.jsonl)",
       "Write(./research_store/archive/**)",
-      "mcp__robinhood-trading__place_option_order"
+      "mcp__robinhood-trading__place_option_order",
+      "Edit(./src/**)",
+      "Edit(./scripts/**)",
+      "Edit(./config/**)",
+      "Edit(./deploy/**)",
+      "Edit(./prompts/**)",
+      "Edit(./.claude/**)",
+      "Edit(./.github/**)",
+      "Edit(./research_store/current.json)",
+      "Edit(./research_store/journal.jsonl)",
+      "Edit(./research_store/archive/**)"
     ]
   }
 }
