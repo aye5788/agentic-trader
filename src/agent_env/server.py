@@ -826,9 +826,14 @@ def _selftest() -> None:
         p = json.loads(positions())
         assert p == {}, p
         a = json.loads(account())
-        assert a == {k: None for k in
-                     ("account_number", "account_value", "cash", "invested",
-                      "as_of", "marked_at")}, a
+        # Every FIGURE is null with no snapshot -- nothing is invented.
+        assert all(a[k] is None for k in
+                   ("account_number", "account_value", "cash", "invested",
+                    "as_of", "marked_at", "buying_power", "unsettled_funds")), a
+        # ...and `spendable` must still WARN rather than go quiet: silence here
+        # would read as "cash is spendable", which on a T+1 cash account is the
+        # error this field exists to prevent.
+        assert "UNKNOWN" in a["spendable"] and "get_portfolio" in a["spendable"], a
         # brief() must also degrade gracefully without a snapshot: return valid JSON
         # with account block carrying nulls, empty positions, degraded mandate,
         # and still-valid candidates/regime (those don't depend on the snapshot).
