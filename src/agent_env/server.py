@@ -45,8 +45,13 @@ def positions() -> str:
 
 @mcp.tool()
 def account() -> str:
-    """Account value, cash, invested capital, and when it was last marked."""
-    v = marks.load()
+    """Account value, cash, invested capital, and when it was last marked.
+
+    Degrades to an object of nulls (never raises) when no snapshot exists yet
+    — a fresh deploy, or a deleted/corrupt snapshot, is a foreseeable state,
+    not an error; a tool that raises tells the agent nothing about what it holds.
+    """
+    v = marks.load() or {}
     return json.dumps({k: v.get(k) for k in
                        ("account_number", "account_value", "cash", "invested",
                         "as_of", "marked_at")}, indent=2, default=str)
@@ -55,7 +60,19 @@ def account() -> str:
 def _selftest() -> None:
     assert ping() == "pong"
     assert mcp is not None
-    print("selftest OK: mcp server boots, ping responds")
+    # FIX 2: no snapshot on disk (marks.load() -> None) must not crash the tools.
+    orig_load = marks.load
+    marks.load = lambda: None
+    try:
+        p = json.loads(positions())
+        assert p == {}, p
+        a = json.loads(account())
+        assert a == {k: None for k in
+                     ("account_number", "account_value", "cash", "invested",
+                      "as_of", "marked_at")}, a
+    finally:
+        marks.load = orig_load
+    print("selftest OK: mcp server boots, ping responds, degrades to JSON without a snapshot")
 
 
 if __name__ == "__main__":
