@@ -24,8 +24,19 @@ def excursions(close, high, low, symbol: str, horizons=(1, 3, 5, 10, 20)) -> dic
     Returns {"symbol","sigma_pct", horizons:{h:{"mfe_median","mfe_p90","mae_median",
     "mae_p10","n"}}} or {"error": ...} when the name has too little history.
     """
+    # Validate symbol against all three panels to catch drift
+    missing_from = []
     if symbol not in close.columns:
-        return {"error": f"{symbol} is not in the price panel"}
+        missing_from.append("close")
+    if symbol not in high.columns:
+        missing_from.append("high")
+    if symbol not in low.columns:
+        missing_from.append("low")
+
+    if missing_from:
+        panels_str = ", ".join(missing_from)
+        return {"error": f"{symbol} is missing from panel(s): {panels_str}"}
+
     c = close[symbol].dropna()
     if len(c) < LOOKBACK + max(horizons) + 1:
         return {"error": f"{symbol} has {len(c)} closes; need "
@@ -75,7 +86,29 @@ def _selftest() -> None:
     # too little history is also an explained error
     short = close.iloc[:10]
     assert "error" in excursions(short, high.iloc[:10], low.iloc[:10], "AAA")
-    print("selftest OK: terrain excursions scale with horizon, unknown symbol explained")
+
+    # Panel drift detection: symbol in close but missing from high
+    close_only_high_miss = pd.DataFrame({"AAA": px, "BBB": px * 1.05}, index=idx)
+    high_missing_bbb = pd.DataFrame({"AAA": px * 1.01}, index=idx)
+    low_with_bbb = pd.DataFrame({"AAA": px * 0.99, "BBB": px * 1.04}, index=idx)
+    result = excursions(close_only_high_miss, high_missing_bbb, low_with_bbb, "BBB")
+    assert "error" in result and "high" in result["error"], result
+
+    # Panel drift detection: symbol in close but missing from low
+    close_only_low_miss = pd.DataFrame({"AAA": px, "CCC": px * 1.02}, index=idx)
+    high_with_ccc = pd.DataFrame({"AAA": px * 1.01, "CCC": px * 1.03}, index=idx)
+    low_missing_ccc = pd.DataFrame({"AAA": px * 0.99}, index=idx)
+    result = excursions(close_only_low_miss, high_with_ccc, low_missing_ccc, "CCC")
+    assert "error" in result and "low" in result["error"], result
+
+    # Panel drift detection: symbol missing from both high and low
+    close_both_miss = pd.DataFrame({"AAA": px, "DDD": px * 1.03}, index=idx)
+    high_missing_both = pd.DataFrame({"AAA": px * 1.01}, index=idx)
+    low_missing_both = pd.DataFrame({"AAA": px * 0.99}, index=idx)
+    result = excursions(close_both_miss, high_missing_both, low_missing_both, "DDD")
+    assert "error" in result and "high" in result["error"] and "low" in result["error"], result
+
+    print("selftest OK: terrain excursions scale with horizon, unknown symbol explained, panel drift detected")
 
 
 if __name__ == "__main__":
