@@ -378,7 +378,7 @@ def brief() -> str:
     levels, and `universe()` if the top candidates do not suit.
     """
     prod = read_current()
-    v = marks.load()
+    v = marks.load() or {}
     panel = _panel()
     asof = panel.index[-1]
 
@@ -395,11 +395,18 @@ def brief() -> str:
     held = state.holdings(v, prod.theses if prod else [])
     top = screen.rank(panel, asof, _all_tickers()).head(10).round(4)
 
+    # Degrade mandate_status gracefully when no snapshot exists yet
+    try:
+        mandate_obj = json.loads(mandate_status())
+    except (TypeError, KeyError):
+        # marks.load() returned None/empty -> snapshot unavailable
+        mandate_obj = {}
+
     return json.dumps({
         "as_of": str(asof.date()),
         "book_as_of": prod.as_of if prod else None,
         "account": {k: v.get(k) for k in ("account_value", "cash", "invested")},
-        "mandate": json.loads(mandate_status()),
+        "mandate": mandate_obj,
         "positions": held,
         "unprotected": [s for s, h in held.items() if not h["watched"]],
         "candidates": json.loads(top.to_json(orient="index")),
@@ -422,6 +429,19 @@ def _selftest() -> None:
         assert a == {k: None for k in
                      ("account_number", "account_value", "cash", "invested",
                       "as_of", "marked_at")}, a
+        # brief() must also degrade gracefully without a snapshot: return valid JSON
+        # with account block carrying nulls, empty positions, degraded mandate,
+        # and still-valid candidates/regime (those don't depend on the snapshot).
+        b = json.loads(brief())
+        assert isinstance(b, dict), b
+        assert "account" in b, b
+        assert b["account"]["account_value"] is None, b
+        assert b["account"]["cash"] is None, b
+        assert b["account"]["invested"] is None, b
+        assert b["positions"] == {}, b
+        assert isinstance(b["candidates"], dict), b
+        assert "regime" in b, b  # still present, not skipped
+        assert b["mandate"] == {}, b  # empty when no snapshot
     finally:
         marks.load = orig_load
     print("selftest OK: mcp server boots, ping responds, degrades to JSON without a snapshot")
