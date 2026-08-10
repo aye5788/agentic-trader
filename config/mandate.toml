@@ -49,10 +49,11 @@ min_distinct_names = 4      # ...and at least this many distinct names closed
 window_days = 60            # trading days
 benchmark   = "SPY"
 
-# --- Tradeability floor (safety, not selection) ------------------------------
-# The universe whitelist encoded "these names are liquid enough". This states the
-# property directly, so the agent may trade anything that clears it rather than
-# only names on a list someone curated. Derived from the 20th percentile of
-# 20-day average dollar volume across config/universe.csv on 2026-08-09.
-[liquidity]
-min_dollar_volume_20d = 50_000_000.0
+# NOTE: a tradeability/liquidity floor does NOT belong in this file (moved to
+# config/strategy.toml [governance] 2026-08-10, FIX C). This file states WHAT
+# SUCCESS IS -- a falsifiable criterion the agent is judged against. A
+# liquidity floor is a GATE CONSTRAINT (safety, not a success criterion): it
+# says what may be traded at all, never whether the agent is doing well. The
+# design spec defines the mandate as exactly four criteria (§5) and places
+# liquidity in the gate (§8.2); mandate.status() has never read [liquidity].
+# See config/strategy.toml [governance] min_dollar_volume_20d.

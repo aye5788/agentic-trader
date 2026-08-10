@@ -174,6 +174,20 @@ max_drawdown     = 0.25                    # halt new buys if account down >25% 
 max_order_pct    = 0.15                    # reject any single order > 15% of account value
 require_whitelist = true                   # only ever trade names in config/universe.csv + etf_universe.csv
 
+# Tradeability floor (safety, not selection) -- moved here from config/mandate.toml
+# 2026-08-10 (FIX C). The universe whitelist above encoded "these names are
+# liquid enough" as a selection restriction; this states the property
+# directly as a GATE CONSTRAINT instead, so the agent may trade anything that
+# clears it rather than only names on a list someone curated. It does not
+# belong in config/mandate.toml: that file states WHAT SUCCESS IS (falsifiable
+# criteria the agent is judged against), never a constraint on WHAT may be
+# traded -- see the design spec §5 (mandate = exactly four criteria) and §8.2
+# (liquidity lives in the gate). src/governance.py's liquidity_ok() takes this
+# as a parameter and has no call site yet; nothing broke by moving it.
+# Derived from the 20th percentile of 20-day average dollar volume across
+# config/universe.csv on 2026-08-09.
+min_dollar_volume_20d = 50_000_000.0
+
 # --- How much proof before / during live trading ----------------------------
 [proof]
 mode          = "backtest_first"  # validate the signal vs history before the $20
