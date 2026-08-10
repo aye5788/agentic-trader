@@ -19,6 +19,7 @@
       "Bash(.venv/bin/python scripts/reconcile_ledger.py)",
       "Bash(python3 scripts/reconcile_ledger.py)",
       "Bash(.venv/bin/python scripts/record_rotation_outcome.py)",
+      "Bash(.venv/bin/python scripts/record_exit_outcome.py)",
       "Bash(.venv/bin/python scripts/letter_facts.py)",
       "Bash(/usr/bin/python3 scripts/fast_loop.py)",
       "Bash(/usr/bin/python3 scripts/risk_review.py --facts)",

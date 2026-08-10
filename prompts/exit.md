@@ -64,26 +64,30 @@ PROCEDURE — follow exactly:
    "days":[{"date":"<bucket start_time YYYY-MM-DD>","gain":<realized_gain>,
    "trades":<number_of_trades>} for buckets with number_of_trades > 0]}`.
 7c. **Record the outcome (the learning label).** For each symbol you sold to a
-    FULL close (position now zero), compute and journal its outcome. In a short
-    python snippet run with `.venv/bin/python`:
+    FULL close (position now zero), journal its outcome. Write
+    `research_store/rh/exit_closes.json` — a JSON array of
+    `{"symbol","entry_price","exit_price","exit_date","exit_reason"}` — then run
+    `.venv/bin/python scripts/record_exit_outcome.py`:
       - entry_price = that symbol's `avg_cost` (average buy price) as returned
         by `get_equity_positions` in step 3, captured BEFORE any sells this
         run — do NOT re-read `positions.json` here: step 7 has already
         overwritten it to post-sell state and a fully-closed symbol is
         dropped from it.
       - exit_price  = the sell's `average_price` from `get_equity_orders`
-      - stop/targets/as_of = from that symbol's thesis in
-        `research_store/current.json`
-      - exit_reason = that exit's `reason` from `exit_request.json` (step 1)
-      - entry_date = the thesis `as_of` (from `current.json`)
       - exit_date = today's date (YYYY-MM-DD)
-      - spy_entry/spy_exit = optional; pass None if unknown
-    Call:
-      `from ledger import outcome_from_exit` (add `src` to sys.path) to build the
-      dict, then `from research_store import record_outcome` and
-      `record_outcome(symbol, outcome, now_iso)`. This attaches the label to the
-      thesis and appends an `outcome` event. Partial (scale-out) exits: skip —
-      only full closes get an outcome (known first-cut limitation).
+      - exit_reason = that exit's `reason` from `exit_request.json` (step 1) —
+        `"stop"`, `"target1"` or `"target2"`, verbatim. Do not invent one.
+      - spy_entry/spy_exit = optional; omit them (or pass null) if unknown.
+    Do NOT pass stop/targets/as_of: the script reads them from that symbol's own
+    thesis (`current.json`, falling back to the last held archived thesis), so
+    the levels the label is scored against cannot be mistyped. It attaches the
+    label to the thesis and appends an `outcome` event. Idempotent (safe to
+    re-run). A symbol it reports `UNANCHORED` had no thesis to attach to —
+    report it, do not retry it. Nothing fully closed → skip this step entirely
+    (do not write an empty file). Partial (scale-out) exits — `target1` sells
+    half and leaves the position open — skip: only full closes get an outcome
+    (known first-cut limitation). Do NOT hand-edit `journal.jsonl` and do NOT
+    write your own python snippet; this helper is the only writer.
 7d. **Ledger reconcile.** Write `research_store/rh/orders_dump.json` (same schema as the
     fast loop's step 8) from `get_equity_orders`, then run
     `.venv/bin/python scripts/reconcile_ledger.py`. Don't suppress its exit code.

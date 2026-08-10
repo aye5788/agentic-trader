@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Daily upkeep reminder — pushes when a scheduled job stops leaving evidence.
 
-Runs `src/health.py` and phones you about anything unhealthy. Deliberately
-boring: it places no trades, changes no config, and touches nothing but its own
-state file.
+Runs `src/health.py` (did each moving part actually run?) AND `src/repo_checks.py`
+(is the repo's own config still what the system assumes?), then phones you about
+anything unhealthy. Deliberately boring: it places no trades, changes no config,
+and touches nothing but its own state file.
+
+The repo_checks half is here because this is the only place it runs ON THE BOX —
+see the REPO_CHECK_* block below for why off-box CI cannot cover it.
 
 ALERTING CONTRACT (chosen by Aaron 2026-07-24): **one alert per condition.**
 A condition fires once when it first goes bad and then stays quiet, however long
@@ -33,6 +37,7 @@ is what makes them safe on the shared ops topic (see src/notify.py:ops_topic).
 """
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
@@ -43,6 +48,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 import health                                    # noqa: E402
+import repo_checks                               # noqa: E402
 from notify import push, ops_topic               # noqa: E402
 
 STATE = REPO / "research_store" / "health_state.json"
@@ -66,10 +72,10 @@ ISSUE_LABELS = [
 # trading decision. Pair with compose()'s "never positions/prices/P&L" rule:
 # the same "ops, not the book" boundary applies to both channels.
 OPS_VS_CODE_NOTE = (
-    "This is an ops/scheduling alert (a job stopped leaving evidence it ran) — "
-    "not a trading decision. A fix belongs in the code/config that runs the "
-    "job (scripts/, deploy/, config/), never in a live position, order, or "
-    "the book itself."
+    "This is an ops/scheduling alert (a job stopped leaving evidence it ran, or "
+    "the repo's own config drifted) — not a trading decision. A fix belongs in "
+    "the code/config that runs the job (scripts/, deploy/, config/, .claude/, "
+    ".github/), never in a live position, order, or the book itself."
 )
 
 # "never ran" and "stopped running" have different causes and different fixes.
@@ -104,6 +110,70 @@ REMEDY = {
 }
 
 
+# ---------------------------------------------------------------- repo checks
+#
+# src/repo_checks.py is the static repo-state validator (cron paths, jobs armed,
+# CI swallowing failures, a stray ANTHROPIC_API_KEY, a settings deny/exec-wildcard
+# regression). Until now the ONLY thing running it was
+# .github/workflows/validate.yml — OFF-BOX, against a git checkout. That makes one
+# of its checks structurally blind: check_settings_no_exec_wildcard scans
+# `.claude/settings.local.json`, which is git-ignored and therefore does not exist
+# in CI. Claude Code writes "don't ask again" grants back into that file by itself,
+# so an arbitrary-execution grant can reappear on the droplet at any time and CI
+# would report clean forever. This daily 08:00 job is the on-box run: same checks,
+# same messages, on the real filesystem where the risk actually lives.
+#
+# PUBLIC-SAFETY: these findings ride the same two channels as everything else here
+# (ops ntfy topic, and a PUBLIC GitHub issue under --open-issue). That is safe
+# because repo_checks messages are built under its own publishing rule — file:line,
+# fixed prose from its source, its own constants, or a token laundered through
+# _publishable(). Nothing below re-interpolates scanned file content; it passes the
+# message through verbatim. Do not add formatting that quotes a scanned line.
+REPO_CHECK_PREFIX = "repo_check:"
+REPO_CHECK_LABEL = "Repo state drift"
+REPO_CHECK_STATUS = "drift"
+REPO_CHECK_REMEDY = ("Run `.venv/bin/python src/repo_checks.py` on the box for the "
+                     "full list — a config/CI/permission file drifted from what the "
+                     "system assumes")
+
+
+def _rows_from_findings(findings: list[str]) -> list:
+    """Pure: repo_checks findings -> health.Check rows. No filesystem, no clock.
+
+    One row PER FINDING, not one aggregate row, because the fire-once contract
+    keys off `Check.key`: an aggregate "repo_checks" key would alert on the first
+    drift and then stay silent about every later, different one until someone
+    fixed the first. The key is a digest of the message, so a resolved finding
+    disappears from `rows` and diff()'s retired-check clause drops its flag,
+    while a NEW finding is a new key and is audible immediately.
+
+    `last_seen` is None: these are not scheduled jobs and have no "ran at" time —
+    they are statements about the repo as it is right now.
+    """
+    rows = []
+    for msg in findings:
+        digest = hashlib.sha256(msg.encode("utf-8")).hexdigest()[:8]
+        rows.append(health.Check(f"{REPO_CHECK_PREFIX}{digest}", REPO_CHECK_LABEL,
+                                 None, REPO_CHECK_STATUS, msg))
+    return rows
+
+
+def repo_check_rows(root: pathlib.Path) -> list:
+    """Thin I/O wrapper: run the static repo checks and wrap them as Check rows.
+
+    Never raises: repo_checks is filesystem-only but calls `crontab -l`, and a
+    crash here must not take down the scheduled-job checks that are this script's
+    primary job. A failure to RUN the checks is itself reported as a finding, so
+    it cannot go quiet.
+    """
+    try:
+        findings = repo_checks.checks(root)
+    except Exception as e:
+        return _rows_from_findings(
+            [f"src/repo_checks.py could not run: {type(e).__name__}"])
+    return _rows_from_findings(findings)
+
+
 def _remedy(c) -> str | None:
     """Status-specific advice wins over the per-job default: "never" and "blocked"
     both send you somewhere the generic "check its log" line would not."""
@@ -111,6 +181,8 @@ def _remedy(c) -> str | None:
         return NEVER_REMEDY
     if c.status == "blocked":
         return BLOCKED_REMEDY
+    if c.key.startswith(REPO_CHECK_PREFIX):
+        return REPO_CHECK_REMEDY
     return REMEDY.get(c.key)
 
 
@@ -183,7 +255,8 @@ def issue_body(to_alert) -> str:
     NOTHING else. No dollar figures, no positions, no P&L, no secrets, no file
     contents beyond what health.Check already exposes.
     """
-    lines = ["Daily health check found the following unhealthy scheduled job(s):", ""]
+    lines = ["Daily health check found the following unhealthy scheduled job(s) "
+             "and/or repo-state finding(s):", ""]
     for c in to_alert:
         lines.append(f"- **{c.label}** (`{c.key}`) — status: `{c.status}` — {c.detail}")
         remedy = _remedy(c)
@@ -330,7 +403,11 @@ def main() -> None:
         _selftest()
         return
 
-    rows = health.checks(use_network=not args.offline)
+    # Scheduled-job liveness + on-box static repo state. Concatenated rather than
+    # folded into health.checks() so the dashboard (which renders health.checks())
+    # keeps showing jobs only, and so a repo_checks change can never affect the
+    # liveness checks.
+    rows = health.checks(use_network=not args.offline) + repo_check_rows(REPO)
     st = load_state()
     flagged = st.get("flagged", {})
 
@@ -482,6 +559,45 @@ def _selftest() -> None:
 
     empty_body = issue_body([])
     assert "$" not in empty_body
+
+    # --- repo-state rows (FIX 2: the on-box run of src/repo_checks.py) ---
+    # Same message twice + a different one: the digest key must be stable for
+    # identical text (so a persisting finding stays fire-once) and distinct for
+    # different text (so a NEW drift is audible while an old one is still flagged).
+    f1 = "deploy/crontab.template:4 — cron line has 1 RELATIVE path argument"
+    f2 = ".claude/settings.local.json — permissions.allow grants arbitrary execution"
+    r1, r1b, r2 = _rows_from_findings([f1, f1, f2])
+    assert r1.key == r1b.key, "identical findings must share a key (fire-once)"
+    assert r1.key != r2.key, "different findings must get different keys"
+    assert r1.key.startswith(REPO_CHECK_PREFIX), r1.key
+    assert _rows_from_findings([]) == [], "clean repo contributes no rows"
+
+    # they alert, they are not healthy, and they carry their own remedy
+    assert r1.alertable and not r1.healthy, (r1.status, r1.alertable)
+    assert _remedy(r1) == REPO_CHECK_REMEDY, _remedy(r1)
+    to_alert, healed = diff([ok, r1], {})
+    assert [c.key for c in to_alert] == [r1.key], to_alert
+    to_alert, _ = diff([ok, r1], {r1.key: {}})
+    assert to_alert == [], "a still-present finding must not re-alert"
+    # a FIXED finding vanishes from rows entirely -> diff's retired-check clause
+    # clears its flag, so the same drift is audible again if it comes back
+    to_alert, healed = diff([ok], {r1.key: {}})
+    assert healed == [r1.key], healed
+
+    # the message reaches BOTH channels verbatim — that is the whole point of
+    # running this on-box, and repo_checks' publishing rule is what makes the
+    # public one safe (file:line + fixed prose + its own constants only)
+    _, body = compose([r1])
+    assert f1 in body, body
+    assert "repo_checks.py" in body, "must say where to get the full list"
+    assert "$" not in body, "alerts must never carry dollar figures"
+    ibody = issue_body([r1, r2])
+    assert f1 in ibody and f2 in ibody, ibody
+    assert "$" not in ibody, "issue body (PUBLIC) must never carry a dollar figure"
+
+    # never/blocked status advice still wins for real jobs — the new prefix
+    # branch must not shadow it
+    assert _remedy(bad) == NEVER_REMEDY and _remedy(blocked) == BLOCKED_REMEDY
 
     # --- _match_issue (pure dedupe-lookup logic, no subprocess) ---
     items = [{"number": 7, "title": ISSUE_TITLE}, {"number": 9, "title": "unrelated"}]

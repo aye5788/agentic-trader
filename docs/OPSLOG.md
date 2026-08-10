@@ -8,6 +8,67 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-08-10 — the stop-loss prompt had an unpermittable step; the permission check had no on-box runner
+
+Two follow-ups to `87260f7` (path-scoped tool permissions). Same failure class in both:
+a guardrail that exists but is not reachable from where it is needed.
+
+### 1. `prompts/exit.md` step 7c could not be granted
+
+87260f7 dropped the `Bash(.venv/bin/python *)` wildcard and fixed `fast_loop.md` step 9b
+(the inline snippet became `scripts/record_rotation_outcome.py`). **It missed the identical
+step in `exit.md`** — step 7c told the agent to compose "a short python snippet run with
+`.venv/bin/python`". No exact allow rule can cover a snippet the agent composes, so that
+step now stalls on an approval no headless run can give. `exit.md` is not a weekly job: it
+is fired by `scripts/market_monitor.py::run_executor()` when a stop breaks, on a 300s
+wall-clock timeout.
+
+Consequence is bounded but real: 7c is bookkeeping, and the sale (step 4) and its journal
+entry (step 6) both come first, so **no exit would have failed to sell**. What would have
+been lost is the outcome LABEL — and 7c is the *only* producer of `hit_stop: true` outcomes,
+which is the sole input to the live half of the `stop_atr_mult` adaptive dial (see
+2026-08-04). A dial that already reports `live_n: 0` would have kept reporting it forever,
+now for a second, different reason. There are still zero live stop-outs in the ledger, so
+nothing has been lost yet — this was caught before its first fire.
+
+Fix: `scripts/record_exit_outcome.py`, same pattern as `record_rotation_outcome.py` —
+reads `research_store/rh/exit_closes.json`, exact argument-free command, exact allow rule.
+It also **removes stop/targets/as_of from the agent's hands**: the old snippet had the agent
+copy the levels out of `current.json` into the arithmetic, and `hit_stop` is computed by
+comparing the fill against them. The script reads the thesis itself (current book, falling
+back to the last HELD archived thesis), so the levels the label is scored against cannot be
+mistyped by the thing being scored. Unanchored symbols are reported, never given an invented
+parent. Idempotent — the monitor may kill and retry the executor.
+
+`record_rotation_outcome.py` was also never registered in `deploy/run_selftests.sh`; both are
+now.
+
+### 2. `check_settings_no_exec_wildcard` ran nowhere that mattered
+
+87260f7 added check 8 to `src/repo_checks.py` specifically because Claude Code writes
+"don't ask again" grants back into `.claude/settings.local.json` by itself, so an
+arbitrary-execution grant WILL come back. But nothing on the box ran `repo_checks` —
+`grep -cE "repo_checks|run_selftests" deploy/crontab.template` returned 0 — and the only
+scheduled runner is `.github/workflows/validate.yml`, **off-box, against a git checkout,
+where `settings.local.json` is git-ignored and therefore does not exist**. The check was
+structurally blind to the exact file it was written for, and CI would have reported clean
+forever.
+
+`scripts/health_check.py` (daily 08:00, already pushing to the OPS ntfy topic and filing a
+deduped GitHub issue under `--open-issue`) now also runs `repo_checks.checks(REPO)` and
+reports each finding as its own `Check` row, keyed by a digest of the message so the
+fire-once contract works per-finding: a new drift is audible while an older one is still
+flagged, and a resolved one clears via `diff()`'s retired-check clause. Rows are appended to
+`health.checks()` rather than folded into it, so the dashboard still renders jobs only.
+
+Publishing safety is unchanged: `repo_checks` messages are built under its own rule
+(file:line + fixed prose + its own constants + `_publishable()` tokens) and are passed
+through verbatim — nothing here re-interpolates scanned file content. Verified: the
+exec-wildcard finding names the file, the entry index and the interpreter, and explicitly
+withholds the rule text.
+
+---
+
 ## 2026-08-04 — the adaptive layer's live half was a stub; now wired
 
 Routine system review. Everything scheduled is running (all 8 `health.checks()` green,
