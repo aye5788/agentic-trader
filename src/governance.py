@@ -295,20 +295,49 @@ def mandate_action(status: dict) -> dict:
     mandate.status() keeps them out of blocking_fail/blocking_unmeasurable, so
     this function never even looks at that key.
 
-    A status dict missing the expected keys (including `{}`) is read as
-    "nothing blocking reported" via .get(..., []) -- mandate.status() always
-    populates these keys, so this is not a case of trusting adversarial input;
-    it is just not inventing a flatten out of a shape this function doesn't
-    recognise.
+    CONTRACT ON MALFORMED INPUT -- READ BEFORE WRAPPING THIS IN try/except:
+    `status` must have `blocking_fail` and `blocking_unmeasurable` as lists and
+    `criteria` as a dict; any missing key or wrong type (including `None` in
+    place of a list) raises ValueError naming exactly which key was wrong. This
+    function refuses to guess. It deliberately does NOT follow the old
+    `.get(key, [])` pattern of treating a missing/malformed key as "nothing
+    blocking reported" -- on a function whose job is to decide whether to
+    liquidate, an empty verdict manufactured from garbage input is
+    indistinguishable from a genuinely clean pass, and that is the one failure
+    this function must never produce. A caller that catches this ValueError
+    MUST treat it as UNKNOWN STATE, never as all-clear: degrade exactly like
+    the unmeasurable-criterion case above -- manage what is open, open nothing
+    new -- and never assume the book is safe just because a parse failed.
+
+    Every criterion's `reason` string is read defensively: if `blocking_fail`
+    or `blocking_unmeasurable` name a criterion absent from `criteria` (or
+    present without a `reason`), the output says so explicitly ("no detail
+    recorded") rather than silently repeating the bare key -- a phone alert
+    that just says "MANDATE BREACH [drawdown]: drawdown" tells a human nothing
+    they didn't already know from the key itself.
     """
+    for key, expected_type in (("blocking_fail", list),
+                                ("blocking_unmeasurable", list),
+                                ("criteria", dict)):
+        if key not in status:
+            raise ValueError(
+                f"mandate status missing required key {key!r}; "
+                "cannot know what is blocking, treating this as unknown state")
+        if not isinstance(status[key], expected_type):
+            raise ValueError(
+                f"mandate status key {key!r} must be a {expected_type.__name__}, "
+                f"got {type(status[key]).__name__}; cannot know what is "
+                "blocking, treating this as unknown state")
+
+    criteria = status["criteria"]
     reasons, flatten = [], False
-    for k in status.get("blocking_fail", []):
-        why = (status.get("criteria", {}).get(k) or {}).get("reason", k)
+    for k in status["blocking_fail"]:
+        why = (criteria.get(k) or {}).get("reason") or "no detail recorded"
         reasons.append(f"MANDATE BREACH [{k}]: {why}")
         if k == "drawdown":
             flatten = True
-    for k in status.get("blocking_unmeasurable", []):
-        why = (status.get("criteria", {}).get(k) or {}).get("reason", k)
+    for k in status["blocking_unmeasurable"]:
+        why = (criteria.get(k) or {}).get("reason") or "no detail recorded"
         reasons.append(f"UNMEASURABLE [{k}]: {why}; degraded mode -- "
                        "manage what is open, open nothing new")
     return {"flatten": flatten,
@@ -707,18 +736,6 @@ def _selftest() -> None:
                          "tradeable": True, "degraded": False}
             a = mandate_action(info_only)
             assert a == {"flatten": False, "block_entries": False, "reasons": []}, a
-            # a status dict missing expected keys entirely: DECISION -- treat
-            # absence as "nothing blocking reported" (empty lists via .get
-            # defaults), matching mandate.status()'s own contract that these
-            # keys are always present. This is NOT the same as trusting an
-            # attacker-controlled or corrupt status blob; mandate.status() is
-            # an internal, non-adversarial producer. A missing key must not be
-            # read as a breach (that would be inventing a flatten out of thin
-            # air) -- reasons stay empty, both flags default to safe/False.
-            assert mandate_action({}) == {"flatten": False, "block_entries": False,
-                                           "reasons": []}
-            assert mandate_action({"tradeable": True}) == {
-                "flatten": False, "block_entries": False, "reasons": []}
             # reasons must be human-readable enough to carry the SPECIFIC
             # number from the criterion's own reason string, not just repeat
             # the criterion name -- a phone alert saying "drawdown" tells a
@@ -727,6 +744,78 @@ def _selftest() -> None:
             assert "drawdown" in a["reasons"][0] and "-18% from peak" in a["reasons"][0], a
             a = mandate_action(dark)
             assert "concentration" in a["reasons"][0] and "no usable mark" in a["reasons"][0], a
+            # the input dict must never be mutated -- a shared/reused status
+            # object mutated here would corrupt whatever the caller does with
+            # it next.
+            before = {"blocking_fail": ["drawdown"], "blocking_unmeasurable": [],
+                      "criteria": {"drawdown": {"reason": "-18% from peak"}}}
+            import copy as _copy
+            snapshot = _copy.deepcopy(before)
+            mandate_action(before)
+            assert before == snapshot, "mandate_action must not mutate its input"
+            # flatten=True is reachable ONLY from the literal "drawdown" key --
+            # a lookalike name (case variant, near-miss) must block but never
+            # flatten.
+            lookalike = {"blocking_fail": ["DRAWDOWN", "Drawdown"],
+                         "blocking_unmeasurable": [],
+                         "criteria": {"DRAWDOWN": {"reason": "x"},
+                                      "Drawdown": {"reason": "y"}}}
+            a = mandate_action(lookalike)
+            assert a["flatten"] is False and a["block_entries"] is True, a
+            # an unrecognised criterion name (not drawdown, not concentration,
+            # not anything the mandate currently defines) still blocks entries
+            # -- a blocking_fail entry is blocking by construction -- but must
+            # never flatten, since only "drawdown" carries the terminal term.
+            unknown = {"blocking_fail": ["some_future_criterion"],
+                       "blocking_unmeasurable": [],
+                       "criteria": {"some_future_criterion": {"reason": "new rule tripped"}}}
+            a = mandate_action(unknown)
+            assert a["flatten"] is False and a["block_entries"] is True, a
+            assert "new rule tripped" in a["reasons"][0], a
+
+            # --- mandate action: malformed input must RAISE, never launder
+            # into an all-clear verdict. On the function that decides whether
+            # to liquidate, an empty verdict manufactured from garbage input
+            # is indistinguishable from a genuinely clean pass -- exactly the
+            # finding this closes. Every case below must raise ValueError
+            # naming the offending key, not return a dict.
+            def _assert_raises_naming(bad_status, expected_key):
+                try:
+                    mandate_action(bad_status)
+                    raise AssertionError(
+                        f"mandate_action({bad_status!r}) must raise ValueError, "
+                        "not return a verdict")
+                except ValueError as e:
+                    assert expected_key in str(e), (
+                        f"ValueError message must name {expected_key!r}: {e}")
+                except AssertionError:
+                    raise
+                except Exception as e:
+                    raise AssertionError(
+                        f"must raise ValueError, not {type(e).__name__}: {e}")
+
+            # completely empty dict: missing blocking_fail (checked first)
+            _assert_raises_naming({}, "blocking_fail")
+            # a dict missing only `criteria`
+            _assert_raises_naming(
+                {"blocking_fail": [], "blocking_unmeasurable": []}, "criteria")
+            # blocking_fail explicitly None -- the exact input that used to
+            # raise an uncaught TypeError instead of a clean ValueError
+            _assert_raises_naming(
+                {"blocking_fail": None, "blocking_unmeasurable": [], "criteria": {}},
+                "blocking_fail")
+            # blocking_fail as a bare string -- iterable, so the old code
+            # would have silently iterated its characters as criterion names
+            _assert_raises_naming(
+                {"blocking_fail": "drawdown", "blocking_unmeasurable": [], "criteria": {}},
+                "blocking_fail")
+            # criteria as a list instead of a dict
+            _assert_raises_naming(
+                {"blocking_fail": [], "blocking_unmeasurable": [], "criteria": []},
+                "criteria")
+            # the dangerous one the finding called out by name: `{"tradeable":
+            # True}` used to be indistinguishable from a genuinely clean pass
+            _assert_raises_naming({"tradeable": True}, "blocking_fail")
 
         print("selftest OK: governance two-tier gates "
               "(only the kill switch blocks a sell), peak, whitelist, order cap, "
