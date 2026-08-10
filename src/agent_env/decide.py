@@ -43,21 +43,94 @@ def merge_levels(existing: dict, symbol: str, stop, target, reason: str, ts: str
             raise ValueError(f"target {t} is at or below stop {s}; it would trigger "
                              "immediately")
     out = {k: dict(v) for k, v in (existing or {}).items()}
-    out[str(symbol).strip().upper()] = {"stop": s, "target": t,
-                                        "reason": str(reason).strip(), "ts": ts}
+    out[str(symbol).strip().upper()] = {
+        "stop": s,
+        "target": t,                          # kept for future use; the monitor
+                                               # does NOT read this singular key
+        "targets": [t] if t is not None else [],  # the shape apply_overrides()
+                                                   # in scripts/market_monitor.py
+                                                   # actually reads
+        "reason": str(reason).strip(), "ts": ts,
+    }
     return out
+
+
+def evaluate_enforcement(stop: float, target, has_thesis: bool,
+                         current_stop, current_targets) -> dict:
+    """Report what scripts/market_monitor.py's apply_overrides() will ACTUALLY do
+    with this stop/target at the next poll, given the symbol's thesis (or lack of
+    one). This does not enforce anything itself -- it mirrors that function's
+    logic exactly so the report can never drift from the real behaviour:
+
+      - stop: applied only if the symbol has a thesis, that thesis has a stop
+        set, and the new stop RAISES it. A looser stop is silently ignored.
+      - target: applied only if the symbol has a thesis, `target` is not None,
+        and the resulting one-element list matches the LENGTH of the thesis's
+        existing targets list (only ever true for a thesis with exactly one
+        target) AND lowers it. Any count mismatch is silently ignored.
+      - no thesis at all -> the monitor is not watching this symbol -> NEITHER
+        level is enforced, regardless of what was just written.
+
+    `current_stop`/`current_targets` are the thesis's own stop/targets (None /
+    [] when `has_thesis` is False).
+    """
+    if not has_thesis:
+        note = "no thesis for this symbol -- the monitor is not watching it at all"
+        return {
+            "stop": {"enforced": False, "note": note},
+            "target": {"enforced": False, "note": note} if target is not None else
+                      {"enforced": False, "note": "no target was set"},
+        }
+
+    if current_stop is not None and isinstance(stop, (int, float)) and stop > current_stop:
+        stop_result = {"enforced": True,
+                       "note": f"raises the thesis's current stop ({current_stop}) -- "
+                               "will be applied at the next monitor poll"}
+    elif current_stop is None:
+        stop_result = {"enforced": False,
+                       "note": "thesis has no stop set to compare against -- "
+                               "the monitor cannot verify a tightening, so this is ignored"}
+    else:
+        stop_result = {"enforced": False,
+                       "note": f"not stricter than the thesis's current stop ({current_stop}) "
+                               "-- the monitor only tightens stops, so this is ignored"}
+
+    if target is None:
+        target_result = {"enforced": False, "note": "no target was set"}
+    else:
+        cur = list(current_targets or [])
+        if len(cur) != 1:
+            target_result = {"enforced": False,
+                             "note": f"thesis has {len(cur)} target(s); a single target here "
+                                     "only matches a thesis with exactly 1 target -- ignored"}
+        elif target < cur[0]:
+            target_result = {"enforced": True,
+                             "note": f"lowers the thesis's current target ({cur[0]}) -- "
+                                     "will be applied at the next monitor poll"}
+        else:
+            target_result = {"enforced": False,
+                             "note": f"not lower than the thesis's current target ({cur[0]}) "
+                                     "-- the monitor only lowers targets, so this is ignored"}
+
+    return {"stop": stop_result, "target": target_result}
 
 
 OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
 
 
 def write_levels(symbol: str, stop, target, reason: str, ts: str,
-                 path: Path = OVERRIDES) -> dict:
+                 path: Path | None = None) -> dict:
     """Merge one symbol's levels into overrides.json ATOMICALLY.
 
     os.replace mirrors scripts/risk_review.py: the monitor reads this file every
     poll and a torn read makes it drop ALL overrides for that tick.
+
+    `path` defaults to the live module-level OVERRIDES, looked up at CALL time
+    (not bound as a default argument) so tests can redirect writes by patching
+    `decide.OVERRIDES` -- including calls made indirectly through server.py's
+    set_levels(), which never passes `path` itself.
     """
+    path = path or OVERRIDES
     existing = {}
     if path.exists():
         try:
@@ -101,6 +174,53 @@ def _selftest() -> None:
         except ValueError:
             pass
     print("selftest OK: merge_levels is pure, reason mandatory, levels sane")
+
+    # merge_levels must write the LIST shape apply_overrides() in
+    # scripts/market_monitor.py actually reads, not just the dead singular
+    # "target" key -- this is the finding this change fixes.
+    out3 = merge_levels({}, "EEE", 5.0, 9.0, "r", "t")
+    assert out3["EEE"]["targets"] == [9.0], out3["EEE"]
+    out4 = merge_levels({}, "FFF", 5.0, None, "stop only", "t")
+    assert out4["FFF"]["targets"] == [], out4["FFF"]
+    print("selftest OK: merge_levels writes targets as a list (monitor-consumable shape)")
+
+    # evaluate_enforcement: report what apply_overrides() will ACTUALLY do,
+    # mirroring its stricter-only-stop / count-matched-lower-only-target logic.
+    # 1) no thesis at all -> neither level enforced, and it says why.
+    r = evaluate_enforcement(stop=108.0, target=118.0, has_thesis=False,
+                             current_stop=None, current_targets=None)
+    assert r["stop"]["enforced"] is False and r["target"]["enforced"] is False, r
+    assert "no thesis" in r["stop"]["note"] and "no thesis" in r["target"]["note"], r
+
+    # 2) stop LOOSER than the thesis's current stop -> not enforced, reported.
+    r = evaluate_enforcement(stop=90.0, target=None, has_thesis=True,
+                             current_stop=100.0, current_targets=[120.0])
+    assert r["stop"]["enforced"] is False, r
+    assert "100.0" in r["stop"]["note"], r
+
+    # 3) stop STRICTER (higher) than the thesis's current stop -> enforced.
+    r = evaluate_enforcement(stop=108.0, target=None, has_thesis=True,
+                             current_stop=100.0, current_targets=[120.0])
+    assert r["stop"]["enforced"] is True, r
+
+    # 4) target count MISMATCHES the thesis's existing targets -> not enforced.
+    r = evaluate_enforcement(stop=None, target=110.0, has_thesis=True,
+                             current_stop=100.0, current_targets=[120.0, 140.0])
+    assert r["target"]["enforced"] is False, r
+    assert "2 target" in r["target"]["note"], r
+
+    # 5) matching count AND lowers -> enforced.
+    r = evaluate_enforcement(stop=None, target=110.0, has_thesis=True,
+                             current_stop=100.0, current_targets=[120.0])
+    assert r["target"]["enforced"] is True, r
+
+    # matching count but does NOT lower -> not enforced.
+    r = evaluate_enforcement(stop=None, target=130.0, has_thesis=True,
+                             current_stop=100.0, current_targets=[120.0])
+    assert r["target"]["enforced"] is False, r
+    print("selftest OK: evaluate_enforcement mirrors apply_overrides() exactly "
+          "(no-thesis, looser-stop, stricter-stop, target-count-mismatch, "
+          "target-lowers)")
 
 
 if __name__ == "__main__":

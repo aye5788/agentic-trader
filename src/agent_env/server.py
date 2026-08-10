@@ -197,17 +197,42 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
                reason: str = "") -> str:
     """Set YOUR stop and take-profit for a position. `reason` is required.
 
-    The monitor enforces exactly what you set here — this is how a position gets
-    protected. Pass target=0 to set a stop with no take-profit. Use `terrain()`
-    first so the levels sit where price actually goes.
+    This WRITES to the override file the monitor merges every poll -- it does
+    NOT force the monitor to act on it. scripts/market_monitor.py's
+    apply_overrides() is stricter-only: your stop is applied only if it RAISES
+    the thesis's current stop, and your target is applied only if its count
+    matches the thesis's existing targets and it LOWERS every one. If the
+    symbol has no thesis at all, the monitor is not watching it and NEITHER
+    level is enforced no matter what you set here.
+
+    Read the `enforcement` object in the response before assuming a position is
+    protected -- `ok: true` only means the write succeeded, not that either
+    level will actually be acted on. Pass target=0 to set a stop with no
+    take-profit. Use `terrain()` first so the levels sit where price actually
+    goes.
     """
+    sym = symbol.strip().upper()
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
         merged = decide.write_levels(symbol, stop, target or None, reason, ts)
     except ValueError as e:
         return json.dumps({"ok": False, "error": str(e)}, indent=2)
-    return json.dumps({"ok": True, "symbol": symbol.strip().upper(),
-                       "levels": merged[symbol.strip().upper()]}, indent=2)
+
+    prod = read_current()
+    thesis = None
+    if prod:
+        for t in prod.theses:
+            if str(t.symbol).strip().upper() == sym:
+                thesis = t
+                break
+    enforcement = decide.evaluate_enforcement(
+        stop=merged[sym]["stop"], target=merged[sym].get("target"),
+        has_thesis=thesis is not None,
+        current_stop=getattr(thesis, "stop", None),
+        current_targets=list(getattr(thesis, "targets", []) or []) if thesis else None,
+    )
+    return json.dumps({"ok": True, "symbol": sym, "written": merged[sym],
+                       "enforcement": enforcement}, indent=2)
 
 
 def _selftest() -> None:
@@ -226,6 +251,57 @@ def _selftest() -> None:
     finally:
         marks.load = orig_load
     print("selftest OK: mcp server boots, ping responds, degrades to JSON without a snapshot")
+
+    # set_levels(): the response must report what the monitor will ACTUALLY
+    # enforce (per docs/OPSLOG / this fix), never a bare ok:true. Redirect
+    # decide.OVERRIDES to a scratch file for the whole block so this NEVER
+    # touches the live research_store/monitor/overrides.json.
+    import tempfile
+    from research_store.models import Thesis, ResearchProduct
+
+    orig_overrides = decide.OVERRIDES
+    orig_read_current = globals()["read_current"]
+    with tempfile.TemporaryDirectory() as td:
+        decide.OVERRIDES = Path(td) / "overrides.json"
+        try:
+            # 1) symbol with no thesis at all -> neither level enforced, and the
+            #    response says so (the unprotected-position case).
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[])
+            r = json.loads(set_levels("ZZZ", 108.0, 118.0, "test: no thesis"))
+            assert r["ok"] is True, r
+            assert r["enforcement"]["stop"]["enforced"] is False, r
+            assert r["enforcement"]["target"]["enforced"] is False, r
+            assert "no thesis" in r["enforcement"]["stop"]["note"], r
+
+            # thesis on file for NVDA: stop=100, one target=120
+            th = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0, targets=[120.0])
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th])
+
+            # 2) stop LOOSER than the thesis's current stop -> not enforced.
+            r = json.loads(set_levels("NVDA", 90.0, 0.0, "test: looser stop"))
+            assert r["enforcement"]["stop"]["enforced"] is False, r
+
+            # 3) stop STRICTER (higher) -> enforced.
+            r = json.loads(set_levels("NVDA", 108.0, 0.0, "test: stricter stop"))
+            assert r["enforcement"]["stop"]["enforced"] is True, r
+
+            # 4) target count MISMATCHES the thesis's existing targets -> not enforced.
+            th2 = Thesis(symbol="MU", rank=2, verdict="buy", stop=50.0, targets=[60.0, 70.0])
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th2])
+            r = json.loads(set_levels("MU", 45.0, 55.0, "test: target count mismatch"))
+            assert r["enforcement"]["target"]["enforced"] is False, r
+            assert "2 target" in r["enforcement"]["target"]["note"], r
+
+            # 5) matching count AND lowers -> enforced.
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th])
+            r = json.loads(set_levels("NVDA", 95.0, 110.0, "test: lowers target"))
+            assert r["enforcement"]["target"]["enforced"] is True, r
+        finally:
+            decide.OVERRIDES = orig_overrides
+            globals()["read_current"] = orig_read_current
+    print("selftest OK: set_levels() reports actual enforcement (no-thesis, looser-stop, "
+          "stricter-stop, target-count-mismatch, target-lowers) -- never a bare ok:true, "
+          "and never touched the live overrides.json")
 
 
 if __name__ == "__main__":
