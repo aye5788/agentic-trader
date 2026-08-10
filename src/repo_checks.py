@@ -21,6 +21,7 @@ plain .venv, not just system python3.10).
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import shlex
@@ -962,6 +963,44 @@ def check_workflow_toplevel_indent(root: pathlib.Path) -> list[str]:
     return failures
 
 
+# ---------------------------------------------------------------- check 7
+
+_REQUIRED_DENIES = ("Read(./.env)", "Read(./secrets/**)", "Write")
+
+
+def check_settings_deny_secrets(root: pathlib.Path) -> list[str]:
+    """Claude settings must DENY secret reads and arbitrary writes.
+
+    THE FAILURE THIS CATCHES: the cron loops run headless with whatever these
+    files allow. Bare `Write` lets an agent overwrite config/mandate.toml or
+    src/governance.py -- its own guardrails. Unscoped `Read` reaches .env. Deny
+    rules override allow rules, so an explicit deny is the only durable control;
+    an allowlist that merely omits something reopens the moment anyone adds a
+    broad rule.
+
+    WHAT THIS DOES NOT COVER: it does not evaluate the effective permission set,
+    does not inspect ~/.claude/settings.json (outside the repo), and does not
+    police Bash rules -- the legacy prompts legitimately drive python through
+    Bash, and a wildcard there is judged by check_settings_no_exec_wildcard.
+    """
+    failures: list[str] = []
+    path = root / ".claude" / "settings.json"
+    if not path.is_file():
+        return failures
+    try:
+        data = json.loads(path.read_text(errors="ignore"))
+    except ValueError:
+        return [".claude/settings.json is not valid JSON"]
+    deny = set(data.get("permissions", {}).get("deny") or ())
+    for rule in _REQUIRED_DENIES:
+        if rule not in deny:
+            failures.append(
+                f".claude/settings.json missing required deny rule {rule!r} — "
+                f"a headless loop can write its own guardrails or read secrets"
+            )
+    return failures
+
+
 # ---------------------------------------------------------------- driver
 
 CHECKS = (
@@ -971,6 +1010,7 @@ CHECKS = (
     check_workflow_swallowed_failures,
     check_workflow_toplevel_indent,
     check_no_api_key,
+    check_settings_deny_secrets,
 )
 
 
@@ -1751,6 +1791,22 @@ jobs:
     # and the REAL repo must be clean (this is the fix being verified)
     assert check_workflow_toplevel_indent(REPO) == [], \
         check_workflow_toplevel_indent(REPO)
+
+    # -------------------- check 7: check_settings_deny_secrets --------------------
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        _write(root, ".claude/settings.json",
+               '{"permissions": {"allow": ["Read", "Write"]}}')
+        out = check_settings_deny_secrets(root)
+        assert any("Write" in f for f in out), out
+        assert any(".env" in f for f in out), out
+
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        _write(root, ".claude/settings.json",
+               '{"permissions": {"allow": ["Read"], '
+               '"deny": ["Read(./.env)", "Read(./secrets/**)", "Write"]}}')
+        assert check_settings_deny_secrets(root) == []
 
     # -------------------- checks() aggregator + main() plumbing --------
     with tempfile.TemporaryDirectory() as td:

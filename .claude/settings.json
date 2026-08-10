@@ -19,8 +19,8 @@
       "Bash(/usr/bin/python3 scripts/risk_review.py --facts)",
       "Bash(/usr/bin/python3 scripts/risk_review.py --apply)",
       "Read",
-      "Write",
       "Edit(docs/OPSLOG.md)"
-    ]
+    ],
+    "deny": ["Read(./.env)", "Read(./secrets/**)", "Write", "Bash(cat .env*)", "mcp__robinhood-trading__place_option_order"]
   }
 }
