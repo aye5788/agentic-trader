@@ -992,6 +992,56 @@ _SETTINGS_FILES = (_SETTINGS_JSON, _SETTINGS_LOCAL_JSON)
 # down, and a check asserting them passes while verifying nothing. Measured by live
 # probe 2026-08-11: the Edit denies are what actually refused a Write into src/.
 # Never "restore" these to Write().
+# A charter that states a threshold as a LITERAL drifts from the code that applies
+# it, and the agent is then told a limit it will not meet. CLAUDE.md paid for this
+# once: it carried a fixed account balance, the figure went stale, and agents
+# anchored on it to dismiss real risks. prompts/charter.md must therefore carry
+# PLACEHOLDERS only -- src/charter.py interpolates every number at render time.
+_CHARTER = "prompts/charter.md"
+_HISTORICAL = "<!-- historical -->"
+# A bare percentage or a decimal that looks like a threshold. Deliberately narrow:
+# dates (2026-08-11), step numbers and prose numerals are not thresholds, and a
+# check that cries wolf on those gets switched off.
+_LITERAL_RE = re.compile(r"(?<![\w./-])\d+(?:\.\d+)?\s?%|(?<![\w./-])0\.\d+(?![\w./-])")
+
+
+def check_charter_no_literals(root: pathlib.Path) -> list[str]:
+    """The session charter must state no threshold as a literal.
+
+    THE FAILURE THIS CATCHES: someone edits prompts/charter.md to say "no more
+    than 15% of equity" instead of leaving the placeholder. config/mandate.toml
+    later changes to 0.20, the gate refuses at 20%, and the charter still says 15
+    -- the agent has been told a limit that does not exist. Nothing else in this
+    repo compares the two.
+
+    WHAT THIS DOES NOT COVER: it cannot tell whether the PROSE around a rendered
+    number is still true, only that the number itself is derived. It does not
+    check src/charter.py's substitutions are correct -- charter.py's own selftest
+    asserts each clause survives against the real config. Dates, step numbers and
+    ordinary numerals are deliberately not matched.
+    """
+    failures: list[str] = []
+    path = root / _CHARTER
+    if not path.is_file():
+        return failures
+    for lineno, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
+        # An explicit, greppable escape for a figure that CANNOT drift because it
+        # already happened -- a measured historical result, not a live threshold.
+        # Deliberately a marker rather than a looser regex: the exemption has to
+        # be a conscious act the author writes down, and `grep historical` lists
+        # every one of them.
+        if _HISTORICAL in line:
+            continue
+        if _LITERAL_RE.search(line):
+            failures.append(
+                f"{_CHARTER}:{lineno} states a threshold as a LITERAL — every "
+                f"number in the charter must be interpolated from the constant "
+                f"that enforces it (src/charter.py), or it will drift from the "
+                f"gate and tell the agent a limit that does not exist"
+            )
+    return failures
+
+
 _REQUIRED_DENIES = (
     "Read(./.env)",
     "Read(./secrets/**)",
@@ -1212,6 +1262,7 @@ CHECKS = (
     check_no_api_key,
     check_settings_deny_secrets,
     check_settings_no_exec_wildcard,
+    check_charter_no_literals,
 )
 
 

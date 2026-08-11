@@ -48,6 +48,7 @@ VENV_SELFTESTS=(
     "scripts/record_exit_outcome.py"
     "scripts/record_rotation_outcome.py"
     "scripts/record_partial_outcome.py"
+    "src/charter.py"
     "src/integrity.py"
     "src/agent_env/live.py"
     "src/agent_env/memory.py"
