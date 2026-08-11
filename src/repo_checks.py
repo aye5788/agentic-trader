@@ -968,7 +968,12 @@ def check_workflow_toplevel_indent(root: pathlib.Path) -> list[str]:
 # The two settings files a checkout can carry. `settings.local.json` is
 # git-ignored, so it is absent on a runner and present on the droplet — every
 # reader below treats "missing" as clean and only judges what is there.
-_SETTINGS_JSON = ".claude/settings.json"
+# The loops run under THIS file (deploy/run_*.sh pass it via --settings),
+# not .claude/settings.json. The project file is deliberately permissive so a
+# human can develop in this repo; putting the lockdown there blocked edits to
+# src/, scripts/, config/, deploy/ and prompts/ for every session, which was
+# never the intent. Scoped correctly 2026-08-11.
+_SETTINGS_JSON = "deploy/loop_settings.json"
 _SETTINGS_LOCAL_JSON = ".claude/settings.local.json"
 _SETTINGS_FILES = (_SETTINGS_JSON, _SETTINGS_LOCAL_JSON)
 
@@ -979,25 +984,33 @@ _SETTINGS_FILES = (_SETTINGS_JSON, _SETTINGS_LOCAL_JSON)
 # What actually has to be unwritable is the guardrail surface: the code that
 # decides and gates trades, the config it reads, the wrappers cron runs, the
 # prompts themselves, the permission files, and the CI that watches all of it.
+# ⚠️ SPELLED Edit(...), NEVER Write(...), AND THAT IS LOAD-BEARING.
+# Claude Code does not match a path-scoped Write(path) rule against file tools at
+# all, and says so on every run: "Write(./src/**) is not matched by file permission
+# checks — only Edit(path) rules are. Edit rules cover all file-editing tools."
+# So a settings file full of Write() denies enforces NOTHING while looking locked
+# down, and a check asserting them passes while verifying nothing. Measured by live
+# probe 2026-08-11: the Edit denies are what actually refused a Write into src/.
+# Never "restore" these to Write().
 _REQUIRED_DENIES = (
     "Read(./.env)",
     "Read(./secrets/**)",
-    "Write(./src/**)",
-    "Write(./scripts/**)",
-    "Write(./config/**)",
-    "Write(./deploy/**)",
-    "Write(./prompts/**)",
-    "Write(./.claude/**)",
-    "Write(./.github/**)",
+    "Edit(./src/**)",
+    "Edit(./scripts/**)",
+    "Edit(./config/**)",
+    "Edit(./deploy/**)",
+    "Edit(./prompts/**)",
+    "Edit(./.claude/**)",
+    "Edit(./.github/**)",
     # research_store/ is otherwise WRITABLE — every prompt's snapshots, fills and
     # decisions land there. These three are the exceptions: current.json is the
     # target book the fast loop diffs against (writable = the agent picks its own
     # trades), and journal.jsonl + archive/ are the append-only ledger every
     # prompt is already told never to hand-edit. Deterministic code still writes
-    # all three through research_store.store — a deny binds the Write TOOL only.
-    "Write(./research_store/current.json)",
-    "Write(./research_store/journal.jsonl)",
-    "Write(./research_store/archive/**)",
+    # all three through research_store.store — a deny binds the TOOL, not python.
+    "Edit(./research_store/current.json)",
+    "Edit(./research_store/journal.jsonl)",
+    "Edit(./research_store/archive/**)",
 )
 
 
@@ -1069,6 +1082,16 @@ def check_settings_deny_secrets(root: pathlib.Path) -> list[str]:
     Publishing rule: file name from a module constant, rule text from
     _REQUIRED_DENIES. Nothing read out of the scanned file is echoed.
     """
+    # ABSENCE IS ITSELF THE DRIFT, and only THIS check owns that contract (the
+    # wildcard check scans this file too, and would otherwise double-report it).
+    # deploy/run_*.sh pass this file via `--settings`; without it the loops fall
+    # back to the project settings, which are deliberately permissive so a human
+    # can develop in this repo. That is the entire lockdown silently gone, and a
+    # check certifying it as clean would be worse than no check at all.
+    if not (root / _SETTINGS_JSON).is_file():
+        return [f"{_SETTINGS_JSON} is MISSING — deploy/run_*.sh pass it via "
+                f"--settings, so the headless loops would fall back to the "
+                f"permissive project settings and run with no lockdown at all"]
     data, failures = _load_settings(root, _SETTINGS_JSON)
     if data is None:
         return failures
@@ -1975,16 +1998,16 @@ jobs:
 
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        _write(root, ".claude/settings.json",
+        _write(root, _SETTINGS_JSON,
                '{"permissions": {"allow": ["Read", "Write"]}}')
         out = check_settings_deny_secrets(root)
         assert len(out) == len(_REQUIRED_DENIES), out
-        assert any("Write(./src/**)" in f for f in out), out
+        assert any("Edit(./src/**)" in f for f in out), out
         assert any(".env" in f for f in out), out
 
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        _write(root, ".claude/settings.json",
+        _write(root, _SETTINGS_JSON,
                '{"permissions": {"allow": ["Read"], "deny": ' + _all_denies + '}}')
         assert check_settings_deny_secrets(root) == []
 
@@ -1994,18 +2017,32 @@ jobs:
     # armed: stale book in, real orders out. It must still read as FAILING.
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        _write(root, ".claude/settings.json",
+        _write(root, _SETTINGS_JSON,
                '{"permissions": {"deny": ["Read(./.env)", "Read(./secrets/**)", '
                '"Write"]}}')
         out = check_settings_deny_secrets(root)
-        assert out and all("Write(./" in f for f in out), out
+        assert out and all("Edit(./" in f for f in out), out
+
+    # ...and a path-scoped `Write(...)` set does not satisfy it either, which is
+    # the sharper version of the same trap: it LOOKS exactly like a lockdown and
+    # enforces nothing, because Claude Code matches only Edit(path) against file
+    # tools. This fixture is the regression guard for the 2026-08-11 finding.
+    with tempfile.TemporaryDirectory() as d:
+        root = pathlib.Path(d)
+        _write(root, _SETTINGS_JSON,
+               '{"permissions": {"deny": ["Read(./.env)", "Read(./secrets/**)", '
+               '"Write(./src/**)", "Write(./scripts/**)", "Write(./config/**)", '
+               '"Write(./deploy/**)", "Write(./prompts/**)", "Write(./.claude/**)", '
+               '"Write(./.github/**)"]}}')
+        out = check_settings_deny_secrets(root)
+        assert out and all("Edit(./" in f for f in out), out
 
     # valid JSON that is not an object (`[]`, a string, null) must REPORT, not
     # raise: `.get` on a list is an AttributeError that took down all 8 checks.
     for payload in ("[]", '"nope"', "null", "3"):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            _write(root, ".claude/settings.json", payload)
+            _write(root, _SETTINGS_JSON, payload)
             out = check_settings_deny_secrets(root)
             assert len(out) == 1 and "not an object" in out[0], (payload, out)
             # and the aggregator survives it too
@@ -2013,7 +2050,7 @@ jobs:
 
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        _write(root, ".claude/settings.json", "{not json")
+        _write(root, _SETTINGS_JSON, "{not json")
         out = check_settings_deny_secrets(root)
         assert len(out) == 1 and "not valid JSON" in out[0], out
 
@@ -2022,12 +2059,18 @@ jobs:
                     '{"permissions": {"deny": [1, 2]}}', "{}"):
         with tempfile.TemporaryDirectory() as d:
             root = pathlib.Path(d)
-            _write(root, ".claude/settings.json", payload)
+            _write(root, _SETTINGS_JSON, payload)
             assert len(check_settings_deny_secrets(root)) == len(_REQUIRED_DENIES), payload
 
-    # no settings file at all -> clean (a fresh clone before setup)
+    # NO LOOP SETTINGS FILE AT ALL -> a FINDING, not clean. It used to read clean
+    # ("a fresh clone before setup"), which was defensible while the lockdown
+    # lived in .claude/settings.json. It is not defensible now: deploy/run_*.sh
+    # pass this file via --settings, so its absence means the loops silently run
+    # under the permissive project settings with no lockdown, and a check that
+    # certified that as clean would be worse than no check.
     with tempfile.TemporaryDirectory() as d:
-        assert check_settings_deny_secrets(pathlib.Path(d)) == []
+        out = check_settings_deny_secrets(pathlib.Path(d))
+        assert len(out) == 1 and "MISSING" in out[0], out
 
     # THE REGRESSION GUARD: the real repo's real settings file must satisfy this.
     # Without it the check only ever proves itself against fixtures, and a future
@@ -2057,11 +2100,11 @@ jobs:
 
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        _write(root, ".claude/settings.json",
+        _write(root, _SETTINGS_JSON,
                '{"permissions": {"allow": ["Read", "Bash(python3 -c \' *)"]}}')
         out = check_settings_no_exec_wildcard(root)
         assert len(out) == 1, out
-        assert ".claude/settings.json" in out[0] and "entry #1" in out[0], out
+        assert _SETTINGS_JSON in out[0] and "entry #1" in out[0], out
         assert "python3" in out[0], out
         # publishing rule: the rule TEXT itself never reaches the output
         assert "-c '" not in out[0], out
@@ -2070,7 +2113,7 @@ jobs:
     # actually lived, and where "don't ask again" writes new ones back
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        _write(root, ".claude/settings.json",
+        _write(root, _SETTINGS_JSON,
                '{"permissions": {"allow": ["Read"], "deny": ' + _all_denies + '}}')
         _write(root, ".claude/settings.local.json",
                '{"permissions": {"allow": ["Bash(.venv/bin/python *)"]}}')
@@ -2098,6 +2141,11 @@ jobs:
         root = pathlib.Path(td)
         _write(root, "deploy/crontab.template", clean_cron)
         _write(root, ".github/workflows/ok.yml", "jobs: {}\n")
+        # A clean tree HAS the loop settings — its absence is a finding (check 7),
+        # so a fixture asserting "no findings" must supply it or it is asserting
+        # that a repo with no lockdown is clean.
+        _write(root, _SETTINGS_JSON,
+               '{"permissions": {"deny": ' + json.dumps(list(_REQUIRED_DENIES)) + '}}')
         assert checks(root) == [], checks(root)
 
     with tempfile.TemporaryDirectory() as td:

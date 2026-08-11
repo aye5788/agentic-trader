@@ -33,7 +33,16 @@
       "Read(./secrets/**)",
       "Bash(cat .env*)",
       "mcp__robinhood-trading__place_option_order",
-      "Edit(./.claude/**)"
+      "Edit(./src/**)",
+      "Edit(./scripts/**)",
+      "Edit(./config/**)",
+      "Edit(./deploy/**)",
+      "Edit(./prompts/**)",
+      "Edit(./.claude/**)",
+      "Edit(./.github/**)",
+      "Edit(./research_store/current.json)",
+      "Edit(./research_store/journal.jsonl)",
+      "Edit(./research_store/archive/**)"
     ]
   }
 }
