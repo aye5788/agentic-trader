@@ -357,9 +357,13 @@ def _selftest() -> None:
     # charter did not describe: 11 of 18 closes fired in ONE minute on 2026-07-27
     # when the regime gate flipped, mean -7.65%. An agent cannot reason about its
     # biggest risk if nobody tells it the risk exists.
-    assert "LIQUIDATE THE ENTIRE BOOK" in out
-    assert "not your\n  decision" in out or "NOT YOUR" in out
+    assert "LIQUIDATE THE BOOK WITHOUT ASKING YOU" in out
     assert "2026-07-27" in out, "the evidence for the regime risk was dropped"
+    # ⚠️ It is named as a LEGACY CONTRADICTION being removed, never as settled
+    # authority. Describing it as immovable is how static governance gets written
+    # into the charter that exists to remove it.
+    assert "is being removed" in out
+    assert "judgment is\n  yours" in out or "judgment is yours" in out.replace("\n  ", " ")
 
     # the opening ORIENTS: role, capital, horizon, and what is off-limits
     for must in ("THE JOB", "objective", "horizon", "Options", "Short selling",
