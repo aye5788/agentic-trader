@@ -22,6 +22,7 @@ Substitution is str.replace, never str.format: the charter is full of braces
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -140,6 +141,35 @@ def render_tools(tool_names) -> str:
     return "\n".join(lines)
 
 
+def render_universe(strat_cfg: dict, repo: Path | None = None) -> str:
+    """How many names are in the default hunting ground, counted from the CSVs.
+
+    Derived, not stated: the universe is re-cut quarterly and a literal here
+    would be wrong within months. Counting the file is the only figure that
+    cannot drift from what candidates()/universe() will actually show.
+    """
+    repo = repo or REPO
+    counts = []
+    for key, label in (("universe", "single names"), ("etf_sleeve", "ETFs")):
+        src = strat_cfg.get(key, {}).get("source")
+        if not src:
+            continue
+        path = repo / src
+        if not path.is_file():
+            continue
+        rows = [ln for ln in path.read_text().splitlines()[1:] if ln.strip()]
+        counts.append(f"{len(rows)} {label}")
+    if not counts:
+        return ("A configured universe is your default hunting ground; "
+                "`universe()` shows it in full.")
+    return (f"A configured universe of {' and '.join(counts)} is your default "
+            f"hunting ground — `candidates()` ranks the top of it and "
+            f"`universe()` shows all of it. You may trade outside that list; "
+            f"say why when you do, and note that an off-list name has no deep "
+            f"price history here, so it cannot be scored or given measured "
+            f"stop geometry.")
+
+
 def render_baseline(strat_cfg: dict) -> str:
     """The house view, derived. Key names come from config/strategy.toml's
     [portfolio]/[signal] tables -- book_hold/sleeve_hold/book_weight, NOT the
@@ -184,11 +214,19 @@ def render(mandate_cfg: dict, strat_cfg: dict, tool_names,
         "__GATE__": render_gate(gov_cfg),
         "__TOOLS__": render_tools(tool_names),
         "__BASELINE__": render_baseline(strat_cfg),
+        "__UNIVERSE__": render_universe(strat_cfg),
         "__ANNOUNCE_PCT__": _pct(float(conc) * ANNOUNCE_FRACTION),
         "__ANNOUNCE_FRACTION__": _pct(ANNOUNCE_FRACTION),
     }
     for key, val in subs.items():
         text = text.replace(key, val)
+    # Strip the author-facing markers. `<!-- historical -->` exists so
+    # check_charter_no_literals can tell a measured past result (which cannot
+    # drift) from a live threshold (which can). It is a note to whoever edits the
+    # TEMPLATE, and it must never reach the agent: rendered mid-sentence it read
+    # "...produced 78% winners that lost money, because the <!-- historical -->
+    # losers were larger", corrupting the sentence it was meant to annotate.
+    text = re.sub(r"[ \t]*<!--.*?-->", "", text, flags=re.S)
     left = [k for k in subs if k in text]
     if left:
         raise ValueError(f"charter placeholders not substituted: {left}")
@@ -224,8 +262,16 @@ def _selftest() -> None:
 
     # no placeholder survives
     for ph in ("__MANDATE__", "__TERMS__", "__GATE__", "__TOOLS__",
-               "__BASELINE__", "__ANNOUNCE_PCT__", "__ANNOUNCE_FRACTION__"):
+               "__BASELINE__", "__ANNOUNCE_PCT__", "__ANNOUNCE_FRACTION__",
+               "__UNIVERSE__"):
         assert ph not in out, ph
+
+    # the opening ORIENTS: role, capital, horizon, and what is off-limits
+    for must in ("THE JOB", "objective", "horizon", "Options", "Short selling",
+                 "Margin or leverage", "WHY YOU ARE HERE RIGHT NOW"):
+        assert must in out, f"charter opening lost: {must}"
+    # ...and the job is stated BEFORE the machinery
+    assert out.index("THE JOB") < out.index("WHAT WILL REFUSE YOU")
 
     # the venue split is stated, and BEFORE the tool list
     assert "moomoo is DATA" in out
@@ -241,6 +287,13 @@ def _selftest() -> None:
 
     # a SELL's protection is stated
     assert "refused by nothing but the kill switch" in out
+
+    # the author-facing marker must NEVER reach the agent -- rendered inline it
+    # corrupted the very sentence it annotated
+    assert "<!--" not in out and "-->" not in out, "HTML comment leaked into the charter"
+    flat = " ".join(out.split())
+    assert "78% winners that lost money, because the losers were larger" in flat, \
+        "stripping the marker must not damage the sentence around it"
 
     # a surviving unknown placeholder is an ERROR, not silently shipped
     try:
