@@ -143,8 +143,36 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
       `outcome` event. Idempotent (safe to re-run). A symbol it reports
       `UNANCHORED` had no held thesis to attach to — report it, do not retry it.
       Nothing fully closed this run → skip this step entirely (do not write an
-      empty file). Partial (trim) sells: skip — only FULL closes get an outcome
-      (same first-cut rule as exit.md 7c). Do NOT hand-edit `journal.jsonl` and do
-      NOT write your own python snippet; this helper is the only writer.
+      empty file). Partial (rebalance-down) sells do NOT go here — the position
+      is still open, so it has no closing outcome; step 9c records them (the
+      same routing `prompts/exit.md` step 7c uses to point at its own step 7d).
+      Do NOT hand-edit `journal.jsonl` and do NOT write your own python snippet;
+      this helper is the only writer.
+9c. **Record rebalance-down partial outcomes (the de-risking record).** A
+    `rebalance` sell that reduces but does not zero a position (no `quantity`
+    field on the order — see step 5's `order_plan.json`) is a partial close:
+    the position stays open, still ranked, still stop-watched. Until it is
+    journalled it is invisible in `performance()` and in the track record —
+    exactly the gap `prompts/risk_review.md` step 6b closed for the risk
+    overlay's trims; mirror it here. For each `approved` order with `side ==
+    "sell"`, `reason == "rebalance"`, and no `quantity` field that FILLED,
+    write `research_store/rh/partial_closes.json` — a JSON array of
+    `{"symbol","fraction","entry_price","exit_price","exit_date","exit_reason"}`
+    — then run `.venv/bin/python scripts/record_partial_outcome.py`:
+      - fraction    = that order's `amount` / `current_value` from step 5's
+        `order_plan.json` (both dollar figures computed from the PRE-sell mark,
+        so this is exactly the fraction of the position sold)
+      - entry_price = that symbol's `avg_cost` from the **step-4** positions
+        snapshot — the PRE-sell cost, same rule as 9b
+      - exit_price  = the sell's `average_price` from step 8's `get_equity_orders`
+      - exit_date   = today's date (YYYY-MM-DD)
+      - exit_reason = `"rebalance"`, verbatim
+    It appends a `partial_outcome` event and does NOT close or archive the
+    thesis. Idempotent, keyed on symbol + date + price, so a retry is safe.
+    Nothing rebalanced-down this run → skip entirely (do not write an empty
+    file); a full exit (carries `quantity`) does NOT go here — that is 9b. A
+    symbol reported `UNANCHORED` had no thesis to attach to — report it, do not
+    retry it. Do NOT hand-edit `journal.jsonl` and do NOT write your own python
+    snippet; this helper is the only writer.
 10. **Report** concisely: account value, orders placed, any blocked/failed, and
     the resulting book. That is your entire output.

@@ -28,8 +28,8 @@ Agent contract (mirrors scripts/record_exit_outcome.py deliberately):
          "entry_price":  501.32,      # avg cost from the PRE-sell positions read
          "exit_price":   534.0401,    # the sell's average_price from get_equity_orders
          "exit_date":    "2026-08-10",
-         "exit_reason":  "trim"},     # "trim" (risk review) or "target1" (monitor)
-        ...]
+         "exit_reason":  "trim"},     # "trim" (risk review), "target1" (monitor),
+        ...]                          # or "rebalance" (fast loop rebalance-down)
   2. run:  .venv/bin/python scripts/record_partial_outcome.py
 
 `entry_price` MUST be the average cost read BEFORE selling, for the same reason
@@ -65,10 +65,12 @@ CLOSES = REPO / "research_store" / "rh" / "partial_closes.json"
 
 _REQUIRED = ("symbol", "fraction", "entry_price", "exit_price", "exit_date", "exit_reason")
 # research_store.record_partial_outcome takes any string, but a partial sale in
-# this system is one of exactly two things and a typo silently mislabels the
-# training data: "trim" is the risk review's kind (prompts/risk_review.md step 4),
-# "target1" is the monitor's scale-out reason in exit_request.json.
-_ALLOWED_REASONS = ("trim", "target1")
+# this system is one of exactly three things and a typo silently mislabels the
+# training data: "trim" is the risk review's kind (prompts/risk_review.md step
+# 6b), "target1" is the monitor's scale-out reason in exit_request.json
+# (prompts/exit.md step 7d), "rebalance" is the fast loop's reduce-but-don't-close
+# order reason (prompts/fast_loop.md step 9c).
+_ALLOWED_REASONS = ("trim", "target1", "rebalance")
 
 
 def validate(rows: object) -> list[str]:
@@ -170,6 +172,7 @@ def _selftest() -> None:
              "exit_reason": "trim"}]
     assert validate(good) == [], validate(good)
     assert validate([dict(good[0], exit_reason="target1", fraction=0.5)]) == []
+    assert validate([dict(good[0], exit_reason="rebalance", fraction=0.2)]) == []
     assert validate({}) == [
         "partial_closes.json must be a JSON array of partial-close objects"]
     assert "not a JSON object" in validate(["AMAT"])[0]

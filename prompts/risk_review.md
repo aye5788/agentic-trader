@@ -75,4 +75,27 @@ PROCEDURE — follow exactly:
    `UNANCHORED` had no thesis to attach to — report it, do not retry it. Do NOT
    hand-edit `journal.jsonl` and do NOT write your own python snippet; this
    helper is the only writer.
+6c. **Record each FULL exit that filled (the close).** An `exit` leaves the
+   position at zero — the whole trade, not just a slice of it — and until it is
+   journalled it is invisible in `performance()` and in the track record. That
+   is worse than a missed trim: a missed trim just under-reports one decision,
+   a missed exit erases the entire round trip. For every `exit` whose sell
+   FILLED, write `research_store/rh/exit_closes.json` — a JSON array of
+   `{"symbol","entry_price","exit_price","exit_date","exit_reason"}` — then run
+   `.venv/bin/python scripts/record_exit_outcome.py`:
+     - entry_price = that symbol's `avg_cost` from the `get_equity_positions` you
+       read in step 6, captured BEFORE the sell
+     - exit_price  = the sell's `average_price` from `get_equity_orders`
+     - exit_date   = today's date (YYYY-MM-DD)
+     - exit_reason = `"risk_review"`, verbatim — this is a judgment-driven close,
+       not a stop or take-profit level breach, and the label must say so
+   This is the SAME script `prompts/exit.md` step 7c uses for the monitor's
+   stop/target closes: it anchors to the symbol's CURRENT thesis first (still in
+   the book — the weekly rebalance hasn't touched it), falling back to the
+   archive if it has. It attaches the label to the thesis and appends an
+   `outcome` event. Idempotent (safe to re-run). Placed nothing, or exited
+   nothing? Skip this step entirely (do not write an empty file). A `trim` does
+   NOT go here — that is 6b. A symbol reported `UNANCHORED` had no thesis to
+   attach to — report it, do not retry it. Do NOT hand-edit `journal.jsonl` and
+   do NOT write your own python snippet; this helper is the only writer.
 7. Report concisely: per-name verdict, what you changed, what you placed.

@@ -13,6 +13,13 @@ scripts/market_monitor.py when a level breaks, so a step that cannot be granted
 is a step that hangs on an approval no headless run can give. This script is the
 same work behind an EXACT, argument-free command, so the grant can be exact too:
 
+Also the recorder for prompts/risk_review.md step 6c — a risk-review-initiated
+FULL exit closes a position that, at the moment this script runs, is still sitting
+in the CURRENT book exactly like a monitor-fired stop/target close (risk_review.py
+never rewrites current.json; only the weekly slow loop rotates a name out) — so
+the same current-book-first / archive-fallback anchoring applies unchanged. Only
+its label differs: `"risk_review"`, not a price-level breach.
+
     .venv/bin/python scripts/record_exit_outcome.py
 
 Agent contract (mirrors scripts/record_fills.py and
@@ -24,7 +31,8 @@ scripts/record_rotation_outcome.py deliberately):
          "entry_price": 61.4200,   # avg cost from the PRE-sell get_equity_positions
          "exit_price":  58.9100,   # the sell's average_price from get_equity_orders
          "exit_date":   "2026-08-06",
-         "exit_reason": "stop",    # the exit's `reason` from exit_request.json
+         "exit_reason": "stop",    # the exit's `reason` from exit_request.json, or
+                                    # "risk_review" for a risk-review-initiated close
          "spy_entry": null, "spy_exit": null},   # optional; omit if unknown
         ...]
   2. run:  .venv/bin/python scripts/record_exit_outcome.py
@@ -67,10 +75,12 @@ sys.path.insert(0, str(REPO / "src"))
 CLOSES = REPO / "research_store" / "rh" / "exit_closes.json"
 
 _REQUIRED = ("symbol", "entry_price", "exit_price", "exit_date", "exit_reason")
-# ledger.outcome_from_exit takes any string, but a monitor-fired exit is one of
-# exactly these and a typo silently mislabels the training data. These are the
-# `reason` values scripts/market_monitor.py writes into exit_request.json.
-_ALLOWED_REASONS = ("stop", "target1", "target2")
+# ledger.outcome_from_exit takes any string, but a full close in this system is
+# one of exactly these and a typo silently mislabels the training data. "stop" /
+# "target1" / "target2" are the `reason` values scripts/market_monitor.py writes
+# into exit_request.json; "risk_review" is prompts/risk_review.md step 6c's
+# judgment-driven close (kind == "exit"), which hits neither level.
+_ALLOWED_REASONS = ("stop", "target1", "target2", "risk_review")
 
 
 def validate(rows: object) -> list[str]:
@@ -197,6 +207,7 @@ def _selftest() -> None:
              "exit_date": "2026-08-06", "exit_reason": "stop"}]
     assert validate(good) == [], validate(good)
     assert validate([dict(good[0], exit_reason="target2")]) == []
+    assert validate([dict(good[0], exit_reason="risk_review")]) == []
     assert validate([dict(good[0], spy_entry=None, spy_exit=None)]) == []
     assert validate([dict(good[0], spy_entry=640.0, spy_exit=651.0)]) == []
     assert validate({}) == ["exit_closes.json must be a JSON array of close objects"]
