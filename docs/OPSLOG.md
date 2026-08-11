@@ -8,6 +8,51 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-08-11 — the safety gate stopped being optional: a PreToolUse hook in front of every order
+
+`check_order()` (`src/agent_env/`) was **advisory**. It is a tool the agent MAY call, and
+nothing compelled it to: an agent that skipped the step, or mis-read the verdict, could call
+`mcp__robinhood-trading__place_equity_order` directly and move real money with no gate
+consulted at all. The gate's correctness was never the problem — its *reachability* was.
+
+`scripts/hooks/pretooluse_order_gate.py` moves the gate into the **harness**. Claude Code runs
+a `PreToolUse` hook before the tool call is dispatched, and its `deny` is not something the
+model can forget or argue with. Wired in **`deploy/loop_settings.json`** (the cron loops'
+`--settings` file) — deliberately NOT in `.claude/settings.json`, so an interactive human
+session is not gated by it.
+
+What it enforces, using only the **write-free** governance functions: kill switch → shadow
+mode → side sanity → `live_approved` / `HALT_ENTRIES` / `max_order_pct` / whitelist via
+`governance.vet_plan`. It does **not** call `gates()`: `gates()` writes
+`research_store/governance/state.json` through `update_peak`, so a hook calling it would
+ratchet a live drawdown gate as a side effect of merely being consulted. The drawdown halt is
+therefore still the fast loop's job, not the hook's.
+
+**A SELL is refused by nothing but the kill switch.** Stops here are software-only
+(`scripts/market_monitor.py` IS the stop), so a gate that blocks a sell does not pause trading
+— it strips an open position of its only protection. `live_approved`, `HALT_ENTRIES`, the
+order cap and the whitelist are all BUY-only in the hook, matching `governance.vet_plan`. A
+full exit also arrives as a *share quantity* (RH rejects a dollar-notional order that consumes
+a whole position: `EQUITY_DOLLAR_BASED_SELL_ALL_ERROR`), which the hook handles rather than
+choking on. The mirror case — a market BUY priced in shares — cannot be sized without a quote,
+and the hook refuses it rather than guessing.
+
+**Shadow mode: `touch research_store/SHADOW`** (same one-file pattern as `HALT`) makes the gate
+refuse EVERY order while the loop still runs end to end — the switch for a phased rollout, and
+a way to exercise a new procedure with placement mechanically impossible. `rm` it to go live.
+
+Two properties it was built to hold: it **fails closed** (any exception — unparseable payload,
+unreadable config, a bug — prints a `deny` naming the exception type; a hook that crashes
+prints nothing, and nothing reads as "no opinion" and lets the order through), and it stays
+**fast** — it may read small JSON and config only, never `research_store/prices/*.parquet` and
+never the signal. Measured over 20 cold starts including imports: **mean 0.104s** (min 0.072s,
+max 0.180s).
+
+Not covered: order *cancellation*, option orders (denied outright in the loop settings), and
+any session not started with `--settings deploy/loop_settings.json`.
+
+---
+
 ## 2026-08-10 — the stop-loss prompt had an unpermittable step; the permission check had no on-box runner
 
 Two follow-ups to `87260f7` (path-scoped tool permissions). Same failure class in both:

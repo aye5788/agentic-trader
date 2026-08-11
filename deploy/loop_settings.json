@@ -44,5 +44,18 @@
       "Edit(./research_store/journal.jsonl)",
       "Edit(./research_store/archive/**)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__robinhood-trading__place_equity_order",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/agentic-trader/.venv/bin/python /opt/agentic-trader/scripts/hooks/pretooluse_order_gate.py --hook"
+          }
+        ]
+      }
+    ]
   }
 }

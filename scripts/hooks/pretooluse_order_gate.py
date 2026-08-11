@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""PreToolUse hook — THE unbypassable gate in front of every live equity order.
+
+WHAT FAILURE THIS PREVENTS
+    Until this existed, every safety check the agent ran before placing an order
+    was ADVISORY: `check_order()` in src/agent_env/ is a tool the agent may call,
+    and nothing forces it to. An agent that forgot the step, mis-parsed the
+    verdict, or simply decided to skip it could reach
+    mcp__robinhood-trading__place_equity_order directly, and real money moved
+    with no gate consulted at all. A PreToolUse hook runs in the HARNESS, before
+    the tool call is dispatched, and its `deny` is not something the model can
+    argue with or forget — so the gate stops depending on the agent's compliance.
+
+    It is also the phased-rollout switch: `research_store/SHADOW` (same
+    touch/rm pattern as `research_store/HALT`) makes the gate refuse EVERY
+    order while the loop keeps running end to end, so a new procedure can be
+    exercised for real with placement mechanically impossible.
+
+WHAT IT DOES NOT COVER
+    - Only `mcp__robinhood-trading__place_equity_order`. Order CANCELLATION,
+      option orders, and anything the agent does outside the RH MCP are not
+      seen here (option orders are denied outright in deploy/loop_settings.json).
+    - It binds only sessions started with `--settings deploy/loop_settings.json`
+      (the cron loops). A human's interactive session under
+      `.claude/settings.json` is deliberately NOT gated by this.
+    - It cannot judge the MERIT of a trade, only the mandate's mechanical
+      limits. It never recomputes the signal and never opens the price panel.
+    - It cannot price a market BUY expressed in SHARES (no quote is available
+      to a hook that must stay under ~0.1s), so it refuses that shape rather
+      than guessing — see `_notional`.
+    - It is not a substitute for src/governance.gates(): the drawdown halt is
+      NOT evaluated here, because `gates()` WRITES
+      research_store/governance/state.json (via `update_peak`) and a hook that
+      writes state on every order would ratchet a live gate as a side effect of
+      being consulted. Only the write-free governance functions are called.
+
+LATENCY BUDGET
+    This runs on the critical path of every order. It may read small JSON and
+    config ONLY. It must NEVER read research_store/prices/*.parquet or import
+    pandas — a full cold start including imports measures ~0.1s; a parquet read
+    would make that seconds, on every single order.
+
+INVOCATION
+    hook (deploy/loop_settings.json):  ... pretooluse_order_gate.py --hook
+        reads the hook JSON on stdin, prints a PreToolUse decision, exits 0.
+    selftest:                          ... pretooluse_order_gate.py [--selftest]
+        with no payload on stdin, runs _selftest().
+    A payload arriving on stdin is ALWAYS answered with a decision, flag or no
+    flag — a misconfigured hook command must not silently print selftest text
+    (which the harness would read as "no decision" and let the order through).
+
+FAIL-CLOSED
+    Any unexpected exception in the driver prints a `deny` naming the exception
+    type. A hook that crashes must never be a hook that approves.
+"""
+from __future__ import annotations
+
+import json
+import math
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "src"))
+
+import governance as gov  # noqa: E402  (json/math/pathlib only — no network, no moomoo)
+
+ORDER_TOOL = "mcp__robinhood-trading__place_equity_order"
+SHADOW_FILE = REPO / "research_store" / "SHADOW"
+
+
+# --------------------------------------------------------------------------- #
+# decision core (pure — every input is passed in)
+# --------------------------------------------------------------------------- #
+def _allow(reason: str) -> dict:
+    return {"permissionDecision": "allow", "permissionDecisionReason": reason}
+
+
+def _deny(reason: str) -> dict:
+    return {"permissionDecision": "deny", "permissionDecisionReason": reason}
+
+
+def _to_float(v):
+    """Parse an order field to a finite float, else None.
+
+    The RH MCP passes `dollar_amount` / `quantity` / `limit_price` as STRINGS,
+    while scripts/fast_loop.py's own plan dicts carry floats, so both shapes
+    have to parse. `None` is returned for anything not finite and numeric —
+    including bools, which are `int` to Python but can never be a real dollar
+    amount — so an unusable value can only ever end up REFUSING a buy
+    (governance._amount_invalid), never sliding through a `>` comparison the
+    way NaN silently does.
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if math.isfinite(v) else None
+    if isinstance(v, str):
+        try:
+            f = float(v.strip())
+        except ValueError:
+            return None
+        return f if math.isfinite(f) else None
+    return None
+
+
+def _notional(tool_input: dict) -> tuple[float | None, str]:
+    """-> (dollar notional, how it was derived). `None` means UNSIZEABLE here.
+
+    `amount` is the fast loop's own key; `dollar_amount` is the RH MCP's. A
+    limit order priced in shares is multiplied out. A MARKET order priced in
+    shares carries no price at all, and pricing it would need a quote — a
+    network call this hook's latency budget forbids — so it stays None and the
+    caller refuses the BUY. That shape is real and expected on the SELL side:
+    RH rejects a dollar-notional order that consumes an entire position
+    (EQUITY_DOLLAR_BASED_SELL_ALL_ERROR), so a full exit legitimately arrives
+    as a share quantity. Sells never reach this function's verdict.
+    """
+    raw = tool_input.get("amount")
+    if raw is None:
+        raw = tool_input.get("dollar_amount")
+    amt = _to_float(raw)
+    if amt is not None:
+        return amt, "dollar_amount"
+    qty = _to_float(tool_input.get("quantity"))
+    px = _to_float(tool_input.get("limit_price"))
+    if qty is not None and px is not None:
+        return qty * px, "quantity x limit_price"
+    return None, "unsizeable"
+
+
+def decide(payload: dict, cfg: dict, valued: dict, shadow: bool) -> dict:
+    """The verdict for one hook payload. Pure: reads no clock, writes nothing.
+
+    Order of the gates, and why:
+
+      1. not an order tool          -> allow, untouched. The matcher should
+                                       already have kept us out, but a hook
+                                       that mis-fires must not block unrelated
+                                       work.
+      2. kill switch                -> deny EVERYTHING, buy or sell. The one
+                                       gate permitted to refuse an exit; the
+                                       reason says so, because the human now
+                                       has to sell by hand.
+      3. shadow mode                -> deny everything. The rollout switch.
+      4. side neither buy nor sell  -> deny. We cannot tell whether the order
+                                       increases risk, so we do not guess.
+      5. SELL                       -> ALLOW, always. Load-bearing: stops here
+                                       are software-only (scripts/market_monitor.py
+                                       IS the stop), so a gate that blocks a
+                                       sell does not pause trading, it strips an
+                                       open position of its only protection.
+                                       Everything below this line is BUY-only,
+                                       deliberately — including `live_approved`.
+      6. live_approved / HALT_ENTRIES / max_order_pct / whitelist
+                                    -> the ordinary entry gates, via write-free
+                                       src/governance functions only.
+
+    `valued` is src/marks.load() (or {}). A missing/garbage account value
+    becomes NaN, which governance.vet_plan already fails CLOSED on for buys
+    and never applies to sells.
+    """
+    tool = (payload or {}).get("tool_name")
+    if tool != ORDER_TOOL:
+        return _allow(f"{tool!r} is not {ORDER_TOOL} — order gate does not apply")
+
+    ti = (payload or {}).get("tool_input") or {}
+    if not isinstance(ti, dict):
+        return _deny(f"order gate: tool_input is {type(ti).__name__}, not an "
+                     "order record; refusing an order it cannot read")
+    side = str(ti.get("side") or "").strip().lower()
+    sym = str(ti.get("symbol") or "").strip().upper()
+
+    if gov.kill_switch_active(cfg):
+        return _deny(
+            f"KILL-SWITCH active ({cfg['governance']['kill_switch_file']} present) "
+            "— the machine places no order of any kind, buy or sell. The monitor "
+            "still watches and ALERTS on a breach; any exit must be placed BY HAND.")
+
+    if shadow:
+        return _deny(
+            "SHADOW MODE (research_store/SHADOW present) — every order is refused, "
+            "including sells, while the loop is exercised end to end. Nothing was "
+            f"placed for {sym or '?'}. Journal the intent and continue; remove the "
+            "SHADOW file to go live.")
+
+    if side not in ("buy", "sell"):
+        return _deny(
+            f"order gate: side {ti.get('side')!r} is neither 'buy' nor 'sell' — "
+            "cannot tell whether this order increases risk, so it is refused.")
+
+    if side == "sell":
+        return _allow(
+            f"SELL {sym or '?'} — no gate but the kill switch may block an exit "
+            "(stops here are software-only, so refusing a sell would leave the "
+            "position unprotected).")
+
+    # ---- BUY only from here down -----------------------------------------
+    if not gov.live_approved(cfg):
+        return _deny(
+            "[proof] live_approved is false — this box is not armed to open "
+            f"positions; no BUY of {sym or '?'} may be placed. (Exits stay "
+            "available: live_approved is checked for buys only, for the same "
+            "reason the drawdown halt is.)")
+
+    if gov.halt_entries_active(cfg):
+        return _deny(
+            "HALT-ENTRIES active "
+            f"({cfg['governance'].get('halt_entries_file', gov.HALT_ENTRIES_DEFAULT)}"
+            f" present) — no new risk; BUY of {sym or '?'} refused. Exits stay armed.")
+
+    amount, how = _notional(ti)
+    if amount is None:
+        return _deny(
+            f"BUY {sym or '?'} cannot be sized: no usable dollar_amount, and no "
+            "quantity x limit_price to multiply out "
+            f"(quantity={ti.get('quantity')!r}, limit_price={ti.get('limit_price')!r}). "
+            "This gate must not fetch a quote, so it refuses rather than guessing. "
+            "Place buys as a dollar amount.")
+
+    av = _to_float((valued or {}).get("account_value"))
+    if av is None:
+        av = float("nan")   # vet_plan fails CLOSED on a non-finite value, buys only
+
+    approved, blocked = gov.vet_plan(
+        [{"symbol": sym, "side": "buy", "amount": amount}], av, cfg)
+    if blocked:
+        return _deny(f"BUY {sym or '?'} refused by governance.vet_plan: "
+                     f"{blocked[0]['blocked']}")
+
+    return _allow(f"BUY {sym} ${amount:,.2f} ({how}) clears the kill switch, "
+                  f"HALT_ENTRIES, live_approved and vet_plan "
+                  f"(cap {cfg['governance']['max_order_pct']:.0%} of "
+                  f"${av:,.2f}).")
+
+
+# --------------------------------------------------------------------------- #
+# driver
+# --------------------------------------------------------------------------- #
+def _emit(d: dict) -> None:
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": d["permissionDecision"],
+        "permissionDecisionReason": d["permissionDecisionReason"]}}))
+
+
+def driver(raw: str) -> int:
+    """Decide on one raw stdin payload and print the hook decision.
+
+    FAILS CLOSED: every exception path — unparseable JSON, an unreadable
+    config, a bug in decide() — prints a `deny` naming the exception type. A
+    hook that crashes prints nothing, and a hook that prints nothing is read by
+    the harness as "no opinion", which lets the order through. That is the one
+    outcome this wrapper exists to make impossible.
+    """
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError(f"hook payload is {type(payload).__name__}, not an object")
+        import strategy          # noqa: PLC0415 — kept off the import path of decide()
+        import marks             # noqa: PLC0415
+        cfg = strategy.load()
+        valued = marks.load() or {}
+        _emit(decide(payload, cfg, valued, SHADOW_FILE.exists()))
+    except Exception as e:       # noqa: BLE001 — deliberate catch-all, see docstring
+        _emit(_deny(
+            f"order gate FAILED CLOSED: {type(e).__name__}: {e} — the safety gate "
+            "could not reach a verdict, so no order may be placed. Report this; "
+            "do not retry the order."))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+def _selftest() -> None:
+    """Runs against a TEMPORARY repo root (governance reads REPO at call time),
+    so the assertions describe the CODE, not whatever HALT/SHADOW files happen
+    to exist on the live box today.
+
+    The load-bearing assertions are the ones proving a SELL is refused by
+    nothing but the kill switch, and that a crash denies.
+    """
+    import tempfile
+    _repo = gov.REPO
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            gov.REPO = Path(d)
+            (gov.REPO / "research_store").mkdir(parents=True)
+            (gov.REPO / "config").mkdir()
+            (gov.REPO / "config" / "universe.csv").write_text("ticker,flag\nMU,\nAAPL,\n")
+            (gov.REPO / "config" / "etf_universe.csv").write_text("ticker,flag\nXLK,\n")
+
+            CFG = {"governance": {"kill_switch_file": "research_store/HALT",
+                                  "halt_entries_file": "research_store/HALT_ENTRIES",
+                                  "max_order_pct": 0.15, "require_whitelist": False},
+                   "proof": {"live_approved": True}}
+            V = {"account_value": 100.0, "buying_power": 50.0}
+            buy = {"tool_name": ORDER_TOOL,
+                   "tool_input": {"symbol": "MU", "side": "buy", "amount": 10.0}}
+            sell = {**buy, "tool_input": {"symbol": "MU", "side": "sell", "amount": 10.0}}
+
+            # shadow mode denies EVERYTHING, including sells
+            d_ = decide(buy, CFG, V, shadow=True)
+            assert d_["permissionDecision"] == "deny" and "shadow" in d_["permissionDecisionReason"].lower()
+            assert decide(sell, CFG, V, shadow=True)["permissionDecision"] == "deny"
+
+            # live mode allows an ordinary buy
+            assert decide(buy, CFG, V, shadow=False)["permissionDecision"] == "allow"
+
+            # a non-order tool is never touched by this hook
+            other = {"tool_name": "mcp__agentic-trader__quote", "tool_input": {}}
+            assert decide(other, CFG, V, shadow=False)["permissionDecision"] == "allow"
+
+            # an order exceeding max_order_pct is denied
+            big = {**buy, "tool_input": {"symbol": "MU", "side": "buy", "amount": 90.0}}
+            assert decide(big, CFG, V, shadow=False)["permissionDecision"] == "deny"
+
+            # A SELL IS NEVER BLOCKED on anything but the kill switch: the monitor's stop
+            # is software-only, so blocking a sell removes a position's only protection.
+            huge_sell = {**buy, "tool_input": {"symbol": "MU", "side": "sell", "amount": 90.0}}
+            assert decide(huge_sell, CFG, V, shadow=False)["permissionDecision"] == "allow"
+
+            # --- the RH wire format: dollar_amount/quantity arrive as STRINGS ---
+            wire_buy = {"tool_name": ORDER_TOOL,
+                        "tool_input": {"account_number": "X", "symbol": "MU",
+                                       "side": "buy", "type": "market",
+                                       "dollar_amount": "10.00"}}
+            assert decide(wire_buy, CFG, V, shadow=False)["permissionDecision"] == "allow"
+            wire_big = {**wire_buy, "tool_input": {**wire_buy["tool_input"],
+                                                   "dollar_amount": "90.00"}}
+            assert decide(wire_big, CFG, V, shadow=False)["permissionDecision"] == "deny"
+
+            # a SHARE-quantity BUY cannot be priced without a quote -> refused,
+            # never guessed, and never silently allowed.
+            qty_buy = {"tool_name": ORDER_TOOL,
+                       "tool_input": {"symbol": "MU", "side": "buy",
+                                      "type": "market", "quantity": "3"}}
+            r = decide(qty_buy, CFG, V, shadow=False)
+            assert r["permissionDecision"] == "deny" and "sized" in r["permissionDecisionReason"], r
+            # ...but a LIMIT buy in shares is sizeable, and the cap still applies
+            lim_ok = {"tool_name": ORDER_TOOL,
+                      "tool_input": {"symbol": "MU", "side": "buy", "type": "limit",
+                                     "quantity": "1", "limit_price": "10.00"}}
+            assert decide(lim_ok, CFG, V, shadow=False)["permissionDecision"] == "allow"
+            lim_big = {**lim_ok, "tool_input": {**lim_ok["tool_input"], "quantity": "9"}}
+            assert decide(lim_big, CFG, V, shadow=False)["permissionDecision"] == "deny"
+
+            # SELL-ALL arrives as a share quantity (RH rejects a dollar-notional
+            # order that consumes a whole position: EQUITY_DOLLAR_BASED_SELL_ALL_ERROR).
+            # It must pass, not crash and not be denied for being unsizeable.
+            qty_sell = {"tool_name": ORDER_TOOL,
+                        "tool_input": {"symbol": "MU", "side": "sell",
+                                       "type": "market", "quantity": "3.141592"}}
+            assert decide(qty_sell, CFG, V, shadow=False)["permissionDecision"] == "allow"
+
+            # --- the kill switch is the ONE gate that may refuse an exit -------
+            (gov.REPO / "research_store" / "HALT").touch()
+            for p in (buy, sell, qty_sell):
+                r = decide(p, CFG, V, shadow=False)
+                assert r["permissionDecision"] == "deny", (p, r)
+                assert "KILL-SWITCH" in r["permissionDecisionReason"], r
+                assert "BY HAND" in r["permissionDecisionReason"], r
+            (gov.REPO / "research_store" / "HALT").unlink()
+
+            # --- HALT_ENTRIES: buys refused, exits still armed ----------------
+            (gov.REPO / "research_store" / "HALT_ENTRIES").touch()
+            assert decide(buy, CFG, V, shadow=False)["permissionDecision"] == "deny"
+            assert decide(sell, CFG, V, shadow=False)["permissionDecision"] == "allow", \
+                "HALT_ENTRIES must never block a sell"
+            assert decide(qty_sell, CFG, V, shadow=False)["permissionDecision"] == "allow"
+            (gov.REPO / "research_store" / "HALT_ENTRIES").unlink()
+
+            # --- live_approved gates BUYS ONLY --------------------------------
+            OFF = {**CFG, "proof": {"live_approved": False}}
+            assert decide(buy, OFF, V, shadow=False)["permissionDecision"] == "deny"
+            assert decide(sell, OFF, V, shadow=False)["permissionDecision"] == "allow", \
+                "live_approved must never strand an exit"
+
+            # --- whitelist is BUY-ONLY (mirrors governance.vet_plan) ----------
+            WL = {**CFG, "governance": {**CFG["governance"], "require_whitelist": True},
+                  "universe": {"source": "config/universe.csv"},
+                  "etf_sleeve": {"source": "config/etf_universe.csv"}}
+            off_uni_buy = {"tool_name": ORDER_TOOL,
+                           "tool_input": {"symbol": "NFLX", "side": "buy", "amount": 5.0}}
+            off_uni_sell = {**off_uni_buy,
+                            "tool_input": {"symbol": "NFLX", "side": "sell", "amount": 5.0}}
+            assert decide(off_uni_buy, WL, V, shadow=False)["permissionDecision"] == "deny"
+            assert decide(off_uni_sell, WL, V, shadow=False)["permissionDecision"] == "allow", \
+                "an off-universe SELL must never be refused"
+            assert decide(buy, WL, V, shadow=False)["permissionDecision"] == "allow"
+
+            # --- garbage in must never approve a BUY --------------------------
+            for bad in (float("nan"), float("inf"), None, "not-a-number", True, {}):
+                p = {"tool_name": ORDER_TOOL,
+                     "tool_input": {"symbol": "MU", "side": "buy", "amount": bad}}
+                assert decide(p, CFG, V, shadow=False)["permissionDecision"] == "deny", bad
+                s = {"tool_name": ORDER_TOOL,
+                     "tool_input": {"symbol": "MU", "side": "sell", "amount": bad}}
+                assert decide(s, CFG, V, shadow=False)["permissionDecision"] == "allow", bad
+            # an unknown account value (no snapshot) blocks buys, never sells
+            for bad_v in ({}, {"account_value": None}, {"account_value": float("nan")}):
+                assert decide(buy, CFG, bad_v, shadow=False)["permissionDecision"] == "deny", bad_v
+                assert decide(sell, CFG, bad_v, shadow=False)["permissionDecision"] == "allow", bad_v
+            # a side we do not recognise is refused, not guessed at
+            for bad_side in ("short", "", None, "BUYY"):
+                p = {"tool_name": ORDER_TOOL,
+                     "tool_input": {"symbol": "MU", "side": bad_side, "amount": 1.0}}
+                assert decide(p, CFG, V, shadow=False)["permissionDecision"] == "deny", bad_side
+            # a malformed tool_input is refused rather than crashing
+            assert decide({"tool_name": ORDER_TOOL, "tool_input": "buy MU"},
+                          CFG, V, shadow=False)["permissionDecision"] == "deny"
+            # case/whitespace on a legitimate side must still be understood
+            for ok_side in ("BUY", " buy ", "Buy"):
+                p = {"tool_name": ORDER_TOOL,
+                     "tool_input": {"symbol": "MU", "side": ok_side, "amount": 10.0}}
+                assert decide(p, CFG, V, shadow=False)["permissionDecision"] == "allow", ok_side
+
+            # --- the driver FAILS CLOSED on anything it cannot parse ----------
+            import io
+            import contextlib
+            for raw in ("", "not json", "[]", "null", '{"tool_name": null}'):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    rc = driver(raw)
+                assert rc == 0, raw
+                out = json.loads(buf.getvalue())["hookSpecificOutput"]
+                assert out["hookEventName"] == "PreToolUse"
+                if raw == '{"tool_name": null}':      # parses fine, just not our tool
+                    assert out["permissionDecision"] == "allow", raw
+                else:
+                    assert out["permissionDecision"] == "deny", raw
+                    assert "FAILED CLOSED" in out["permissionDecisionReason"], raw
+    finally:
+        gov.REPO = _repo
+    print("pretooluse_order_gate: OK")
+
+
+if __name__ == "__main__":
+    argv = sys.argv[1:]
+    if "--hook" in argv:
+        sys.exit(driver(sys.stdin.read()))
+    if "--selftest" in argv:      # never touch stdin: deploy/run_selftests.sh
+        _selftest()               # inherits whatever stdin the suite was run with
+        sys.exit(0)
+    # No flag: selftest mode — UNLESS a payload actually arrived on stdin, in
+    # which case this is a misconfigured hook command and it must still answer
+    # with a decision (printing selftest text would read as "no opinion" and let
+    # the order through).
+    raw = "" if sys.stdin.isatty() else sys.stdin.read()
+    if raw.strip():
+        sys.exit(driver(raw))
+    _selftest()

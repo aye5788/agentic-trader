@@ -151,6 +151,22 @@ src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
 src/governance.py       Layer-5 guardrails: kill-switch file, drawdown halt,
                         per-order cap, universe whitelist, live_approved master
                         switch. The last gate before a live order (fast loop).
+scripts/hooks/pretooluse_order_gate.py
+                        THE UNBYPASSABLE ORDER GATE — a Claude Code PreToolUse
+                        hook on mcp__robinhood-trading__place_equity_order,
+                        wired in deploy/loop_settings.json (the LOOPS only, not
+                        interactive sessions). Runs in the harness, so the gate
+                        no longer depends on the agent remembering to call
+                        check_order(). Calls only WRITE-FREE governance
+                        (kill_switch_active/halt_entries_active/live_approved/
+                        vet_plan) — ⛔ never gates(), which WRITES the drawdown
+                        peak via update_peak and would ratchet a live gate on
+                        every order. A SELL is refused by NOTHING but the kill
+                        switch. Fails CLOSED on any exception. `touch
+                        research_store/SHADOW` = deny every order while the loop
+                        still runs (phased-rollout switch); rm to go live. Small
+                        JSON + config only — NEVER the price panel (~0.1s
+                        budget, on the critical path of every order).
 scripts/market_monitor.py Intraday stop/take-profit watcher. Polls moomoo quotes
                         during RTH vs. each holding's stored stop/targets; fires
                         prompts/exit.md (market sell) on a breach. Pure-Python
