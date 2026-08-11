@@ -47,13 +47,24 @@ def render_mandate(mandate_cfg: dict) -> str:
     pnl = mandate_cfg.get("pnl_concentration", {})
     rel = mandate_cfg.get("relative_return", {})
     return "\n".join([
-        "Two criteria BLOCK. A breach makes the machine act, not advise:",
+        "⚠️ THESE ARE MEASURED AND REPORTED. NOTHING ACTS ON THEM. Nothing "
+        "flattens the book on a breach and nothing blocks an order because a "
+        "criterion failed -- verified, not assumed: the function that would turn "
+        "a breach into an action has no caller, and the order gate never reads "
+        "mandate status. You are the enforcement. Do not carry a position because "
+        "you believe the machine would stop you; it will not.",
+        "",
+        "Two criteria are the ones that MATTER MOST, and you police them:",
         "",
         f"- **Drawdown** — no more than {_pct(dd)} below the all-time high-water "
         f"mark, measured close-to-close. Never intraday: an intraday measure "
         f"fires on noise.",
         f"- **Concentration** — no single position above {_pct(conc)} of equity, "
-        f"at any mark.",
+        f"at any mark. ⚠️ The order gate caps a single ORDER's notional, never "
+        f"the resulting POSITION: two adds under the cap, or one entry that "
+        f"rallies, produces a breach with every order passing cleanly. And it "
+        f"is blind to sector — several names in one industry read as diversified. "
+        f"Use `sectors()`; the number alone will not tell you.",
         "",
         "Two criteria INFORM. They judge whether the approach is working and "
         "never gate an order:",
@@ -329,6 +340,19 @@ def _selftest() -> None:
                  "Do not assume when checking is available",
                  "Do not report done when it is partly done"):
         assert must in out, f"anti-circumvention clause lost: {must}"
+
+    # ⚠️ CLAIMS THAT WERE FALSE AND ARE NOW PINNED. Three independent audits found
+    # the charter asserting safety properties the code does not provide -- the most
+    # dangerous class of error here, because the agent cannot check and will rely.
+    assert "a level is not enforced until the tool says it is" in out.lower()
+    assert "enforcement.stop.enforced: true" in out
+    assert "cannot be given an enforced\nstop at all" in out or "cannot be given an enforced" in out
+    assert "stricter-only" in out, "the no-widening trap must be stated"
+    assert "NOTHING ACTS ON THEM" in out, "the mandate is advisory; do not reclaim it"
+    assert "You are the enforcement" in out
+    assert "never\nthe resulting POSITION" in out or "never the resulting POSITION" in out.replace("\n"," ")
+    assert "full\ncloses have been recorded since 2026-07-23" in out or "recorded since 2026-07-23" in out
+    assert "Pace is a decision" in out, "the deployment brake was removed"
 
     # the opening ORIENTS: role, capital, horizon, and what is off-limits
     for must in ("THE JOB", "objective", "horizon", "Options", "Short selling",

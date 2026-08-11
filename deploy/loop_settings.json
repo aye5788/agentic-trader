@@ -10,6 +10,7 @@
       "mcp__robinhood-trading__get_equity_orders",
       "mcp__robinhood-trading__review_equity_order",
       "mcp__robinhood-trading__place_equity_order",
+      "mcp__robinhood-trading__cancel_equity_order",
       "Bash(python scripts/fast_loop.py)",
       "Bash(python3 scripts/fast_loop.py)",
       "Bash(.venv/bin/python scripts/fast_loop.py)",

@@ -54,6 +54,13 @@ _RH_TOOLS=(
 )
 
 SESSION_TOOL_ARGS=(
+  # ⚠️ --settings IS LOAD-BEARING AND WAS MISSING. The PreToolUse order gate
+  # (scripts/hooks/pretooluse_order_gate.py) is declared ONLY in
+  # deploy/loop_settings.json. Without this flag a session runs with the
+  # project settings, which carry no `hooks` key at all -- so every order goes
+  # STRAIGHT to the broker with no kill-switch, halt-entries, order-cap or
+  # shadow-mode check. The lockdown looked complete and the gate did not bind.
+  --settings "${_session_tools_root}/deploy/loop_settings.json"
   --tools ""
   --permission-mode dontAsk
   --allowedTools "${_AGENTIC_TOOLS[@]}" "${_RH_TOOLS[@]}"
