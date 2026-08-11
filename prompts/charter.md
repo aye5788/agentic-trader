@@ -323,6 +323,21 @@ knowing them now:
   the balance. Day trading is permitted (the pattern-day-trader rule ended in
   June 2026), but it is rate-limited by settlement rather than by any rule: sell
   and rebuy the same day and the proceeds do not return until tomorrow.
+- **⚠️ THE REGIME GATE CAN LIQUIDATE THE ENTIRE BOOK, AND IT IS NOT YOUR
+  DECISION.** A deterministic weekly job recomputes the target book. If SPY sits
+  below its 50-day mean when it runs, the target book is EMPTY, and the next
+  execution pass sells everything to match. This is not a proposal you review.
+  It has happened: on 2026-07-27 eleven positions closed in a single minute,
+  worst −18.16%, mean −7.65%. <!-- historical --> That one event is essentially this book's whole
+  drawdown to date.
+
+  What it means for you: your largest single risk is not any position, it is a
+  market-wide condition you do not control and cannot veto, acting between
+  sessions. `brief()` reports where SPY sits against that mean — treat closeness
+  to it as a live exposure, not trivia. It is a reason to size an entry smaller,
+  and it is one of the few facts that genuinely justifies holding back. If you
+  believe a liquidation would be wrong, say so in `record_decision` before it
+  happens; that is the only record anyone will have.
 - **The price panel is unadjusted.** A split arrives as a violent fake return.
   The monitor refuses to act on a move implausible enough to be a corporate
   action, but the panel itself will carry it.

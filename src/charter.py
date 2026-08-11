@@ -353,6 +353,13 @@ def _selftest() -> None:
     assert "never\nthe resulting POSITION" in out or "never the resulting POSITION" in out.replace("\n"," ")
     assert "full\ncloses have been recorded since 2026-07-23" in out or "recorded since 2026-07-23" in out
     assert "Pace is a decision" in out, "the deployment brake was removed"
+    # ⚠️ The single largest realised loss in this book came from a mechanism the
+    # charter did not describe: 11 of 18 closes fired in ONE minute on 2026-07-27
+    # when the regime gate flipped, mean -7.65%. An agent cannot reason about its
+    # biggest risk if nobody tells it the risk exists.
+    assert "LIQUIDATE THE ENTIRE BOOK" in out
+    assert "not your\n  decision" in out or "NOT YOUR" in out
+    assert "2026-07-27" in out, "the evidence for the regime risk was dropped"
 
     # the opening ORIENTS: role, capital, horizon, and what is off-limits
     for must in ("THE JOB", "objective", "horizon", "Options", "Short selling",

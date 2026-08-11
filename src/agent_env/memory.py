@@ -132,29 +132,90 @@ def questions(root: Path) -> dict:
     }
 
 
+def _reasoned_events(journal: Path) -> list:
+    """Every past decision WITH ITS REASON, from wherever it was actually written.
+
+    ⚠️ THIS READ USED TO BE `agent_decision` ONLY, AND FOUND NOTHING. Measured
+    2026-08-11: the live journal held 138 events -- 37 risk_review, 31 execution
+    (26 carrying notes), 17 exit_signal, all reasoned -- and ZERO agent_decision,
+    because the deterministic loops that have been trading this book do not call
+    record_decision. So the tool the charter calls "the only mechanism by which
+    today's thinking reaches tomorrow" returned an empty list while the reasoning
+    sat in the same file under different keys.
+
+    A memory that reads only the channel a future system will write is empty in
+    every session until that system exists. This reads the record as it IS, and
+    keeps working unchanged once agent_decision events start appearing.
+    """
+    out = []
+    if not journal.exists():
+        return out
+    for line in journal.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        ev, when = rec.get("event"), rec.get("ts") or rec.get("at")
+
+        if ev == "agent_decision":
+            out.append({"when": when, "symbol": rec.get("symbol"),
+                        "action": rec.get("action"), "reason": rec.get("reason"),
+                        "source": "agent_decision"})
+        elif ev == "risk_review":
+            for o in rec.get("orders_intended") or []:
+                out.append({"when": when, "symbol": o.get("symbol"),
+                            "action": o.get("kind"), "reason": o.get("reason"),
+                            "fraction": o.get("fraction"), "source": "risk_review"})
+        elif ev == "execution":
+            for f in rec.get("fills") or []:
+                why = f.get("note") or f.get("reason")
+                if not why:
+                    continue
+                out.append({"when": when, "symbol": f.get("symbol"),
+                            "action": f"{f.get('side')} ({f.get('status')})",
+                            "reason": why, "source": "execution"})
+        elif ev == "exit_signal":
+            out.append({"when": when, "symbol": rec.get("symbol"),
+                        "action": rec.get("reason") or "exit",
+                        "reason": rec.get("note") or rec.get("detail"),
+                        "source": "exit_signal"})
+    return out
+
+
+def _level_reasons(root: Path) -> dict:
+    """The reason attached to each agent-set level, which lives OUTSIDE the
+    journal in the monitor's override file and is invisible to any journal read.
+    """
+    path = root / "monitor" / "overrides.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for sym, rec in (data or {}).items():
+        if isinstance(rec, dict) and rec.get("reason"):
+            out[sym] = {"stop": rec.get("stop"), "reason": rec["reason"],
+                        "set_at": rec.get("ts")}
+    return out
+
+
 def research_log(root: Path, journal: Path, limit: int = 25) -> dict:
     """What past sessions decided and why — the agent reading its own record.
 
-    Sources `agent_decision` events from the journal (written by record_decision)
-    plus current rule-outs and open questions. Without this the agent can record
-    reasoning it can never read back, which is a write-only memory.
+    Gathers reasoning from EVERY place it is actually written (see
+    _reasoned_events and _level_reasons), plus current rule-outs and open
+    questions. Without this the agent can record reasoning it never reads back,
+    which is a write-only memory.
     """
-    decisions = []
-    if journal.exists():
-        for line in journal.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if rec.get("event") == "agent_decision":
-                decisions.append({k: rec.get(k) for k in
-                                  ("ts", "symbol", "action", "reason")})
+    decisions = _reasoned_events(journal)
+    decisions.sort(key=lambda r: str(r.get("when") or ""))
     decisions = decisions[-int(limit):][::-1]
     mem = ruled_out(root)
     return {"recent_decisions": decisions,
+            "levels_and_why": _level_reasons(root),
             "ruled_out": mem["ruled_out"],
             "open_questions": questions(root)["open"],
             "note": "Your own past reasoning, not market fact. Supersede it "
@@ -202,11 +263,32 @@ def _selftest() -> None:
             '"action":"skip","reason":"second"}\n')
         log = research_log(root, j)
         assert [d["symbol"] for d in log["recent_decisions"]] == ["STX", "MU"], log
+        # a torn journal line must not blind the rest (the 'not json' line above)
+        assert len(log["recent_decisions"]) == 2
         assert "BBB" in log["ruled_out"]
         assert log["open_questions"] == []
 
-        # a torn journal line must not blind the rest (proved above: 'not json')
-        assert len(log["recent_decisions"]) == 2
+        # ⚠️ REGRESSION GUARD: reasoning written by the DETERMINISTIC loops must
+        # surface too. Reading agent_decision alone returned an empty log against
+        # a journal holding 85 reasoned events.
+        j.write_text(
+            '{"event":"risk_review","ts":"2026-08-09T16:00:00Z","orders_intended":'
+            '[{"kind":"trim","symbol":"AMAT","fraction":0.5,"reason":"earnings in 2 days"}]}\n'
+            '{"event":"execution","ts":"2026-08-09T16:04:00Z","fills":'
+            '[{"symbol":"AMAT","side":"sell","status":"filled","note":"trim 50%"}]}\n'
+            '{"event":"exit_signal","at":"2026-08-08T14:00:00Z","symbol":"WDC",'
+            '"reason":"stop","note":"breached 41.20"}\n')
+        log = research_log(root, j)
+        srcs = {d["source"] for d in log["recent_decisions"]}
+        assert srcs == {"risk_review", "execution", "exit_signal"}, log
+        assert any("earnings in 2 days" == d["reason"] for d in log["recent_decisions"])
+        assert log["recent_decisions"][0]["when"] > log["recent_decisions"][-1]["when"]
+
+        # level reasons live OUTSIDE the journal and must still surface
+        (root / "monitor").mkdir(parents=True, exist_ok=True)
+        (root / "monitor" / "overrides.json").write_text(
+            '{"AMD": {"stop": 468.0, "reason": "third pass below the 21-day"}}')
+        assert research_log(root, j)["levels_and_why"]["AMD"]["reason"].startswith("third")
 
         # empty tree degrades to empty, never raises
         with tempfile.TemporaryDirectory() as d2:
