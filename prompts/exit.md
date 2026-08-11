@@ -84,11 +84,32 @@ PROCEDURE — follow exactly:
     label to the thesis and appends an `outcome` event. Idempotent (safe to
     re-run). A symbol it reports `UNANCHORED` had no thesis to attach to —
     report it, do not retry it. Nothing fully closed → skip this step entirely
-    (do not write an empty file). Partial (scale-out) exits — `target1` sells
-    half and leaves the position open — skip: only full closes get an outcome
-    (known first-cut limitation). Do NOT hand-edit `journal.jsonl` and do NOT
-    write your own python snippet; this helper is the only writer.
-7d. **Ledger reconcile.** Write `research_store/rh/orders_dump.json` (same schema as the
+    (do not write an empty file). Partial (scale-out) exits do NOT go here — the
+    position is still open, so it has no closing outcome; step 7d records them.
+    Do NOT hand-edit `journal.jsonl` and do NOT write your own python snippet;
+    this helper is the only writer.
+7d. **Record partial (scale-out) sells.** `target1` sells half and leaves the
+    position open. That is a real decision with a real result, and until it is
+    journalled it is invisible in `performance()` and in the track record — so
+    record it, without pretending the trade closed. For each exit you sold with
+    `fraction < 1.0`, write `research_store/rh/partial_closes.json` — a JSON
+    array of `{"symbol","fraction","entry_price","exit_price","exit_date",
+    "exit_reason"}` — then run
+    `.venv/bin/python scripts/record_partial_outcome.py`:
+      - fraction    = that exit's `fraction` from `exit_request.json` (step 1)
+      - entry_price = that symbol's `avg_cost` from the step-3
+        `get_equity_positions`, captured BEFORE any sells this run
+      - exit_price  = the sell's `average_price` from `get_equity_orders`
+      - exit_date   = today's date (YYYY-MM-DD)
+      - exit_reason = that exit's `reason`, verbatim (`"target1"`)
+    It appends a `partial_outcome` event and does NOT close or archive the
+    thesis — the position is still held and still stop-watched. Idempotent, keyed
+    on symbol + date + price, so a retry is safe while a genuinely different
+    second trim still records. Nothing partial this run → skip entirely (do not
+    write an empty file); a `fraction` of 1.0 is refused here by design. Same
+    rules as 7c: `UNANCHORED` is reported not retried, and this helper is the
+    only writer.
+7e. **Ledger reconcile.** Write `research_store/rh/orders_dump.json` (same schema as the
     fast loop's step 8) from `get_equity_orders`, then run
     `.venv/bin/python scripts/reconcile_ledger.py`. Don't suppress its exit code.
 8. Report one concise line per exit: symbol, reason, amount sold, order id (or why

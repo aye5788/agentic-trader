@@ -13,6 +13,7 @@ Public API
   top(n) / by_symbol(symbol)             consumer queries
   is_stale(max_age_hours, now_iso)       guard the fast loop against stale research
   record_outcome(symbol, outcome, now)   close the calibration loop
+  record_partial_outcome(...)            journal a TRIM (position stays open)
   recent_journal(n)
 
 Callers pass timestamps (`as_of` on the product, `now_iso` to queries) — the
@@ -35,7 +36,8 @@ __all__ = [
     "ResearchProduct", "Thesis", "TRADEABLE_VERDICTS", "VERDICTS",
     "DEFAULT_MANDATE", "reward_risk", "validate_product", "MandateViolation",
     "write_product", "read_current", "get_targets", "top", "by_symbol",
-    "is_stale", "record_outcome", "record_rotation_outcome", "recent_journal", "store",
+    "is_stale", "record_outcome", "record_rotation_outcome", "record_partial_outcome",
+    "recent_journal", "store",
 ]
 
 
@@ -207,6 +209,119 @@ def record_rotation_outcome(symbol: str, entry_price: float, exit_price: float,
     )
     record_outcome(symbol, outcome, now_iso)
     return outcome
+
+
+def _partial_recorded(did: str, exit_date: str, exit_price: float) -> bool:
+    """True if THIS trim is already journaled as a `partial_outcome`.
+
+    Idempotency for partials cannot key on decision_id alone the way
+    `_outcome_recorded` does: a name can be trimmed twice under ONE decision (a
+    pre-earnings trim on Monday, a momentum-fade trim on Thursday), and keying on
+    the decision would silently swallow the second one. The key is therefore the
+    composite (decision_id, exit_date, exit_price) — a re-run of the same trim
+    matches and is a no-op, while a genuinely different trim records.
+
+    WHAT THIS DOES NOT COVER: two trims of the same name at the same price on the
+    same day (a single order filled in two prints, journaled twice) are
+    indistinguishable here and the second is dropped. That direction is the safe
+    one — a double-counted de-risk would overstate the record.
+    """
+    if not did:
+        return False
+    try:
+        key = (did, str(exit_date), round(float(exit_price), 4))
+    except (TypeError, ValueError):
+        return False
+    for e in store.read_journal():
+        if e.get("event") != "partial_outcome":
+            continue
+        try:
+            price = round(float(e.get("exit_price")), 4)
+        except (TypeError, ValueError):
+            continue
+        if (e.get("decision_id"), str(e.get("exit_date")), price) == key:
+            return True
+    return False
+
+
+def _current_thesis(symbol: str):
+    """(as_of, thesis) for `symbol` in the CURRENT book, else (None, None)."""
+    sym = symbol.upper()
+    cur = store.load_current() or {}
+    for t in cur.get("theses", []):
+        if str(t.get("symbol", "")).upper() == sym:
+            return t.get("as_of") or cur.get("as_of"), t
+    return None, None
+
+
+def record_partial_outcome(symbol: str, *, fraction: float, entry_price: float,
+                           exit_price: float, exit_date: str, now_iso: str,
+                           exit_reason: str) -> dict | None:
+    """Journal a PARTIAL close (a trim) — the position is still open. Idempotent.
+
+    THE FAILURE THIS PREVENTS: a de-risking trim was invisible in the track
+    record. `record_outcome` closes the calibration loop for a position that went
+    to zero — it attaches an `outcome` to the thesis, which is a statement that
+    the decision is FINISHED. A trim is not: the thesis is still live, still
+    ranked, still stop-watched. So this writes the journal event ONLY — no thesis
+    attach, no archive rewrite — and uses a distinct `partial_outcome` event so
+    nothing that reads full closes (ledger.realized_history, performance()'s
+    win_rate) can mistake a 1/3 sale at +6.5% for a round trip at +6.5%.
+
+    Anchors to the symbol's CURRENT thesis (it is still held, so it is normally
+    there), falling back to the most recent HELD archived thesis for the case
+    where the slow loop rotated the book between the trim and this call. Returns
+    the journalled event, or None if no thesis exists to anchor to — an
+    unanchored trim records nothing rather than inventing a parent decision.
+
+    Raises ValueError unless 0 < fraction < 1: fraction >= 1.0 is a FULL close and
+    belongs to record_outcome / record_rotation_outcome, which close the thesis.
+
+    WHAT THIS DOES NOT COVER: it does not verify the sale happened (record_fills
+    journals the execution), cannot detect a wrong entry_price or exit_price, and
+    computes no hit_stop/hit_target — a trim is a sizing decision, not a level
+    being reached, and scoring it against the thesis levels would be a lie. It
+    also does not adjust the thesis's target_weight; the weekly rebalance owns
+    that.
+    """
+    try:
+        fraction = float(fraction)
+    except (TypeError, ValueError):
+        raise ValueError(f"fraction must be a number, got {fraction!r}") from None
+    if fraction >= 1.0:
+        raise ValueError(
+            f"fraction={fraction} is a FULL close, not a partial — use "
+            f"record_outcome (stop/take-profit) or record_rotation_outcome "
+            f"(rotation), which close and archive the thesis")
+    if fraction <= 0.0:
+        raise ValueError(f"fraction must be > 0 and < 1, got {fraction}")
+
+    as_of, thesis = _current_thesis(symbol)
+    if not thesis:
+        as_of, thesis = _last_held_archived_thesis(symbol)
+    if not thesis or not as_of:
+        return None
+
+    did = thesis.get("decision_id") or _decision_id(symbol, as_of)
+    entry_price, exit_price = float(entry_price), float(exit_price)
+    pnl_pct = (exit_price - entry_price) / entry_price if entry_price else 0.0
+
+    ev = {
+        "event": "partial_outcome",
+        "symbol": symbol.upper(),
+        "decision_id": did,
+        "fraction": round(fraction, 4),
+        "entry_price": round(entry_price, 4),
+        "exit_price": round(exit_price, 4),
+        "pnl_pct": round(pnl_pct, 4),
+        "exit_reason": exit_reason,
+        "exit_date": exit_date,
+        "at": now_iso,
+    }
+    if _partial_recorded(did, exit_date, ev["exit_price"]):
+        return ev          # already journalled — safe to re-run
+    store.append_journal(ev)
+    return ev
 
 
 def recent_journal(n: int = 20) -> list:

@@ -56,4 +56,23 @@ PROCEDURE — follow exactly:
    (status/side/amount/reason="risk_review") exactly as the fast loop does. If
    alert-only, place NOTHING — the apply step already pushed the would-be actions
    to the phone.
+6b. **Record each TRIM that filled (the de-risking record).** A trim leaves the
+   position open, so it gets no closing outcome — but it is still a decision with
+   a result, and without this step it is invisible in `performance()` and in the
+   track record. For every `trim` whose sell FILLED, write
+   `research_store/rh/partial_closes.json` — a JSON array of
+   `{"symbol","fraction","entry_price","exit_price","exit_date","exit_reason"}` —
+   then run `.venv/bin/python scripts/record_partial_outcome.py`:
+     - fraction    = the `fraction` you sold, from your step-4 decision (0 < f < 1)
+     - entry_price = that symbol's `avg_cost` from the `get_equity_positions` you
+       read in step 6, captured BEFORE the sell
+     - exit_price  = the sell's `average_price` from `get_equity_orders`
+     - exit_date   = today's date (YYYY-MM-DD)
+     - exit_reason = `"trim"`, verbatim
+   Placed nothing, or trimmed nothing? Skip this step entirely (do not write an
+   empty file). A full `exit` does NOT go here — that is a close, and this script
+   refuses `fraction` >= 1.0. Idempotent, so a retry is safe; a symbol reported
+   `UNANCHORED` had no thesis to attach to — report it, do not retry it. Do NOT
+   hand-edit `journal.jsonl` and do NOT write your own python snippet; this
+   helper is the only writer.
 7. Report concisely: per-name verdict, what you changed, what you placed.

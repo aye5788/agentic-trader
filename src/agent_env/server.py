@@ -548,6 +548,11 @@ def performance(limit: int = 30) -> str:
     `win_rate` is reported ONLY alongside average win and average loss. A win
     rate on its own is the most misleading number in trading — 78% winners lost
     money in this system's own backtest, because the losers were larger.
+
+    `win_rate` and every figure in `closed_trades_summary` cover FULL closes
+    only; trims live in `partial_closes` and are never blended in — a 1/3 sale at
+    +6.5% is a sizing decision, not a round trip, and averaging the two produces
+    a number that means nothing.
     """
     pts = []
     if EQUITY.exists():
@@ -603,12 +608,43 @@ def performance(limit: int = 30) -> str:
             "hit_target": sum(1 for c in closed if c.get("hit_target")),
         })
 
+    # PARTIAL closes (trims) — reported SEPARATELY and never folded into the
+    # figures above. A trim de-risks a position that is still open, so it has no
+    # holding period, no stop/target verdict, and no claim on win_rate; blending
+    # it in would let a 1/3 sale rewrite the record of a full round trip.
+    parts = []
+    for rec in _outcomes():
+        if rec.get("event") != "partial_outcome":
+            continue
+        pnl, frac = rec.get("pnl_pct"), rec.get("fraction")
+        if not isinstance(pnl, (int, float)) or not isinstance(frac, (int, float)):
+            continue
+        parts.append({"symbol": rec.get("symbol"), "pnl_pct": float(pnl),
+                      "fraction": float(frac)})
+    partials = {"count": len(parts)}
+    if parts:
+        prs = [p["pnl_pct"] for p in parts]
+        wsum = sum(p["fraction"] for p in parts)
+        partials.update({
+            "avg_pnl_pct": round(sum(prs) / len(prs) * 100, 2),
+            "best_pnl_pct": round(max(prs) * 100, 2),
+            "worst_pnl_pct": round(min(prs) * 100, 2),
+            # each trim weighted by how much of the position it sold: three 10%
+            # nibbles are not the same evidence as one 50% cut.
+            "capital_weighted_pnl_pct": round(
+                sum(p["pnl_pct"] * p["fraction"] for p in parts) / wsum * 100, 2
+            ) if wsum else None,
+        })
+
     return json.dumps({
         "equity_curve": curve or {"note": "no equity history recorded yet"},
         "closed_trades_summary": summary,
+        "partial_closes": partials,
         "recent_closed_trades": closed[:int(limit)],
         "note": "Unrealized P&L on open positions is in positions(); this is the "
-                "realized record. Read win_rate only next to avg_win/avg_loss.",
+                "realized record. Read win_rate only next to avg_win/avg_loss. "
+                "closed_trades_summary is FULL closes only — trims are counted "
+                "separately in partial_closes and are not in win_rate.",
     }, indent=2, default=str)
 
 
@@ -1066,6 +1102,55 @@ def _selftest() -> None:
     assert r["liquidity_advisory"]["ok"] is False, r  # unmeasurable -> fails closed, advisory
     print("selftest OK: check_order() liquidity is advisory-only -- never appears "
           "in the blocking `reasons`, even when unmeasurable")
+
+    # --- performance(): a TRIM must show up, and must NOT touch win_rate.
+    # THE FAILURE THIS COVERS: before partial_outcome existed, a de-risking trim
+    # wrote nothing at all, so the tool the agent uses to judge its own approach
+    # omitted exactly the behaviour worth reinforcing. The opposite error --
+    # folding a 1/3 sale into the round-trip stats -- would be just as wrong, so
+    # both directions are asserted here against a SCRATCH journal (the live
+    # journal.jsonl is never read in this block).
+    orig_journal = globals()["JOURNAL"]
+    with tempfile.TemporaryDirectory() as td:
+        jp = Path(td) / "journal.jsonl"
+        jp.write_text("\n".join(json.dumps(e) for e in [
+            {"event": "outcome", "symbol": "WDC", "at": "2026-08-06T14:00:00Z",
+             "decision_id": "WDC:2026-08-04",
+             "outcome": {"pnl_pct": -0.041, "holding_days": 2,
+                         "exit_reason": "stop", "hit_stop": True,
+                         "hit_target": False}},
+            {"event": "partial_outcome", "symbol": "AMAT",
+             "decision_id": "AMAT:2026-08-09", "fraction": 0.33,
+             "entry_price": 501.32, "exit_price": 534.0401, "pnl_pct": 0.0653,
+             "exit_reason": "trim", "exit_date": "2026-08-10",
+             "at": "2026-08-10T16:10:00Z"},
+            {"event": "partial_outcome", "symbol": "XLE",
+             "decision_id": "XLE:2026-08-06", "fraction": 0.5,
+             "entry_price": 57.35, "exit_price": 56.2, "pnl_pct": -0.02,
+             "exit_reason": "target1", "exit_date": "2026-08-10",
+             "at": "2026-08-10T16:12:00Z"},
+        ]))
+        globals()["JOURNAL"] = jp
+        try:
+            perf = json.loads(performance())
+            pc = perf["partial_closes"]
+            assert pc["count"] == 2, pc
+            assert pc["best_pnl_pct"] == 6.53 and pc["worst_pnl_pct"] == -2.0, pc
+            assert pc["avg_pnl_pct"] == 2.26, pc          # (6.53 + -2.00) / 2
+            # capital-weighted: (0.0653*0.33 + -0.02*0.5) / 0.83 = +1.39%, i.e.
+            # BELOW the flat average — the winner was the smaller sale, which is
+            # the whole reason this figure is reported next to it.
+            assert pc["capital_weighted_pnl_pct"] == 1.39, pc
+            # ...and the round-trip stats saw ONLY the one full close.
+            cts = perf["closed_trades_summary"]
+            assert cts["closed_trades"] == 1, cts
+            assert cts["win_rate_pct"] == 0.0, cts   # the trims did NOT dilute it
+            assert len(perf["recent_closed_trades"]) == 1, perf["recent_closed_trades"]
+        finally:
+            globals()["JOURNAL"] = orig_journal
+    print("selftest OK: performance() surfaces trims in partial_closes (count, "
+          "avg/best/worst, capital-weighted) and keeps them OUT of win_rate and "
+          "closed_trades -- read from a scratch journal, never the live one")
 
 
 if __name__ == "__main__":
