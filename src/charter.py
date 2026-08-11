@@ -282,6 +282,23 @@ def _selftest() -> None:
     assert "This is not a quota" in out
     assert "Churn for its own sake is worse than stillness" in out
 
+    # ⚠️ THE SESSIONS ARE NOT INTERCHANGEABLE. Each answers a different question,
+    # and two properties are load-bearing:
+    #   - gap risk is priced at ENTRY, because extended/overnight sessions reject
+    #     fractional and dollar-based orders outright (verified against the order
+    #     tool's own schema) -- there is NO action available between the bells at
+    #     any price, so 15:45 cannot be a place to react to it
+    #   - 15:45 opens nothing: fifteen minutes before losing control of a position
+    #     for 17.5 hours is not when a new one gets opened
+    for must in ("10:00 — THE BOOK", "12:00 — WHAT CHANGED",
+                 "15:45 — IS EVERYTHING STILL TRUE",
+                 "Gap risk is priced HERE, at entry",
+                 "This session does not open positions",
+                 "Write to tomorrow"):
+        assert must in out, f"session definition lost: {must}"
+    # the 15:45 handoff is what makes research_log a HANDOFF and not an archive
+    assert "The 10:00 session\nreads these" in out or "10:00 session" in out.split("Write to tomorrow")[1][:400]
+
     # the opening ORIENTS: role, capital, horizon, and what is off-limits
     for must in ("THE JOB", "objective", "horizon", "Options", "Short selling",
                  "Margin or leverage", "WHY YOU ARE HERE RIGHT NOW"):
