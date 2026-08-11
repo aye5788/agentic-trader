@@ -267,6 +267,21 @@ def _selftest() -> None:
                "__UNIVERSE__"):
         assert ph not in out, ph
 
+    # ⚠️ THE INACTION-DRIFT GUARD. The objective must read as MAKING MONEY, and
+    # sitting out must carry a HIGHER burden of proof than acting, with the
+    # admissible evidence enumerated. Observed on a sibling project: given a soft
+    # "holding is legitimate if you give a reason", the agent held indefinitely
+    # and produced a fresh justification each session. A narrative is always
+    # available; a number is not.
+    assert "make money trading this book" in out
+    assert "HIGHER burden of proof than acting" in out
+    assert "you must cite a FACT" in out
+    assert "NOT admissible" in out
+    assert "If you cannot name the number, you do not have the evidence." in out
+    # ...and it must NOT become a churn mandate
+    assert "This is not a quota" in out
+    assert "Churn for its own sake is worse than stillness" in out
+
     # the opening ORIENTS: role, capital, horizon, and what is off-limits
     for must in ("THE JOB", "objective", "horizon", "Options", "Short selling",
                  "Margin or leverage", "WHY YOU ARE HERE RIGHT NOW"):
