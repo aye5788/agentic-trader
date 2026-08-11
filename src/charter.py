@@ -315,6 +315,21 @@ def _selftest() -> None:
     assert "applies equally to a loser" in out
     assert "Do not treat your entry price as information" in out
 
+    # ⚠️ THE ANTI-CIRCUMVENTION SECTION. Written from an honest assessment of how
+    # THIS model actually behaves, not from a threat model -- every item listed
+    # happened during construction. It is the section most likely to be trimmed
+    # as "negative" or "redundant", so each clause is pinned.
+    for must in ("Do not retry a refusal with variation",
+                 "Do not split an order",
+                 "satisfy the letter of a check while defeating its purpose",
+                 "change what a rule computes from",
+                 "Do not record a reason that is not the actual reason",
+                 "Do not resolve an ambiguity",
+                 "Do not treat your own earlier output as verified",
+                 "Do not assume when checking is available",
+                 "Do not report done when it is partly done"):
+        assert must in out, f"anti-circumvention clause lost: {must}"
+
     # the opening ORIENTS: role, capital, horizon, and what is off-limits
     for must in ("THE JOB", "objective", "horizon", "Options", "Short selling",
                  "Margin or leverage", "WHY YOU ARE HERE RIGHT NOW"):

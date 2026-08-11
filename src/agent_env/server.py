@@ -237,6 +237,34 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
     """
     sym = symbol.strip().upper()
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # ⚠️ A STOP THAT CANNOT TRIGGER IS NOT A STOP. Without this, set_levels(sym,
+    # stop=0.01) satisfies the `watched: true` flag and clears the
+    # unprotected-position check while protecting nothing — defeating the safety
+    # check by satisfying its letter. That is the same shape of defect as a test
+    # that asserts nothing: it reads as coverage and is hollow. Rejected here,
+    # loudly, rather than accepted and reported as protected.
+    # Reference price comes from the SNAPSHOT already in memory, never a live
+    # quote: set_levels sits on the decision path, and a network round trip here
+    # would add latency to every level set and make this untestable offline.
+    _v = marks.load() or {}
+    _pos = (_v.get("positions") or {}).get(sym) or {}
+    px = _pos.get("mark") or _pos.get("avg_cost")
+    if px and stop and float(stop) > 0:
+        floor_px = float(px) * MIN_STOP_FRACTION
+        if float(stop) < floor_px:
+            return json.dumps({
+                "ok": False,
+                "error": (f"stop {float(stop):.4f} is {float(stop)/float(px):.1%} "
+                          f"of the last price {float(px):.4f} — that far away it "
+                          f"can never trigger, so it is not protection. It would "
+                          f"still mark this position `watched`, which is worse "
+                          f"than leaving it visibly unprotected. Set a stop you "
+                          f"would actually act on (see terrain(symbol) for what "
+                          f"this name measurably does), or close the position."),
+                "last_price": px,
+                "nearest_allowed_stop": round(floor_px, 4),
+            }, indent=2)
+
     try:
         merged = decide.write_levels(symbol, stop, target or None, reason, ts)
     except ValueError as e:
@@ -523,6 +551,13 @@ def macro_calendar(days: int = 7, importance: str = "HIGH") -> str:
     return json.dumps(live_mod.macro_calendar(days=days, importance=importance),
                       indent=2, default=str)
 
+
+# A stop below this fraction of the live price cannot plausibly be reached, so it
+# is decoration rather than protection. 0.50 is deliberately permissive -- it
+# rejects only the degenerate case (a stop at a cent, or half the price away),
+# never a legitimately wide stop on a volatile name. The point is to stop the
+# `watched` flag being satisfiable by a level nobody would ever act on.
+MIN_STOP_FRACTION = 0.50
 
 OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
 WAKES = REPO / "research_store" / "monitor" / "wakes.json"
@@ -917,6 +952,16 @@ def _selftest() -> None:
             decide.RH_POSITIONS.write_text(json.dumps(
                 {"positions": {"NVDA": {"qty": 10}, "MU": {"qty": 5}}}))
 
+            # Stub the MARK snapshot too. set_levels rejects a stop implausibly
+            # far from price, and these fixtures use invented prices (NVDA at
+            # 108) that would read as degenerate against the REAL snapshot. What
+            # is under test here is the enforcement arithmetic, not plausibility.
+            _real_marks_load = marks.load
+            marks.load = lambda *a, **k: {
+                "account_value": 1000.0,
+                "positions": {"NVDA": {"qty": 10, "mark": 110.0},
+                              "MU": {"qty": 5, "mark": 50.0}}}
+
             # thesis on file for NVDA: stop=100, one target=120, held (weight>0)
             th = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
                        targets=[120.0], target_weight=0.1)
@@ -938,6 +983,21 @@ def _selftest() -> None:
             r = json.loads(set_levels("MU", 45.0, 55.0, "test: target count mismatch"))
             assert r["enforcement"]["target"]["enforced"] is False, r
             assert "2 target" in r["enforcement"]["target"]["note"], r
+
+            # 5) ⚠️ A STOP THAT CANNOT TRIGGER IS NOT A STOP. Without this,
+            # set_levels(sym, stop=0.01) satisfies `watched: true` and clears the
+            # unprotected-position check while protecting nothing -- defeating a
+            # safety check by satisfying its letter. It must be REFUSED, and the
+            # refusal must say what would be acceptable.
+            r = json.loads(set_levels("NVDA", 0.01, 0.0, "test: degenerate stop"))
+            assert r["ok"] is False, r
+            assert "can never trigger" in r["error"], r
+            assert r["nearest_allowed_stop"] == 55.0, r     # 110.0 * 0.50
+            # ...and a legitimately WIDE stop on a volatile name still passes
+            r = json.loads(set_levels("NVDA", 108.0, 0.0, "test: wide but real"))
+            assert "enforcement" in r, r
+
+            marks.load = _real_marks_load
 
             # 5) matching count AND lowers -> enforced.
             globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th])

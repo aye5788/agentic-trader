@@ -43,7 +43,11 @@
       "Edit(./.github/**)",
       "Edit(./research_store/current.json)",
       "Edit(./research_store/journal.jsonl)",
-      "Edit(./research_store/archive/**)"
+      "Edit(./research_store/archive/**)",
+      "Edit(./research_store/monitor/**)",
+      "Edit(./research_store/history/**)",
+      "Edit(./research_store/governance/**)",
+      "Edit(./research_store/prices/**)"
     ]
   },
   "hooks": {
