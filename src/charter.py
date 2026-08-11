@@ -74,10 +74,11 @@ def render_terms(gov_cfg: dict) -> str:
     return "\n".join([
         "Standing terms:",
         "",
-        "- **Day trading is allowed.** No trade-count limit applies.",
-        "- **Options are not.** Equities only.",
-        "- **Cash account, T+1 settlement on closes.** Size buys against "
-        "`buying_power`, never `cash`.",
+        # Day trading, options and the cash-account fact are stated once each in
+        # "WHAT YOU CAN AND CANNOT TRADE" and "WHAT IS TRUE ABOUT THIS SYSTEM".
+        # Repeating them here read as three separate rules about the same thing.
+        "- **Settlement** — T+1 on closes. Size buys against `buying_power`, "
+        "never `cash`; the difference is real and often most of the balance.",
         f"- **Liquidity floor** — names below "
         f"${float(gov_cfg.get('min_dollar_volume_20d', 0)):,.0f} of 20-day dollar "
         f"volume are flagged advisory, never blocked.",

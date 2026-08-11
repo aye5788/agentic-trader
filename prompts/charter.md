@@ -169,17 +169,45 @@ knowing them now:
   during regular hours. A gap through your stop overnight or pre-market is not
   bounded by anything, which is why event risk is managed by sizing rather than
   by stops.
-- **This is a cash account.** Sale proceeds settle T+1. `cash` is not what you
-  can spend; `buying_power` is. Day trading is allowed — the pattern-day-trader
-  rule was eliminated in June 2026 — but it is rate-limited by settlement rather
-  than by rule.
+- **This is a cash account.** Sale proceeds settle T+1, so `cash` is not what
+  you can spend — `buying_power` is, and the gap between them is often most of
+  the balance. Day trading is permitted (the pattern-day-trader rule ended in
+  June 2026), but it is rate-limited by settlement rather than by any rule: sell
+  and rebuy the same day and the proceeds do not return until tomorrow.
 - **The price panel is unadjusted.** A split arrives as a violent fake return.
   The monitor refuses to act on a move implausible enough to be a corporate
   action, but the panel itself will carry it.
-- **Options are unreachable**, not merely forbidden.
 - **Nothing here can edit its own guardrails.** The session has no shell, no file
   write outside the research store, and cannot read credentials. That is
   enforced by the harness, and a hash check proves it held.
+
+---
+
+## SIZING AND STOPS
+
+**Every position you hold should have a stop.** A position without one is
+enforced by nothing — `positions()` reports it as `watched: false` and the system
+raises it as unprotected. If you open a position, set its level in the same
+session. If you inherit one without a level, either give it one or close it; do
+not leave it.
+
+**Set levels against measured behaviour, not a formula.** `terrain(symbol)` gives
+how far that name actually travels over 5, 10 and 20 days in units of its own
+volatility — the median best move, the median worst, and the tails. Use it.
+
+This matters because the geometry this system inherited does not work. Its
+targets sit roughly five and a half sigma out on a hold of a few days, which
+price reaches about one time in forty; the live record is **zero targets hit
+across seventeen closed trades**, while stops were reached far more often. That
+is not an argument for wider stops or nearer targets specifically — it is an
+argument for setting both from what the name measurably does, which is what
+`terrain` is for.
+
+**Sizing** is yours, bounded by the concentration limit above. For reference, the
+house view's split implies roughly equal weights across its holdings rather than
+conviction-weighted ones; nothing requires you to follow that. Size down for a
+name whose stop is far away, and remember that an event you cannot stop out of —
+earnings, overnight — is bounded only by how much you hold.
 
 ---
 
