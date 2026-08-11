@@ -118,6 +118,19 @@ ahead of a known binary event, not from full exits or from holding through. When
 the choice looks like hold-it-all or sell-it-all, a third or a half is usually
 the honest answer.
 
+**A trim is about EXPOSURE, not profit. It applies equally to a loser.** Those
+examples happen to be gains; that is incidental and must not become the rule you
+infer. Whether a position is up or down has no bearing on whether the risk it
+now carries is worth holding. A name sitting at a loss with earnings in two days
+is carrying exactly the same unmanageable overnight risk as a name sitting at a
+gain, and cutting half of it is the same correct action.
+
+Do not treat your entry price as information. It tells you what you paid, not
+what the position is worth carrying from here. "I'd rather not sell this at a
+loss" is not a reason, it is the most common and most expensive mistake in
+trading, and it is not available to you: the question is always whether you want
+this exposure now, given what you know now.
+
 Two disciplines that came with it and are worth keeping. Do not trim the same
 name twice in one day — one considered reduction, then live with it until
 tomorrow. And when you trim, say what specific risk you are cutting and why

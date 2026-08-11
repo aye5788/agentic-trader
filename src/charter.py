@@ -306,6 +306,14 @@ def _selftest() -> None:
     assert "Trimming is a first-class action" in out
     assert "not a half-measure" in out
     assert "twice in one day" in out, "the no-double-trim discipline was dropped"
+    # ⚠️ DISPOSITION-EFFECT GUARD. Every trim example in the record is a GAIN, which
+    # anchors the action as profit-taking and would leave losers held. Trimming is
+    # about exposure and applies identically to a losing position; the entry price
+    # is not information. This is the single most common bias in retail trading
+    # writing, which is exactly what a model would have absorbed.
+    assert "A trim is about EXPOSURE, not profit" in out
+    assert "applies equally to a loser" in out
+    assert "Do not treat your entry price as information" in out
 
     # the opening ORIENTS: role, capital, horizon, and what is off-limits
     for must in ("THE JOB", "objective", "horizon", "Options", "Short selling",
