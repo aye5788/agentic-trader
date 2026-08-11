@@ -299,6 +299,14 @@ def _selftest() -> None:
     # the 15:45 handoff is what makes research_log a HANDOFF and not an archive
     assert "The 10:00 session\nreads these" in out or "10:00 session" in out.split("Write to tomorrow")[1][:400]
 
+    # ⚠️ PRESERVE WHAT WORKS. The de-risk trim is the behaviour with the best
+    # measured record in this system (two AMAT trims, +6.53% and +3.38%, both
+    # ahead of a known earnings date). A charter saying only "reduce, close or
+    # hold" reads as binary and would quietly discard it.
+    assert "Trimming is a first-class action" in out
+    assert "not a half-measure" in out
+    assert "twice in one day" in out, "the no-double-trim discipline was dropped"
+
     # the opening ORIENTS: role, capital, horizon, and what is off-limits
     for must in ("THE JOB", "objective", "horizon", "Options", "Short selling",
                  "Margin or leverage", "WHY YOU ARE HERE RIGHT NOW"):

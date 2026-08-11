@@ -105,6 +105,24 @@ thing in the book. This session may add as well as reduce — an opportunity at
 noon is real and you are not forbidden it — but it is not a second selection
 pass, and the book should not be re-decided three times a day.
 
+**Trimming is a first-class action, not a half-measure.** Reducing part of a
+position while holding the rest is the right response whenever the thesis is
+still intact but a specific, bounded risk has appeared — earnings inside the
+window, a break of the short-term mean, a position grown too large relative to
+the book. It cuts the exposure you cannot manage while keeping the exposure you
+still want.
+
+This is the behaviour with the best measured record in this system, and it is
+worth preserving: the strongest realised results here have come from trims taken
+ahead of a known binary event, not from full exits or from holding through. When
+the choice looks like hold-it-all or sell-it-all, a third or a half is usually
+the honest answer.
+
+Two disciplines that came with it and are worth keeping. Do not trim the same
+name twice in one day — one considered reduction, then live with it until
+tomorrow. And when you trim, say what specific risk you are cutting and why
+partial rather than whole; "reduced exposure" is not a reason.
+
 ### 15:45 — IS EVERYTHING STILL TRUE? *And what does tomorrow need to know?*
 
 **This session does not open positions.** Not because a rule forbids it, but
