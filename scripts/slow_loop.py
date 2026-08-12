@@ -17,7 +17,9 @@ It does NOT trade. It produces the research product the fast loop later executes
 
     python scripts/slow_loop.py [--dry]   # --dry: print, don't write the store
 
-Regime-off or nothing-eligible -> an empty book is a valid, intended state (cash).
+Regime-off -> NO NEW single-name entries; names already held are kept while
+they stay in the band (see regime_filter). Nothing-eligible -> an empty book
+is still a valid, intended state (cash).
 """
 import argparse
 import sys
@@ -163,6 +165,54 @@ def residual_kwargs(cfg, closes, spy):
     return {}
 
 
+def owned_symbols(path: Path | None = None) -> set[str] | None:
+    """Symbols ACTUALLY held at the broker. -> set, or None if unreadable.
+
+    None means "unknown", and it is distinct from the empty set: an empty set is
+    "we own nothing", which under regime-off means sell everything. A missing or
+    torn snapshot must never be read as that.
+    """
+    path = path or (REPO / "research_store" / "rh" / "positions.json")
+    try:
+        import json                                   # noqa: PLC0415
+        pos = json.loads(path.read_text()).get("positions") or {}
+        return {str(k).upper() for k, v in pos.items()
+                if float((v or {}).get("qty") or 0) > 0}
+    except Exception:                                 # noqa: BLE001
+        return None
+
+
+def regime_filter(book_sel: list, held_book: set, owned: set | None) -> list:
+    """Regime-off selection: pause new entries, do NOT liquidate what is held.
+
+    The previous form was `book_sel = []`, whose comment already claimed "no new
+    single-name entries" -- but an empty selection is not "add nothing", it is
+    "hold nothing", and build_theses drops every name absent from it. So a
+    regime flip did not pause the book, it SOLD it, on a signal about SPY rather
+    than anything about the positions. That fired on 2026-07-27: nine single
+    names closed in one tick (the other two closes that timestamp were ETF
+    rotations this branch never touched).
+
+    ⚠️ INTERSECTED WITH ACTUAL OWNERSHIP, not just the previous product.
+    `held_book` is PRODUCT MEMBERSHIP -- a name can carry a target and never
+    have been bought (TER, 2026-07-24, skipped for pending settlement and still
+    in the product). Filtering on membership alone leaves such a name in the
+    selection, and the fast loop treats a target with no position as an OPENING
+    BUY -- so regime-off would open a brand-new position, which the old form
+    made impossible. Ownership is the anchor; membership alone is not.
+
+    `owned=None` means the ownership snapshot could not be read. That falls back
+    to membership rather than to the empty set: failing toward "keep what the
+    product says" risks re-opening one pending name, bounded by the order gate
+    and the concentration cap, while failing toward "own nothing" SELLS THE
+    WHOLE BOOK on an unreadable file. The reversible direction wins.
+    """
+    keep = [t for t in book_sel if t in held_book]
+    if owned is None:
+        return keep
+    return [t for t in keep if t in owned]
+
+
 def _selftest() -> None:
     """Covers stamp_earnings' binding + its fail-open contract."""
     from research_store.models import Thesis
@@ -193,34 +243,50 @@ def _selftest() -> None:
     print("selftest OK: earnings stamping binds, fails open, and round-trips")
 
     # ---- regime-off must PAUSE the book, never liquidate it ----------------
-    # Pinned because the previous form (`book_sel = []`) read as correct, its
-    # comment described the correct behaviour, and it still sold eleven
-    # positions in one tick. The regression is invisible by inspection, so it
-    # has to be asserted.
-    import pandas as pd
-    scored = pd.DataFrame(
-        {"score": [3.0, 2.0, 1.0, 0.5], "eligible": [True] * 4},
-        index=["AAA", "BBB", "CCC", "DDD"])
+    # ⚠️ THESE CALL regime_filter DIRECTLY. The first version of this test
+    # hand-wrote `[t for t in sel if t in held]` and asserted on its own copy --
+    # so it passed identically with the shipped line reverted to `book_sel = []`
+    # and pinned nothing at all. A test that re-implements the code under test
+    # is not a test. The branch was extracted into regime_filter for this reason.
+    sel = ["AAA", "BBB", "CCC", "DDD"]
     held = {"CCC", "DDD"}
-    sel = mom.select(scored, held, 2, 4)
+    owned = {"CCC", "DDD"}
 
-    off = [t for t in sel if t in held]          # the regime-off line under test
-    assert set(off) == {"CCC", "DDD"}, off        # held names SURVIVE
-    assert "AAA" not in off and "BBB" not in off  # ...and nothing new is added
-    assert off != [], "regime-off must not empty the book — this WAS the bug"
+    assert regime_filter(sel, held, owned) == ["CCC", "DDD"], "held names must survive"
+    assert regime_filter(sel, held, owned) != [], "regime-off must not empty the book"
+    assert "AAA" not in regime_filter(sel, held, owned), "no new entries"
 
-    # with nothing held, regime-off is genuinely empty (no book to pause)
-    assert [t for t in mom.select(scored, set(), 2, 4) if t in set()] == []
+    # PRODUCT MEMBERSHIP IS NOT OWNERSHIP. DDD carries a target but was never
+    # bought (the TER/pending-settlement case) -- it must NOT survive, or the
+    # fast loop opens a brand-new position while the regime is off.
+    assert regime_filter(sel, held, {"CCC"}) == ["CCC"], \
+        "a name in the product but NOT owned must not survive regime-off"
 
-    # a held name that has fallen OUT of the band is still dropped: regime-off
+    # unreadable ownership falls back to membership, never to the empty set:
+    # failing toward "own nothing" would SELL THE WHOLE BOOK on a missing file
+    assert regime_filter(sel, held, None) == ["CCC", "DDD"], \
+        "unknown ownership must not be read as owning nothing"
+
+    # nothing held -> genuinely empty (there is no book to pause)
+    assert regime_filter(sel, set(), owned) == []
+    # a held name dropped from the ranking is still released: regime-off
     # suspends new entries, it does not suspend the exit discipline
-    weak = pd.DataFrame({"score": [3.0, 2.0, 0.1], "eligible": [True, True, True]},
-                        index=["AAA", "BBB", "ZZZ"])
-    sel2 = mom.select(weak, {"ZZZ"}, 2, 2)
-    assert "ZZZ" not in [t for t in sel2 if t in {"ZZZ"}], \
-        "a held name below the band must still be released"
+    assert regime_filter(["AAA", "CCC"], held, owned) == ["CCC"]
 
-    print("selftest OK: regime-off pauses new entries and does NOT liquidate")
+    # owned_symbols distinguishes "unknown" from "nothing" -- the whole point
+    import tempfile as _tf, json as _js, os as _os
+    assert owned_symbols(Path("/nonexistent/positions.json")) is None
+    with _tf.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        _js.dump({"positions": {"mu": {"qty": 3}, "ZERO": {"qty": 0}}}, f)
+        tmp = f.name
+    try:
+        got = owned_symbols(Path(tmp))
+        assert got == {"MU"}, got          # upper-cased, zero-qty excluded
+    finally:
+        _os.unlink(tmp)
+
+    print("selftest OK: regime-off pauses new entries, does NOT liquidate, and "
+          "cannot open an unowned name")
 
 
 def main() -> None:
@@ -286,26 +352,14 @@ def main() -> None:
     book_sel = mom.select(book_scored, held_book, P["book_hold"], P["book_band"])
     etf_sel = mom.select(etf_scored, held_etf, P["sleeve_hold"], P["sleeve_hold"])
     if not regime:
-        # REGIME-OFF BLOCKS NEW ENTRIES. It does NOT liquidate what is held.
-        #
-        # This line used to read `book_sel = []`, whose comment already said "no
-        # new single-name entries" -- but an empty selection is not "add
-        # nothing", it is "hold nothing", and build_theses drops every name
-        # absent from it. So a regime flip did not pause the book, it SOLD the
-        # book, at whatever the market was that morning, on a signal about SPY
-        # rather than anything about the positions themselves.
-        #
-        # That fired once, on 2026-07-27: eleven single names closed at one
-        # timestamp for a mean of -7.65% and a worst of -18.16% -- essentially
-        # the whole drawdown, from one line whose comment claimed it did
-        # something else. Intersecting with `held_book` keeps every held name
-        # that still passes the band and admits no new one, which is what the
-        # comment always described.
-        #
         # Whether a regime call justifies EXITING is a trading judgment, and it
         # belongs to the agent, which can see the positions, the marks and the
-        # reason. A static rule cannot, and it proved it.
-        book_sel = [t for t in book_sel if t in held_book]
+        # reason. This branch only declines to ADD. See regime_filter.
+        owned = owned_symbols()
+        book_sel = regime_filter(book_sel, held_book, owned)
+        if owned is None:
+            print("  ⚠️ regime-off: ownership snapshot unreadable — held names "
+                  "kept on product membership alone")
 
     per_book = P["book_weight"] / P["book_hold"]
     per_etf = P["sleeve_weight"] / P["sleeve_hold"]
@@ -343,7 +397,7 @@ def main() -> None:
         notes=f"slow_loop dual-momentum book as of {asof.date()}")
 
     # ---- report ----
-    print(f"as_of {asof.date()} | regime {'ON' if regime else 'OFF (cash)'} "
+    print(f"as_of {asof.date()} | regime {'ON' if regime else 'OFF (no new entries)'} "
           f"(trend={trend}, vix={f'{vix:.1f}' if vix is not None else 'n/a'}/{ceiling:g}) | "
           f"book {len(book_held)}/{P['book_hold']} held, sleeve {len(etf_held)}/{P['sleeve_hold']} held")
     _soon = [t.symbol for t in theses if t.earnings_date

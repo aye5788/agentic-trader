@@ -63,8 +63,17 @@ LOCK = REPO / "research_store" / "session.lock"
 TIMEOUT_S = {"premarket": 900, "open": 1800, "close": 1200, "wake": 600}
 
 # Signatures that mean the MODEL never ran, so no work was done and no order was
-# placed. Matched case-insensitively against stdout+stderr. Deliberately narrow:
-# a false positive here retries a session that may have ALREADY PLACED ORDERS.
+# placed.
+#
+# ⛔ THESE ARE PROSE. An earlier form matched them anywhere in stdout, which is
+# the AGENT'S OWN WRITING -- and the charter puts "rate limits" in front of the
+# agent directly (src/charter.py: "Observe the data feed's rate limits"). An
+# agent restating its own instructions, or narrating a flaky quote tool ("no
+# rate limit hit", "recovered from a connection error and placed the BUY"),
+# failed its own session -- a session that RAN AND PLACED ORDERS, marked failed
+# AND retryable, which is the double-placing outcome should_retry exists to
+# prevent. So stdout is matched ONLY at the start of a line, where the CLI
+# prints its banners and the agent's prose does not begin.
 _DEAD_SIGNATURES = (
     "api error: 5",             # 5xx -- 529 overloaded is the common one
     "overloaded",
@@ -76,8 +85,9 @@ _DEAD_SIGNATURES = (
     "credit balance is too low",
 )
 
-# Below this, output is a banner or a stub rather than a session transcript.
-_MIN_OUTPUT = 600
+# Banner prefixes: on stdout these mark a line as CLI diagnostics rather than
+# agent prose, so a signature ANYWHERE on such a line counts.
+_BANNER_PREFIXES = ("api error", "error:", "error ", "fatal", "usage:")
 
 
 # --------------------------------------------------------------------------- #
@@ -92,26 +102,46 @@ def classify(rc: int, out: str, err: str | None) -> tuple[bool, str | None]:
     a non-zero exit, then a death signature anywhere in the streams, then an
     implausibly short transcript.
     """
-    blob = f"{out or ''}\n{err or ''}"
-    low = blob.lower()
-
     if rc != 0:
         tail = (err or out or "").strip()[-300:] or "no output"
         return False, f"exit {rc}: {tail}"
 
-    for sig in _DEAD_SIGNATURES:
-        if sig in low:
-            i = low.find(sig)
-            return False, f"session died: ...{blob[max(0, i - 60):i + 160].strip()}..."
+    # stderr is CLI diagnostics, never agent prose -- match anywhere in it.
+    hit = _signature_in(err or "", anywhere=True)
+    # stdout is the agent's own writing -- match only where the CLI speaks.
+    hit = hit or _signature_in(out or "", anywhere=False)
+    if hit:
+        return False, f"session died: {hit}"
 
     if not (out or "").strip():
         return False, "exit 0 but no output — the session produced nothing"
 
-    if len(out.strip()) < _MIN_OUTPUT:
-        return False, (f"exit 0 but only {len(out.strip())} bytes of output "
-                       f"(under {_MIN_OUTPUT}) — a banner, not a session")
-
+    # ⚠️ NO MINIMUM-LENGTH CHECK. An earlier form failed any session under 600
+    # bytes as "a banner, not a session". But `claude -p` prints only the FINAL
+    # assistant message, not a transcript, and a correct quiet session -- regime
+    # off, nothing eligible, no action taken -- is legitimately one short
+    # sentence. That heuristic failed real sessions for doing the right thing.
+    # A genuine banner is caught by the signature check above, on its own merits.
     return True, None
+
+
+def _signature_in(text: str, anywhere: bool) -> str | None:
+    """Find a death signature. -> the offending line, or None.
+
+    `anywhere=False` restricts the match to lines that look like CLI output
+    (a banner prefix) rather than agent prose. See _DEAD_SIGNATURES.
+    """
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        low = line.lower()
+        if not anywhere and not low.startswith(_BANNER_PREFIXES):
+            continue
+        for sig in _DEAD_SIGNATURES:
+            if sig in low:
+                return line[:220]
+    return None
 
 
 def should_retry(err: str | None) -> bool:
@@ -225,11 +255,23 @@ def _claude_argv(brief: str) -> list[str]:
          f'source "{REPO}/deploy/session_tools.sh" >/dev/null 2>&1 && '
          f'printf "%s\\n" "${{SESSION_TOOL_ARGS[@]}}"'],
         capture_output=True, text=True, timeout=120)
-    args = [ln for ln in probe.stdout.splitlines() if ln.strip()]
+    # ⛔ SPLIT, NEVER FILTER ON TRUTHINESS. `--tools ""` is an EMPTY-STRING
+    # argument and it is load-bearing: it disables every built-in tool. A
+    # `if ln.strip()` filter silently deleted it, and `--tools` is variadic, so
+    # it then swallowed `--permission-mode dontAsk` as its own values -- the
+    # session ran in the CLI's DEFAULT permission mode, which prompts and, with
+    # nobody headless to answer, hangs until timeout. A silent no-trade day, and
+    # the `if not args` guard below still passed.
+    lines = probe.stdout.split("\n")
+    args = lines[:-1] if lines and lines[-1] == "" else lines   # trailing newline only
     if not args:
         raise RuntimeError("session_tools.sh produced no tool args — refusing "
                            "to start a session with an unknown tool surface")
-    return ["claude", "-p", "--model", "claude-opus-5", *args, brief]
+    if "--tools" in args and "" not in args:
+        raise RuntimeError("the empty-string argument to --tools was lost — "
+                           "refusing to start a session whose built-in tools "
+                           "may not actually be disabled")
+    return ["claude", "-p", "--model", "claude-opus-5", *args]
 
 
 def run(mode: str, dry_run: bool = False) -> dict:
@@ -253,31 +295,69 @@ def run(mode: str, dry_run: bool = False) -> dict:
     proc = None
     started = None
     try:
-        try:
-            fh = session_lock.acquire(mode, LOCK)
-        except TimeoutError as e:
-            return {"ok": False, "mode": mode, "error": f"lock: {e}"}
+        # ⛔ acquire() RETURNS None ON TIMEOUT -- it does not raise. An earlier
+        # form of this guarded `except TimeoutError`, which is dead code: the
+        # exception never comes, `fh` was simply None, execution fell through,
+        # and the session spawned a full-authority agent WHILE ANOTHER SESSION
+        # HELD THE LOCK -- two agents diffing the same book against the same
+        # targets, neither aware of the other. `if fh is not None` in the
+        # teardown then skipped the release, so nothing logged it, and the run
+        # reported ok:true. Check the return value, never the exception.
+        fh = session_lock.acquire(mode, LOCK)
+        if fh is None:
+            return {"ok": False, "mode": mode,
+                    "error": (f"lock: {mode} timed out after "
+                              f"{session_lock.LOCK_WAIT_S.get(mode)}s waiting for "
+                              f"{session_lock.holder(LOCK)} — refusing to run a "
+                              f"second session against the same book")}
 
         # FACTS AFTER THE LOCK. See the module docstring -- the wait can be
         # fifteen minutes, and a brief built before it is that much out of date.
         brief = build_brief(mode)
 
-        started = time.time()
+        # snapshot first, then the clock: `finally` keys the integrity check on
+        # `started`, so assigning it first left a window where started was set
+        # and `before` was not -- a NameError inside the teardown that skipped
+        # the tripwire (caught, so the lock still released, but the check was
+        # silently lost).
         before = integrity.snapshot(REPO)
+        started = time.time()
 
+        # ⛔ THE BRIEF GOES ON STDIN, NEVER IN argv. `--allowedTools` is
+        # VARIADIC, so a trailing prompt argument is consumed as one more tool
+        # name and the session starts with no prompt at all: every run exited 1
+        # with "Input must be provided either through stdin or as a prompt
+        # argument". stdin also sidesteps MAX_ARG_STRLEN (128KiB per argument,
+        # not the 2MB ARG_MAX) -- the brief is ~28KB today and grows.
         proc = subprocess.Popen(
             _claude_argv(brief), cwd=str(REPO),
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             start_new_session=True)     # own group, so _kill_group reaches the tree
         try:
-            out, err = proc.communicate(timeout=TIMEOUT_S.get(mode, 900))
+            out, err = proc.communicate(input=brief,
+                                        timeout=TIMEOUT_S.get(mode, 900))
             rc = proc.returncode
         except subprocess.TimeoutExpired:
+            # DRAIN AFTER KILLING. The first form discarded everything the
+            # session had printed -- and a session that hung is the one MOST
+            # likely to have placed orders and most in need of a transcript to
+            # reconcile against. communicate() returns once the pipes close,
+            # which the kill guarantees.
             _kill_group(proc)
-            out, err = "", f"timed out after {TIMEOUT_S.get(mode, 900)}s"
+            try:
+                out, err = proc.communicate(timeout=10)
+            except Exception:       # noqa: BLE001
+                out, err = "", ""
+            err = (err or "") + f"\ntimed out after {TIMEOUT_S.get(mode, 900)}s"
             rc = -1
 
         ok, error = classify(rc, out, err)
+        # `retryable` is ADVISORY -- nothing consumes it today (no cron entry,
+        # no systemd unit, and run() never retries itself). Before anything acts
+        # on it, re-read should_retry: a retry re-runs a session that may have
+        # already placed orders, so a wrong True here is an order-duplication
+        # bug, not a wasted run.
         return {"ok": ok, "mode": mode, "error": error,
                 "seconds": round(time.time() - started, 1),
                 "retryable": should_retry(error),
@@ -322,32 +402,79 @@ def _selftest() -> None:
     assert should_retry("API Error: 529") is True
     assert should_retry("x" * 700) is False
 
-    # a long transcript that CONTAINS a death banner is still dead -- the
-    # signature check runs before the length check for exactly this case
+    # ---- FALSE POSITIVES ARE THE DANGEROUS DIRECTION ----------------------
+    # These are all sessions that RAN and may have PLACED ORDERS. An earlier
+    # form matched _DEAD_SIGNATURES anywhere in stdout -- which is the agent's
+    # OWN PROSE -- so each of these failed AND came back retryable, i.e. queued
+    # to place its orders a second time. The charter itself says "Observe the
+    # data feed's rate limits", so the agent quoting its instructions was enough.
+    for legit in (
+        "I observed the data feed's rate limits as the charter requires.",
+        "Checked the moomoo feed: no rate limit hit, all quotes fresh.",
+        "Placed BUY 3 NVDA. Retried once after a transient network error.",
+        "The book showed a connection error earlier but recovered; I bought.",
+        "The sector is overloaded with semis, so I trimmed.",
+        "No API error: 5xx today.",
+    ):
+        ok, err = classify(0, legit, None)
+        assert ok is True, f"legitimate transcript failed: {legit!r} -> {err}"
+        assert should_retry(err) is False, legit
+
+    # ...while a real CLI banner on its own line is still caught, at any length
     ok, err = classify(0, "x" * 900 + "\nAPI Error: 529 Overloaded", None)
     assert ok is False and "529" in err, (ok, err)
-    # ...and a transcript that merely DISCUSSES an error is not one. The agent
-    # writing "I checked for a rate limit" must not fail its own session.
-    ok, err = classify(0, "I considered whether a 529 was possible. " + "x" * 700, None)
-    assert ok is True, (ok, err)
-
-    # a short transcript is a banner, not a session
-    ok, err = classify(0, "done.", None)
-    assert ok is False and "banner" in err, (ok, err)
-    # stderr carries signatures too (they do not always reach stdout)
+    ok, err = classify(0, "Error: Connection error (ECONNREFUSED)", None)
+    assert ok is False, (ok, err)
+    # stderr is CLI diagnostics, not prose -- matched anywhere in it
     ok, err = classify(0, "x" * 900, "authentication_error: invalid token")
     assert ok is False, (ok, err)
+
+    # ---- NO MINIMUM-LENGTH RULE -------------------------------------------
+    # `claude -p` prints only the FINAL message. A correct quiet session --
+    # regime off, nothing eligible, no action -- is one short sentence, and an
+    # earlier 600-byte floor failed it for doing the right thing.
+    ok, err = classify(0, "Regime off, nothing eligible. No action taken.", None)
+    assert ok is True, (ok, err)
+
     # a timeout is not retryable: it may have placed orders before hanging
     assert should_retry("timed out after 1800s") is False
     assert should_retry(None) is False
     assert should_retry("exit 0 but no output — the session produced nothing") is False
-    # transport failures ARE retryable — the model never ran
-    assert should_retry("session died: ...Connection error...") is True
+    assert should_retry("session died: Error: Connection error") is True
+
+    # ---- A LOCK TIMEOUT MUST STOP THE SESSION -----------------------------
+    # acquire() RETURNS None on timeout; it does not raise. An `except
+    # TimeoutError` guard was dead code, so the session ran UNLOCKED alongside
+    # the holder -- two full-authority agents on one book -- and reported ok.
+    real_acq, real_rel = session_lock.acquire, session_lock.release
+    released, spawned = [], []
+    session_lock.acquire = lambda mode, path, timeout_s=None: None
+    session_lock.release = lambda fh: released.append(fh)
+    real_popen = subprocess.Popen
+    subprocess.Popen = lambda *a, **k: spawned.append(a) or (_ for _ in ()).throw(
+        AssertionError("SPAWNED A SESSION WITHOUT THE LOCK"))
+    try:
+        r = run("open")
+        assert r["ok"] is False, r
+        assert "lock" in r["error"], r
+        assert spawned == [], "a lock timeout must not spawn anything"
+    finally:
+        session_lock.acquire, session_lock.release = real_acq, real_rel
+        subprocess.Popen = real_popen
 
     # an unknown mode is refused rather than run with a missing timeout
     r = run("lunchtime")
     assert r["ok"] is False and "unknown mode" in r["error"], r
     assert set(r) >= {"ok", "mode", "error"}, r
+
+    # ---- THE ARGV MUST NOT SWALLOW THE PROMPT OR DROP THE EMPTY STRING ----
+    argv = _claude_argv("THE-BRIEF")
+    assert "THE-BRIEF" not in argv, "the brief goes on stdin, never in argv"
+    assert "" in argv, "the empty-string argument to --tools was lost"
+    i = argv.index("--tools")
+    assert argv[i + 1] == "", f"--tools must be followed by the empty string: {argv[i:i+3]}"
+    assert "--permission-mode" in argv and argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    assert argv[-1] != "--allowedTools", "allowlist must not be empty"
 
     # _kill_group on a dead/None process is a no-op, not an exception
     _kill_group(None)

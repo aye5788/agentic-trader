@@ -137,7 +137,11 @@ PROCEDURE — follow exactly, stop the moment any gate fails:
         BEFORE selling, not a re-read.
       - exit_price  = the sell's `average_price` from step 8's `get_equity_orders`.
       - exit_date   = today (YYYY-MM-DD); exit_reason = `"rebalanced"` (or
-        `"regime_off"` if the whole book was closed because regime flipped off).
+        `"regime_off"` ONLY if you closed a name as a deliberate regime call).
+        ⚠️ Regime-off no longer closes the book by itself — since 2026-08-12 it
+        declines new entries and keeps what is held (slow_loop.regime_filter).
+        A name leaving the book while regime is off is an ordinary band release:
+        that is `"rebalanced"`. Reserve `"regime_off"` for an exit you chose.
       The script finds each symbol's last-held archived thesis, computes the
       outcome, and attaches it to that thesis by `decision_id` + appends an
       `outcome` event. Idempotent (safe to re-run). A symbol it reports

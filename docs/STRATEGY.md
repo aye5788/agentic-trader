@@ -110,10 +110,21 @@ excluded from the held set (it can still be computed, but never held).
 - **Mechanical floor (ON switch):** new entries allowed only if **$SPX > its
   50-day MA** (computed from the cached panel) and **VIX ≤ 28** (from FRED
   `VIXCLS`, which is now the only VIX source).
-- **Off = cash.** When the floor is risk-off, or nothing passes the absolute
-  gate: **hold nothing. Standing aside is a valid, intended state.** There is no
-  hedge and no inverse ETF — cash is the position. (In the sleeve, the defensive
-  ETFs may still rank in; that is allowed and is the same idea.)
+- **Off = no new entries. NOT a liquidation.** When the floor is risk-off, or
+  nothing passes the absolute gate: **add nothing new. Standing aside is a
+  valid, intended state.** Names already held are KEPT while they stay inside
+  the band, and are released by the ordinary exit discipline — not dumped
+  because SPY crossed a line. There is no hedge and no inverse ETF; unspent
+  weight is cash. (In the sleeve, the defensive ETFs may still rank in; that is
+  allowed and is the same idea.)
+  - ⚠️ This wording changed 2026-08-12. It previously read "hold nothing", and
+    the code matched it: a regime flip sold the entire single-name book. It
+    fired once, 2026-07-27 — nine single names closed in one tick, mean -7.65%.
+    Both backtests had modelled the keep-held behaviour since July, so the live
+    code was the outlier, not the docs' intent.
+  - **Whether a regime call justifies EXITING is yours to judge.** The loop
+    declines to add; it does not decide to sell. You can see the positions, the
+    marks and the reason, and a rule keyed on one index cannot.
 - Agent qualitative overlay is OFF-only (it may veto or downsize, never
   green-light). Its first live surface exists since 2026-07-09: **post-take-profit
   re-entry** — a target-hit name's otherwise-automatic rebuy goes to the fast-loop
