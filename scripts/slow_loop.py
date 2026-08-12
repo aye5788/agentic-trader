@@ -213,6 +213,46 @@ def regime_filter(book_sel: list, held_book: set, owned: set | None) -> list:
     return [t for t in keep if t in owned]
 
 
+def rotation_due(cfg: dict, today=None) -> bool:
+    """Is a full re-rank + ROTATE due on this run? -> bool.
+
+    `[portfolio] rebalance` has always said "weekly" and its own comment reads
+    "full re-rank + rotate weekly; risk exits run nightly" -- but NOTHING read
+    the knob, and cron runs this loop nightly, so the book was re-ranked and
+    rotated every night. Both backtests (backtest.py, backtest_pit.py) model
+    WEEKLY. So the live system rotated 5x more often than the numbers that
+    justify it, and the config describing it was decorative.
+
+    That gap was harmless while regime-off went flat immediately -- it is not
+    now: the banded release is a RELATIVE-RANK trigger, so evaluating it nightly
+    instead of weekly means a name that dips below the band for a single day is
+    gone, and re-admission needs a free slot. Two names (PANW, TER) were dropped
+    that way in the 2026-07 stretch and were back in the top ten days later.
+
+    An unrecognised value rotates, with a warning: that is the behaviour the
+    live system already had, so an unreadable config cannot silently FREEZE the
+    book -- the far worse direction, since a frozen book stops releasing losers.
+    """
+    mode = str((cfg.get("portfolio") or {}).get("rebalance") or "").strip().lower()
+    if mode in ("weekly", "week"):
+        return (today or date.today()).weekday() == 6      # Sunday, per crontab
+    if mode in ("nightly", "daily", "session", ""):
+        return True
+    print(f"  ⚠️ unrecognised [portfolio] rebalance={mode!r} — rotating")
+    return True
+
+
+def hold_selection(sel: list, scored, held: set) -> list:
+    """Non-rotation night: hold exactly what is held, in rank order.
+
+    NOT `sel` -- sel is a fresh re-rank, which is the thing a non-rotation night
+    must not act on. Restricted to names the panel can still score, because
+    build_theses does `scored.loc[sym]` and a delisted name would raise and take
+    the whole book down with it.
+    """
+    return [t for t in scored.index if t in held] if len(scored) else []
+
+
 def _selftest() -> None:
     """Covers stamp_earnings' binding + its fail-open contract."""
     from research_store.models import Thesis
@@ -288,6 +328,34 @@ def _selftest() -> None:
     print("selftest OK: regime-off pauses new entries, does NOT liquidate, and "
           "cannot open an unowned name")
 
+    # ---- the rebalance knob must actually BIND ----------------------------
+    from datetime import date as _d
+    wk = {"portfolio": {"rebalance": "weekly"}}
+    assert rotation_due(wk, _d(2026, 8, 16)) is True,  "Sunday rotates"
+    assert rotation_due(wk, _d(2026, 8, 12)) is False, "Wednesday does not"
+    assert rotation_due(wk, _d(2026, 8, 14)) is False, "Friday does not"
+    # nightly stays nightly; an unreadable value rotates rather than FREEZING
+    assert rotation_due({"portfolio": {"rebalance": "nightly"}}, _d(2026, 8, 12)) is True
+    assert rotation_due({}, _d(2026, 8, 12)) is True
+    assert rotation_due({"portfolio": {"rebalance": "fortnightly"}}, _d(2026, 8, 12)) is True
+
+    # ⚠️ the LIVE config must be the one that was reasoned about -- if someone
+    # flips it to nightly, that is a strategy change and this test says so
+    assert rotation_due(strat.load(), _d(2026, 8, 16)) is True
+    assert rotation_due(strat.load(), _d(2026, 8, 12)) is False, \
+        "config/strategy.toml no longer rebalances weekly — intended?"
+
+    # a non-rotation night holds what is HELD, not the fresh re-rank
+    sc = pd.DataFrame({"score": [3.0, 2.0, 1.0]}, index=["AAA", "BBB", "CCC"])
+    assert hold_selection(["AAA", "BBB"], sc, {"BBB", "CCC"}) == ["BBB", "CCC"], \
+        "a non-rotation night must ignore the re-rank and hold the book"
+    # a held name the panel can no longer score is dropped, not crashed on
+    assert hold_selection([], sc, {"CCC", "DELISTED"}) == ["CCC"]
+    assert hold_selection([], pd.DataFrame(), {"CCC"}) == []
+
+    print("selftest OK: rebalance=weekly binds (was decorative); non-rotation "
+          "nights hold the book instead of re-ranking it")
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -351,6 +419,14 @@ def main() -> None:
 
     book_sel = mom.select(book_scored, held_book, P["book_hold"], P["book_band"])
     etf_sel = mom.select(etf_scored, held_etf, P["sleeve_hold"], P["sleeve_hold"])
+
+    # ROTATE ONLY WHEN DUE. Geometry, stops, earnings and marks still refresh
+    # below every night -- it is the SELECTION that is weekly. See rotation_due.
+    rotate = rotation_due(cfg)
+    if not rotate:
+        book_sel = hold_selection(book_sel, book_scored, held_book)
+        etf_sel = hold_selection(etf_sel, etf_scored, held_etf)
+        print("  rotation: not due (weekly) — holding the book, geometry refreshed")
     if not regime:
         # Whether a regime call justifies EXITING is a trading judgment, and it
         # belongs to the agent, which can see the positions, the marks and the
