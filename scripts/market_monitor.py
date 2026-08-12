@@ -49,6 +49,7 @@ COOLDOWN = MON / "cooldown.json"
 REENTRY = MON / "reentry_review.json"
 EXIT_REQ = MON / "exit_request.json"
 EXIT_RES = MON / "exit_result.json"
+WAKES = MON / "wakes.json"
 FEED_ALERT = MON / "feed_alert.json"    # cooldown clock for the "quotes down" push
 RH_POSITIONS = REPO / "research_store" / "rh" / "positions.json"
 ET = ZoneInfo("America/New_York")
@@ -262,6 +263,60 @@ def _selftest() -> None:
     print("monitor selftest OK: unprotected-position invariant (held-no-thesis, "
           "held-no-stop, empty-snapshot suspicion, torn-snapshot fail-open, "
           "all-protected no-alert)")
+
+    # ---- wakes: registered by the agent, fired by nothing until now --------
+    # wakes.due() was written, selftested and had NO CALLER anywhere. A session
+    # could register a wake, get an ok, and be woken by nothing.
+    import tempfile as _tf, json as _js
+    _real_wakes, _real_notify = WAKES, notify
+    _pushes, _spawns = [], []
+    with _tf.TemporaryDirectory() as _d:
+        wf = Path(_d) / "wakes.json"
+        try:
+            globals()["WAKES"] = wf
+            globals()["notify"] = lambda *a, **k: _pushes.append(a)
+
+            # no file at all -> no symbols, no crash, no fire
+            assert _wake_symbols() == set()
+            assert _fire_wakes({"NVDA": 100.0}, False) == []
+
+            wf.write_text(_js.dumps({
+                "NVDA|above|500": {"symbol": "NVDA", "direction": "above",
+                                   "level": 500.0, "budget": 1, "fired": 0,
+                                   "reason": "re-entry level"},
+                "MU|below|50":    {"symbol": "MU", "direction": "below",
+                                   "level": 50.0, "budget": 1, "fired": 0,
+                                   "reason": "add level"}}))
+            # a wake symbol we do NOT hold is still watched -- the whole point
+            assert _wake_symbols() == {"NVDA", "MU"}, _wake_symbols()
+
+            # unmet condition fires nothing
+            assert _fire_wakes({"NVDA": 400.0, "MU": 60.0}, False) == []
+            assert _pushes == []
+
+            # met condition fires, pushes, and DOES NOT spawn when not armed
+            got = _fire_wakes({"NVDA": 505.0, "MU": 60.0}, False)
+            assert len(got) == 1 and got[0]["symbol"] == "NVDA", got
+            assert len(_pushes) == 1, _pushes
+            assert "ALERT ONLY" in _pushes[0][1], _pushes[0]
+
+            # BUDGET IS SPENT: the same price must not re-fire every 15s poll
+            assert _fire_wakes({"NVDA": 505.0}, False) == [], "wake re-fired"
+            assert len(_pushes) == 1, "a spent wake pushed again"
+
+            # the POLL GUARD itself, not a paraphrase of it: an empty book with
+            # a live wake must still poll. A mutation back to `if not held`
+            # passed the entire suite before this was extracted.
+            assert _should_poll({}, {"NVDA"}) is True, \
+                "an all-cash book with a live wake must still be polled"
+            assert _should_poll({"MU": 1}, set()) is True
+            assert _should_poll({"MU": 1}, {"NVDA"}) is True
+            assert _should_poll({}, set()) is False, "nothing to watch -> skip"
+        finally:
+            globals()["WAKES"] = _real_wakes
+            globals()["notify"] = _real_notify
+    print("monitor selftest OK: wakes fire on unheld symbols, respect budget, "
+          "and alert-only when not armed")
 
 
 def _last_price(block: dict):
@@ -587,6 +642,100 @@ def refire_gate(triggers, unresolved, now_dt, retry_secs, escalate_n):
     return act, escalate
 
 
+# --------------------------------------------------------------------------- #
+# wakes — the agent asking to be called back
+# --------------------------------------------------------------------------- #
+def _should_poll(held, wake_syms) -> bool:
+    """Is there anything to poll this tick? -> bool.
+
+    Extracted so it can be TESTED. The condition previously sat inline in
+    check_once as a bare `if not held: return 0`, which no selftest reaches --
+    and a mutation reverting it to that form passed the whole suite green. A
+    guard nothing can test is a guard nothing protects.
+
+    An empty book is NOT a reason to stop: a wake on an unheld symbol is the
+    case wakes exist for ("tell me if NVDA reaches X so I can re-enter"), and it
+    is registered precisely when the name is not held.
+    """
+    return bool(held) or bool(wake_syms)
+
+
+def _wake_symbols() -> set:
+    """Symbols any live wake is watching. Never raises; {} on any problem.
+
+    Read straight off disk rather than through src/agent_env/wakes.py: this
+    module runs under system /usr/bin/python3 (3.10) for moomoo, and importing
+    the agent_env package pulls the mcp dependency chain, which lives only in
+    the .venv. The file is a flat JSON dict -- reading two keys out of it does
+    not justify a second interpreter.
+    """
+    try:
+        return {str(w["symbol"]).upper() for w in json.loads(WAKES.read_text()).values()
+                if w.get("symbol")}
+    except Exception:                                 # noqa: BLE001
+        return set()
+
+
+def _fire_wakes(prices: dict, armed: bool) -> list:
+    """Fire any wake the current prices satisfy. -> the wakes fired.
+
+    A wake is the AGENT asking to be called back when something it cannot sit
+    and watch for happens. Until now `wakes.due()` had no caller anywhere: a
+    session could register one, get an ok, and be woken by nothing -- a control
+    that reads as present and does nothing, which is the defect class this
+    system keeps producing.
+
+    ⚠️ NON-BLOCKING, DELIBERATELY. The session is spawned and NOT waited on.
+    This runs inside the 15s stop-watching poll; a session takes minutes, and
+    blocking here would stop watching every stop in the book while one wake is
+    serviced. The stop watcher must never be the thing a feature pauses.
+
+    Concurrency is the session lock's job, not a flag here: session.py acquires
+    it and a `wake` that cannot get it inside 120s exits saying so. Ordinary
+    order safety is the gate's job. Nothing new is invented at this layer.
+    """
+    if not prices:
+        return []
+    try:
+        import subprocess as _sp                      # noqa: PLC0415
+        sys.path.insert(0, str(REPO / "src"))
+        from agent_env import wakes as _wk            # noqa: PLC0415
+    except Exception as e:                            # noqa: BLE001
+        print(f"  wakes unavailable: {e}")
+        return []
+
+    try:
+        hits = _wk.due(WAKES, prices)
+    except Exception as e:                            # noqa: BLE001
+        print(f"  wakes.due failed: {e}")
+        return []
+
+    fired = []
+    for w in hits:
+        try:
+            _wk.mark_fired(WAKES, w["key"])           # budget FIRST, so a crash
+            fired.append(w)                           # below cannot re-fire it
+            store.append_journal({
+                "event": "wake_fired",
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "symbol": w.get("symbol"), "direction": w.get("direction"),
+                "level": w.get("level"), "price": w.get("price"),
+                "reason": w.get("reason"), "armed": bool(armed)})
+            notify(f"Wake: {w.get('symbol')} {w.get('direction')} "
+                   f"{w.get('level')}",
+                   f"{w.get('symbol')} at {w.get('price')} "
+                   f"({w.get('reason') or 'no reason given'}). "
+                   f"{'Waking a session.' if armed else 'ALERT ONLY - not armed.'}",
+                   tags="alarm_clock")
+            if armed:
+                _sp.Popen([str(REPO / "deploy" / "run_session.sh"), "wake"],
+                          cwd=str(REPO), start_new_session=True,
+                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        except Exception as e:                        # noqa: BLE001
+            print(f"  wake {w.get('key')} failed: {e}")
+    return fired
+
+
 def check_once(cfg, client) -> int:
     """One pass: poll, detect breaches, act. Returns count of triggers acted on."""
     m = cfg["monitor"]
@@ -689,15 +838,25 @@ def check_once(cfg, client) -> int:
                    # risk_review.py writes atomically via os.replace, so torn reads are rare)
     if _ov:
         held = apply_overrides(held, _ov)
-    if not held:
+    # ⚠️ NOT a bare `return 0`. An all-cash book still has wakes to watch, and
+    # that is exactly when a wake matters most: "tell me if NVDA reaches X so I
+    # can re-enter" is registered precisely when the name is NOT held. Returning
+    # here on an empty book would leave those wakes silently unevaluated for as
+    # long as the book stayed flat.
+    if not _should_poll(held, _wake_symbols()):
         return 0
 
     st = _load(STATE, {})
     if st.get("book_asof") != prod.as_of:            # new book -> reset fired flags
         st = {"book_asof": prod.as_of, "fired": {}}
 
+    # A wake can name a symbol we do NOT hold -- that is most of the point ("tell
+    # me if NVDA reaches X"). Quoting only holdings would leave those wakes
+    # permanently unevaluated, which is how wakes.due() came to have no caller at
+    # all: it was written, selftested, and nothing ever fed it a price.
+    wake_syms = _wake_symbols()
     try:
-        quotes = mmp.live_quotes(list(held), ctx=client)
+        quotes = mmp.live_quotes(sorted(set(held) | wake_syms), ctx=client)
     except Exception as e:
         # Do NOT swallow: signal the main loop so it rebuilds the client and, if
         # the feed stays wedged, exits for a clean systemd restart + phone alert.
@@ -705,10 +864,19 @@ def check_once(cfg, client) -> int:
 
     # persist the marks we just paid for — the dashboard + equity logger value
     # positions from this file (via src/marks.py) instead of stale snapshots
-    prices = {sym: px for sym in held
+    prices = {sym: px for sym in (set(held) | wake_syms)
               if (px := _last_price(quotes.get(sym))) is not None}
     _save(QUOTES, {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                    "prices": prices})
+
+    # Wakes fire off the SAME prices we just paid for, and BEFORE the stop
+    # scan -- a wake is non-blocking (it spawns and does not wait), so putting
+    # it first costs the stop watcher nothing and means a wake is not skipped
+    # by an early return further down.
+    _fire_wakes(prices, armed)
+
+    if not held:
+        return 0        # wakes-only tick: nothing to stop-watch
 
     triggers = []
     suspect = {}
