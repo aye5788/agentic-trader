@@ -43,6 +43,14 @@ OPENS = OUT_DIR / "opens.parquet"
 HIGHS = OUT_DIR / "highs.parquet"
 LOWS = OUT_DIR / "lows.parquet"
 CLOSES = OUT_DIR / "closes.parquet"
+# Consolidated-tape $-volume, appended from the SAME unmetered snapshot call as
+# the OHLC above -- it was already in the response and discarded. This is what
+# [governance] min_dollar_volume_20d is calibrated against; the old source
+# (Alpaca IEX, pool_dvol.parquet) is a single venue and a fraction of the tape,
+# so it reads genuinely liquid names as illiquid. Shallow by construction: it
+# starts accumulating the day this ships, so consumers MUST handle a short or
+# absent history rather than assume 20 rows exist.
+TURNOVER = OUT_DIR / "turnover.parquet"
 META = OUT_DIR / "fetch_meta.csv"
 
 
@@ -54,12 +62,13 @@ def universe_tickers() -> list[str]:
     return tickers
 
 
-_FIELDS = ("open", "high", "low", "close")
+_FIELDS = ("open", "high", "low", "close", "turnover")
 
 
 def _read_panels() -> dict:
     """Load the cached OHLC panels. Missing files -> empty frames (first-ever run)."""
-    paths = {"open": OPENS, "high": HIGHS, "low": LOWS, "close": CLOSES}
+    paths = {"open": OPENS, "high": HIGHS, "low": LOWS, "close": CLOSES,
+             "turnover": TURNOVER}
     return {f: (pd.read_parquet(p) if p.exists() else pd.DataFrame())
             for f, p in paths.items()}
 
@@ -76,7 +85,7 @@ def _merge_bars(panels: dict, bars: dict) -> dict:
         return panels
     out = {}
     for f in _FIELDS:
-        col = {t: c[f] for t, c in bars.items()}
+        col = {t: c.get(f) for t, c in bars.items()}   # .get: turnover is optional
         dates = {pd.Timestamp(c["datetime"], unit="ms").normalize() for c in bars.values()}
         if len(dates) != 1:
             raise ValueError(f"snapshot spans {len(dates)} dates, expected 1: {sorted(dates)}")
@@ -152,7 +161,13 @@ def _field_panels(raw: dict) -> dict:
     for sym, candles in raw.items():
         for f in _FIELDS:
             out[f][sym] = pd.Series(
-                {pd.Timestamp(c["datetime"], unit="ms").normalize(): c[f] for c in candles}
+                # .get, NOT [f]: the BACKFILL path (the metered history API)
+                # returns candles with no `turnover` key at all, and a KeyError
+                # here would take down the whole fetch -- every panel, every
+                # ticker -- over one optional field. Absent becomes NaN, which
+                # is the truth: unknown, not zero.
+                {pd.Timestamp(c["datetime"], unit="ms").normalize(): c.get(f)
+                 for c in candles}
             )
     return {f: pd.DataFrame(series).sort_index() for f, series in out.items()}
 
@@ -254,7 +269,8 @@ def main() -> None:
         print("[dry] nothing written")
         return
 
-    field_to_path = {"open": OPENS, "high": HIGHS, "low": LOWS, "close": CLOSES}
+    field_to_path = {"open": OPENS, "high": HIGHS, "low": LOWS, "close": CLOSES,
+                     "turnover": TURNOVER}
     for field, path in field_to_path.items():
         try:
             panels[field].to_parquet(path)
@@ -263,7 +279,7 @@ def main() -> None:
             panels[field].to_csv(fallback)
             print(f"WARN parquet write failed for {field} ({e}); wrote CSV -> {fallback}")
     pd.DataFrame(meta, columns=["ticker", "candles", "status"]).to_csv(META, index=False)
-    print(f"wrote {CLOSES} (+ opens/highs/lows)")
+    print(f"wrote {CLOSES} (+ opens/highs/lows/turnover)")
 
 
 def _selftest() -> None:
@@ -277,7 +293,7 @@ def _selftest() -> None:
         ],
     }
     panels = _field_panels(raw)
-    assert set(panels) == {"open", "high", "low", "close"}, panels.keys()
+    assert set(panels) == {"open", "high", "low", "close", "turnover"}, panels.keys()
     # close panel preserves the pre-refactor content/shape
     assert panels["close"].loc[panels["close"].index[1], "AAA"] == 11.8
     assert panels["high"].loc[panels["high"].index[0], "AAA"] == 11.0
@@ -391,6 +407,34 @@ def _selftest() -> None:
     fresh = _merge_bars({f: pd.DataFrame() for f in _FIELDS}, bars)
     assert fresh["close"].shape == (1, 2), fresh["close"].shape
     print("selftest OK: _merge_bars (append, same-date update, no-op, mixed-date guard)")
+    # ---- turnover rides along, and its ABSENCE must not break the fetch ----
+    # turnover comes free in the daily snapshot response (it was discarded), but
+    # the BACKFILL path uses the metered history API, whose candles have no such
+    # key. A `c[f]` lookup there raised KeyError and took down every panel for
+    # every ticker over one optional field.
+    hist_only = {"AAA": [{"datetime": 1_700_000_000_000, "open": 1.0, "high": 2.0,
+                          "low": 0.5, "close": 1.5}]}          # NO turnover key
+    pt = _field_panels(hist_only)
+    assert set(pt) == {"open", "high", "low", "close", "turnover"}, pt.keys()
+    assert pt["close"].iloc[0, 0] == 1.5
+    assert pd.isna(pt["turnover"].iloc[0, 0]), "absent turnover must be NaN, not 0"
+
+    # ...and when the snapshot DOES carry it, it lands in the panel
+    with_tv = {"BBB": [{"datetime": 1_700_000_000_000, "open": 1.0, "high": 2.0,
+                        "low": 0.5, "close": 1.5, "turnover": 9_000_000.0}]}
+    assert _field_panels(with_tv)["turnover"].iloc[0, 0] == 9_000_000.0
+
+    # the APPEND path (_merge_bars) must tolerate it too -- same optional field,
+    # a different consumer, and it had the same `c[f]` lookup
+    merged = _merge_bars({}, {"AAA": {"datetime": 1_700_000_000_000, "open": 1.0,
+                                      "high": 2.0, "low": 0.5, "close": 1.5}})
+    assert pd.isna(merged["turnover"].iloc[0, 0]), "append path must tolerate no turnover"
+    merged2 = _merge_bars({}, {"AAA": {"datetime": 1_700_000_000_000, "open": 1.0,
+                                       "high": 2.0, "low": 0.5, "close": 1.5,
+                                       "turnover": 5.0}})
+    assert merged2["turnover"].iloc[0, 0] == 5.0, merged2["turnover"]
+    print("selftest OK: turnover panel rides along free, and a candle without it "
+          "yields NaN instead of killing the whole fetch")
 
 
 if __name__ == "__main__":

@@ -197,9 +197,24 @@ def snapshot_ohlc(tickers, ctx=None):
                     errs[t] = "non-positive OHLC (halted / no trades)"
                     continue
                 d = dt.datetime.fromisoformat(str(ts).split(".")[0])
+                # turnover ($-volume) rides along FREE: get_market_snapshot
+                # already returns it in this same record and it was being
+                # discarded. It is the consolidated-tape figure, which is what
+                # [governance] min_dollar_volume_20d is actually calibrated
+                # against -- the fallback source (Alpaca IEX) is one venue and a
+                # fraction of the tape, so it reads genuinely liquid names as
+                # illiquid. Missing/NaN -> None rather than 0.0: absent is not
+                # "traded nothing", and a zero would drag a 20-day mean down.
+                tv = rec.get("turnover")
+                try:
+                    tv = float(tv)
+                    tv = tv if tv == tv and tv > 0 else None      # NaN-safe
+                except (TypeError, ValueError):
+                    tv = None
                 out[t] = {"datetime": int(d.replace(tzinfo=dt.timezone.utc).timestamp() * 1000),
                           "open": float(o), "high": float(h),
-                          "low": float(lo), "close": float(c)}
+                          "low": float(lo), "close": float(c),
+                          "turnover": tv}
     finally:
         if own:
             q.close()

@@ -490,18 +490,54 @@ def _dollar_volume(symbol: str) -> tuple[float | None, str | None]:
     governance.liquidity_ok() fails CLOSED on None, which is the correct
     direction: a name we cannot measure has not been shown to be tradeable.
     """
-    dvol = REPO / "research_store" / "prices" / "pool_dvol.parquet"
-    if not dvol.exists():
-        return None, None
+    # MOOMOO TURNOVER FIRST -- it is the consolidated tape, which is what
+    # min_dollar_volume_20d is actually calibrated against. The IEX fallback is
+    # ONE venue and a fraction of the tape, so it reads genuinely liquid names as
+    # illiquid: measured across the live universe it puts SOC, HTZ, ACHR and KEEL
+    # at 0.1-0.2x a floor they comfortably clear on the real tape.
+    #
+    # The turnover panel is SHALLOW BY CONSTRUCTION -- it starts accumulating the
+    # day it ships (fetch_prices appends it from the same unmetered snapshot),
+    # so it will be short of 20 rows for weeks. A short window is used and
+    # LABELLED, not silently padded or silently rejected.
+    for path, source in ((REPO / "research_store" / "prices" / "turnover.parquet",
+                          "moomoo consolidated tape"),
+                         (REPO / "research_store" / "prices" / "pool_dvol.parquet",
+                          "Alpaca IEX (ONE venue -- undercounts the tape)")):
+        got = _dvol_from(path, symbol, source)
+        if got is not None:
+            return got
+    return None, None
+
+
+def _dvol_from(path, symbol: str, source: str):
+    """One panel's trailing-20d mean. -> (value, as_of_note) or None to fall through.
+
+    Returns None (fall through to the next source) when the file is absent or the
+    symbol is not in it. Returns (None, note) when the symbol IS present but has
+    no usable readings -- that is a measured absence, not a missing source, and
+    liquidity_ok fails CLOSED on it, which is correct.
+    """
+    if not path.exists():
+        return None
     try:
-        d = pd.read_parquet(dvol)
-        as_of = d.index[-1].date().isoformat() if len(d.index) else None
+        d = pd.read_parquet(path)
         if symbol not in d.columns:
-            return None, as_of
-        s = d[symbol].dropna().tail(20)
-        return (float(s.mean()) if len(s) else None), as_of
+            return None
+        as_of = d.index[-1].date().isoformat() if len(d.index) else None
+        col = d[symbol].dropna().tail(20)
+        if not len(col):
+            return (None, as_of)
+        # ⚠️ THE SOURCE AND THE DEPTH RIDE WITH THE NUMBER. The old form returned
+        # a bare float, so a reading off ONE venue was indistinguishable from the
+        # consolidated tape, and a 3-day mean from a 20-day one. The caller
+        # reports this to a live agent sizing real orders.
+        note = f"{as_of} | {source} | {len(col)}d mean"
+        if len(col) < 20:
+            note += " (SHORT WINDOW -- fewer than 20 sessions on record yet)"
+        return (float(col.mean()), note)
     except Exception:
-        return None, None
+        return None
 
 
 @mcp.tool()
@@ -552,10 +588,17 @@ def check_order(symbol: str, side: str, amount: float) -> str:
     floor = float(cfg.get("governance", {}).get("min_dollar_volume_20d", 0.0))
     dvol, as_of = _dollar_volume(sym)
     liq_ok, liq_why = gov.liquidity_ok(sym, dvol, floor)
+    # as_of is now a NOTE ("2026-08-12 | moomoo consolidated tape | 20d mean"),
+    # not a bare date -- the source and window depth have to reach the agent with
+    # the number, or a one-venue 3-day mean reads identically to the consolidated
+    # 20-day one. Parse the date PREFIX for the age; a bare fromisoformat on the
+    # whole string throws, and the existing except would have silently reported
+    # age_days=None on every call.
     age_days = None
     if as_of:
         try:
-            age_days = (datetime.now(timezone.utc).date() - date.fromisoformat(as_of)).days
+            age_days = (datetime.now(timezone.utc).date()
+                        - date.fromisoformat(str(as_of).split(" | ")[0])).days
         except Exception:
             age_days = None
 
@@ -1130,6 +1173,47 @@ def _selftest() -> None:
         marks.load = _real_load
     print("selftest OK: a stale/undateable snapshot announces itself in BOTH "
           "account() and positions(); a fresh one stays silent")
+
+    # ---- liquidity: the SOURCE must ride with the number -------------------
+    # The floor is $50M of CONSOLIDATED volume, but the only reading was Alpaca
+    # IEX -- one venue, a fraction of the tape. Measured live, it put SOC, HTZ,
+    # ACHR and KEEL at 0.1-0.2x a floor they clear on the real tape, and the
+    # agent was told a bare number with no way to know which tape it came from.
+    import tempfile as _tf2
+    with _tf2.TemporaryDirectory() as _d2:
+        good = Path(_d2) / "t.parquet"
+        idx = pd.date_range("2026-08-01", periods=25, freq="D")
+        pd.DataFrame({"MU": [100.0] * 25}, index=idx).to_parquet(good)
+
+        val, note = _dvol_from(good, "MU", "moomoo consolidated tape")
+        assert val == 100.0, val
+        assert "moomoo consolidated tape" in note and "20d mean" in note, note
+        assert "SHORT WINDOW" not in note, note
+
+        # a SHORT history is used and LABELLED -- not silently padded, and not
+        # silently rejected. The panel starts empty the day it ships.
+        short = Path(_d2) / "s.parquet"
+        pd.DataFrame({"MU": [7.0, 9.0]}, index=idx[:2]).to_parquet(short)
+        val, note = _dvol_from(short, "MU", "moomoo consolidated tape")
+        assert val == 8.0, val
+        assert "2d mean" in note and "SHORT WINDOW" in note, note
+
+        # absent file / absent symbol FALL THROUGH (None) so the next source is
+        # tried; a symbol that is present but empty is a measured absence and
+        # returns (None, note) so liquidity_ok can fail closed on it
+        assert _dvol_from(Path(_d2) / "nope.parquet", "MU", "x") is None
+        assert _dvol_from(good, "NOTLISTED", "x") is None
+        empty = Path(_d2) / "e.parquet"
+        pd.DataFrame({"MU": [float("nan")] * 3}, index=idx[:3]).to_parquet(empty)
+        got = _dvol_from(empty, "MU", "x")
+        assert got is not None and got[0] is None, got
+
+    # the note must remain age-parseable by check_order -- it splits on " | ",
+    # and a bare fromisoformat on the whole string silently reported no age
+    from datetime import date as _dd
+    assert _dd.fromisoformat("2026-08-12 | src | 20d mean".split(" | ")[0]) == _dd(2026, 8, 12)
+    print("selftest OK: dollar volume carries its SOURCE and window depth; short "
+          "histories are labelled, absent sources fall through")
 
     # --- announce(): a NOTIFICATION, and it must never send during a test ----
     real_push = notify.push
