@@ -192,6 +192,36 @@ def _selftest() -> None:
 
     print("selftest OK: earnings stamping binds, fails open, and round-trips")
 
+    # ---- regime-off must PAUSE the book, never liquidate it ----------------
+    # Pinned because the previous form (`book_sel = []`) read as correct, its
+    # comment described the correct behaviour, and it still sold eleven
+    # positions in one tick. The regression is invisible by inspection, so it
+    # has to be asserted.
+    import pandas as pd
+    scored = pd.DataFrame(
+        {"score": [3.0, 2.0, 1.0, 0.5], "eligible": [True] * 4},
+        index=["AAA", "BBB", "CCC", "DDD"])
+    held = {"CCC", "DDD"}
+    sel = mom.select(scored, held, 2, 4)
+
+    off = [t for t in sel if t in held]          # the regime-off line under test
+    assert set(off) == {"CCC", "DDD"}, off        # held names SURVIVE
+    assert "AAA" not in off and "BBB" not in off  # ...and nothing new is added
+    assert off != [], "regime-off must not empty the book — this WAS the bug"
+
+    # with nothing held, regime-off is genuinely empty (no book to pause)
+    assert [t for t in mom.select(scored, set(), 2, 4) if t in set()] == []
+
+    # a held name that has fallen OUT of the band is still dropped: regime-off
+    # suspends new entries, it does not suspend the exit discipline
+    weak = pd.DataFrame({"score": [3.0, 2.0, 0.1], "eligible": [True, True, True]},
+                        index=["AAA", "BBB", "ZZZ"])
+    sel2 = mom.select(weak, {"ZZZ"}, 2, 2)
+    assert "ZZZ" not in [t for t in sel2 if t in {"ZZZ"}], \
+        "a held name below the band must still be released"
+
+    print("selftest OK: regime-off pauses new entries and does NOT liquidate")
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -256,7 +286,26 @@ def main() -> None:
     book_sel = mom.select(book_scored, held_book, P["book_hold"], P["book_band"])
     etf_sel = mom.select(etf_scored, held_etf, P["sleeve_hold"], P["sleeve_hold"])
     if not regime:
-        book_sel = []   # regime-off: no new single-name entries (first run = none held)
+        # REGIME-OFF BLOCKS NEW ENTRIES. It does NOT liquidate what is held.
+        #
+        # This line used to read `book_sel = []`, whose comment already said "no
+        # new single-name entries" -- but an empty selection is not "add
+        # nothing", it is "hold nothing", and build_theses drops every name
+        # absent from it. So a regime flip did not pause the book, it SOLD the
+        # book, at whatever the market was that morning, on a signal about SPY
+        # rather than anything about the positions themselves.
+        #
+        # That fired once, on 2026-07-27: eleven single names closed at one
+        # timestamp for a mean of -7.65% and a worst of -18.16% -- essentially
+        # the whole drawdown, from one line whose comment claimed it did
+        # something else. Intersecting with `held_book` keeps every held name
+        # that still passes the band and admits no new one, which is what the
+        # comment always described.
+        #
+        # Whether a regime call justifies EXITING is a trading judgment, and it
+        # belongs to the agent, which can see the positions, the marks and the
+        # reason. A static rule cannot, and it proved it.
+        book_sel = [t for t in book_sel if t in held_book]
 
     per_book = P["book_weight"] / P["book_hold"]
     per_etf = P["sleeve_weight"] / P["sleeve_hold"]

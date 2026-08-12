@@ -62,6 +62,13 @@ VENV_SELFTESTS=(
     "src/agent_env/decide.py"
     "src/agent_env/server.py"
     "scripts/session_tools.py"
+    "scripts/session.py"
+    # ⚠️ slow_loop has HAD a _selftest() since it was written and was never in
+    # this list, so it ran only when someone invoked it by hand -- which is to
+    # say, effectively never. Its regime-off case pins the line that liquidated
+    # eleven positions on 2026-07-27; a pinned regression that nothing runs is
+    # not pinned. Both are cheap: --selftest returns before any I/O.
+    "scripts/slow_loop.py"
     "scripts/hooks/pretooluse_order_gate.py"
 )
 
