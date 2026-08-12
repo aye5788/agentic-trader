@@ -94,18 +94,36 @@ def parse_verdict(text: str) -> dict:
     what the reviewer meant — which is the same error as a same-model reviewer:
     one party supplying the other's conclusion.
     """
-    m = _BLOCK.search(text or "")
-    if not m:
+    # ⛔ THE LAST BLOCK, NEVER THE FIRST. The captured log contains our own
+    # prompt echoed back before the reviewer speaks, and that prompt CONTAINS
+    # the template block. Taking the first match parsed our own instructions as
+    # the verdict: `STANCE: AFFIRM | DISSENT | SPLIT` read as AFFIRM, the
+    # headline came back as the literal placeholder, and a real SPLIT was
+    # recorded as an affirmation with NO phone push. Measured 2026-08-12 on the
+    # first live review, whose actual verdict was SPLIT.
+    blocks = _BLOCK.findall(text or "")
+    if not blocks:
         return {"stance": "UNPARSED", "headline": "",
                 "error": "no ===VERDICT=== block in the reviewer's output"}
-    body = m.group(1)
+    body = blocks[-1]
     out = {}
     for key in ("STANCE", "HEADLINE", "WHAT_I_WOULD_HAVE_DONE",
                 "STRONGEST_DISAGREEMENT", "WHAT_WOULD_CHANGE_MY_MIND"):
         mm = re.search(rf"^\s*{key}:\s*(.+?)\s*$", body, re.M)
         out[key.lower()] = mm.group(1).strip() if mm else ""
-    stance = (out.get("stance") or "").upper().split()[0] if out.get("stance") else ""
+    raw = (out.get("stance") or "").upper()
+    # An unfilled template still reads "AFFIRM | DISSENT | SPLIT". Taking the
+    # first word turns our own placeholder into a confident verdict, so a line
+    # offering a CHOICE is refused outright rather than resolved.
+    if "|" in raw:
+        return {"stance": "UNPARSED", "headline": "",
+                "error": "the verdict block is an unfilled template, not a verdict"}
+    stance = raw.split()[0] if raw.split() else ""
     out["stance"] = stance if stance in _STANCES else "UNPARSED"
+    # Same for the placeholders: an angle-bracketed field was never filled in.
+    for k, v in list(out.items()):
+        if isinstance(v, str) and v.startswith("<") and v.endswith(">"):
+            out[k] = ""
     return out
 
 
@@ -292,6 +310,29 @@ trailing"""
     assert v["stance"] == "DISSENT", v
     assert "strongest names" in v["headline"], v
     assert v["what_i_would_have_done"].startswith("Held MU"), v
+
+    # ⛔ THE PROMPT IS ECHOED BACK BEFORE THE REVIEWER SPEAKS, and it contains
+    # the template. Parsing the FIRST block read our own instructions as the
+    # verdict and turned a real SPLIT into an AFFIRM with no push.
+    echoed = ("===VERDICT===\n"
+              "STANCE: AFFIRM | DISSENT | SPLIT\n"
+              "HEADLINE: <one sentence, plain English>\n"
+              "===END===\n"
+              "...reviewer works...\n"
+              "===VERDICT===\n"
+              "STANCE: SPLIT\n"
+              "HEADLINE: Risk cuts fine, idle cash not.\n"
+              "===END===")
+    v2 = parse_verdict(echoed)
+    assert v2["stance"] == "SPLIT", v2
+    assert v2["headline"] == "Risk cuts fine, idle cash not.", v2
+    # the template ALONE must never resolve to a stance
+    tmpl = ("===VERDICT===\nSTANCE: AFFIRM | DISSENT | SPLIT\n"
+            "HEADLINE: <one sentence>\n===END===")
+    assert parse_verdict(tmpl)["stance"] == "UNPARSED", parse_verdict(tmpl)
+    # and an unfilled angle-bracket field must not be reported as content
+    onep = ("===VERDICT===\nSTANCE: DISSENT\nHEADLINE: <one sentence>\n===END===")
+    assert parse_verdict(onep)["headline"] == "", parse_verdict(onep)
 
     assert parse_verdict("STANCE: AFFIRM but no block")["stance"] == "UNPARSED"
     assert parse_verdict("")["stance"] == "UNPARSED"
