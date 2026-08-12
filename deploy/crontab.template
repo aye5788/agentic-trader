@@ -57,6 +57,23 @@ HOME=/root
 0 12 * * 1-5  /opt/agentic-trader/deploy/run_risk_review.sh >> /opt/agentic-trader/logs/risk_review.log 2>&1
 45 15 * * 1-5 /opt/agentic-trader/deploy/run_risk_review.sh >> /opt/agentic-trader/logs/risk_review.log 2>&1
 
+# --- AGENT SESSION (the inversion) — close session, LIVE since 2026-08-12 ---
+# The agent DECIDES; it is not handed a procedure. Supervision (lock, brief,
+# process group, integrity tripwire, verdict) lives in scripts/session.py.
+# Orders still pass the PreToolUse gate declared in deploy/loop_settings.json:
+# kill switch, per-order cap, universe whitelist, live_approved.
+#
+# ⚠️ deploy/run_session.sh MUST be executable (mode 100755). If a deploy lands it
+# 100644, cron fails at exit 126 BEFORE alert.sh installs the ERR trap — no phone
+# push, no health check, and the slot silently does nothing.
+#
+# ⚠️ 15:15, NOT 15:45. risk_review runs 15:45 and is armed; both it and the
+# session read-modify-write monitor/overrides.json with no shared lock, and the
+# interleaving was measured DROPPING a risk_review protective stop. close times
+# out at 1200s, so this ends by 15:35 with ten minutes of margin. Do not "tidy"
+# these two onto the same minute.
+15 15 * * 1-5 /opt/agentic-trader/deploy/run_session.sh close >> /opt/agentic-trader/logs/session.log 2>&1
+
 # --- WEEKLY INVESTOR LETTER (headless Claude narrative, then email) ---
 # Sunday 21:00, after the slow loop writes the new book — the letter wraps the
 # week and previews Monday's rotation. Emails only once NEWSLETTER_* creds
