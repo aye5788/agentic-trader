@@ -502,7 +502,17 @@ def run_executor(timeout_secs: int = 300) -> dict:
     try:
         # model pinned (see run_fast_loop.sh) — the exit path must never break
         # because a default model was retired
+        # ⚠️ --settings IS LOAD-BEARING AND WAS MISSING SINCE THIS PATH WAS
+        # WRITTEN. Without it the exit executor runs under .claude/settings.json,
+        # which is deliberately permissive for humans and carries NO `hooks` key
+        # -- so the PreToolUse order gate has never bound to the exit path. Every
+        # stop-triggered market sell this system has ever placed went out with no
+        # harness gate: no live_approved check, no per-order cap, no SHADOW, no
+        # whitelist. (The monitor checks the kill switch itself, so HALT worked;
+        # nothing else did.) This is the same defect documented as caught for
+        # sessions in deploy/session_tools.sh -- it was still live here.
         subprocess.run(["claude", "-p", "--model", "claude-opus-4-8",
+                        "--settings", str(REPO / "deploy" / "loop_settings.json"),
                         (REPO / "prompts" / "exit.md").read_text()],
                        cwd=str(REPO), timeout=timeout_secs, check=False)
     except Exception as e:                            # never let execution crash the monitor

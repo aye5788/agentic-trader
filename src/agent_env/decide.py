@@ -13,6 +13,10 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+
+# How long an agent-set level keeps arming the live monitor. A level is a
+# judgment about a situation, and situations end -- see _expiry.
+LEVEL_TTL_DAYS = 5
 sys.path.insert(0, str(REPO / "src"))
 
 
@@ -51,8 +55,25 @@ def merge_levels(existing: dict, symbol: str, stop, target, reason: str, ts: str
                                                    # in scripts/market_monitor.py
                                                    # actually reads
         "reason": str(reason).strip(), "ts": ts,
+        # ⚠️ EXPIRY IS MANDATORY. risk_review.read_overrides prunes on
+        # `o.get("expires", "9999") >= today`, so an entry written WITHOUT this
+        # key never expires -- a stop the agent set once kept arming the live
+        # monitor indefinitely, outliving the position, the thesis and any
+        # reason it was set for. A level is a judgment about a situation, and
+        # situations end; the agent re-states it if it still holds.
+        "expires": _expiry(ts),
     }
     return out
+
+
+def _expiry(ts: str, days: int = LEVEL_TTL_DAYS) -> str:
+    """The date this level stops arming the monitor (YYYY-MM-DD)."""
+    from datetime import date, datetime, timedelta      # noqa: PLC0415
+    try:
+        base = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).date()
+    except Exception:                                   # noqa: BLE001
+        base = date.today()
+    return (base + timedelta(days=days)).isoformat()
 
 
 def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,

@@ -252,6 +252,31 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
     _pos = (_v.get("positions") or {}).get(sym) or {}
     px = _pos.get("mark") or _pos.get("avg_cost")
     if px and stop and float(stop) > 0:
+        # ⛔ CEILING FIRST. The guard below only rejected stops that are too FAR
+        # from spot; there was no upper bound at all, so a stop ABOVE the live
+        # price was accepted and returned "enforced": true. That is not a stop --
+        # it is already breached the instant it is written, and the monitor is a
+        # live armed service that polls every 15s and sells the WHOLE position at
+        # market on a breach. One accepted level was therefore a full liquidation
+        # with no order ever placed by the agent, which is how it slipped past
+        # the order gate entirely (demonstrated on AMD: stop 474.00 against a
+        # 473.65 mark -> TRIGGERS fraction 1.0).
+        #
+        # A long stop must sit BELOW the price it protects. Refused rather than
+        # clamped: silently moving a level the agent chose would teach it that
+        # the number it set is not the number in force.
+        if float(stop) >= float(px):
+            return json.dumps({
+                "ok": False,
+                "error": (f"stop {float(stop):.4f} is at or ABOVE the last price "
+                          f"{float(px):.4f} — it is breached the moment it is "
+                          f"set, and the monitor would sell this whole position "
+                          f"at market within seconds. A stop sits below the "
+                          f"price it protects. To exit now, sell deliberately "
+                          f"rather than by arming a tripwire under your feet."),
+                "last_price": px,
+            }, indent=2)
+
         floor_px = float(px) * MIN_STOP_FRACTION
         if float(stop) < floor_px:
             return json.dumps({
@@ -1131,12 +1156,38 @@ def _selftest() -> None:
             r = json.loads(set_levels("NVDA", 108.0, 0.0, "test: wide but real"))
             assert "enforcement" in r, r
 
+            # ⛔ A STOP AT OR ABOVE SPOT IS A LIQUIDATION, NOT A LEVEL. There was
+            # no upper bound at all: a stop above the live price was accepted and
+            # reported "enforced": true, and the live armed monitor -- which
+            # polls every 15s and sells the WHOLE position at market on a breach
+            # -- fired on it. That is a full exit reached WITHOUT the agent ever
+            # placing an order, so the order gate never saw it. Demonstrated on
+            # AMD: stop 474.00 against a 473.65 mark -> TRIGGERS fraction 1.0.
+            for bad in (110.0, 110.01, 250.0):          # marks.load mark = 110.0
+                r = json.loads(set_levels("NVDA", bad, 0.0, "test: stop above spot"))
+                assert r["ok"] is False, (bad, r)
+                assert "at or ABOVE the last price" in r["error"], (bad, r)
+            # just below spot is still a legitimate (tight) stop
+            r = json.loads(set_levels("NVDA", 109.99, 0.0, "test: tight but valid"))
+            assert "enforcement" in r, r
+
             marks.load = _real_marks_load
 
             # 5) matching count AND lowers -> enforced.
             globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th])
             r = json.loads(set_levels("NVDA", 95.0, 110.0, "test: lowers target"))
             assert r["enforcement"]["target"]["enforced"] is True, r
+
+            # EVERY level the agent writes must carry an expiry. risk_review
+            # prunes on `expires >= today` with a "9999" default, so an entry
+            # written without the key armed the live monitor FOREVER -- outliving
+            # the position, the thesis, and the reason it was set for.
+            written = json.loads(Path(decide.OVERRIDES).read_text())
+            assert "NVDA" in written, written
+            assert written["NVDA"].get("expires"), \
+                "an agent-set level with no expiry never stops arming the monitor"
+            from datetime import date as _date
+            assert written["NVDA"]["expires"] > _date.today().isoformat(), written
         finally:
             decide.OVERRIDES = orig_overrides
             decide.RH_POSITIONS = orig_rh_positions
