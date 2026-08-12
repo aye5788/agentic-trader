@@ -360,7 +360,15 @@ def _selftest() -> None:
     # dangerous class of error here, because the agent cannot check and will rely.
     assert "a level is not enforced until the tool says it is" in out.lower()
     assert "enforcement.stop.enforced: true" in out
-    assert "cannot be given an enforced\nstop at all" in out or "cannot be given an enforced" in out
+    assert "could not be given an enforced stop" in out
+    # ⚠️ THE CHARTER MUST NOT GRANT A PERMISSION THE GATE REFUSES. Three passages
+    # told the agent it could trade off-universe ("you may act on one", "if you
+    # take one", and an announce-first class for it) while require_whitelist=true
+    # makes vet_plan deny every such buy. A fictional permission is worse than a
+    # stated limit: the agent plans around it and is refused with no explanation
+    # it was given in advance.
+    assert "cannot currently BUY what it" in out
+    assert "reachable only if the" in out
     assert "stricter-only" in out, "the no-widening trap must be stated"
     assert "NOTHING ACTS ON THEM" in out, "the mandate is advisory; do not reclaim it"
     assert "You are the enforcement" in out

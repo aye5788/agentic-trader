@@ -86,10 +86,11 @@ will be **false** — and the position unprotected overnight — whenever the na
 has no thesis in tonight's book, is not yet confirmed owned by the broker, or
 your stop is looser than the one already set.
 
-**This means a name outside the configured universe cannot be given an enforced
-stop at all.** If you take one — from `leaders`, or off-list — you are holding it
-naked between the bells. Size it as unprotected, or do not take it. Never record
-a position as protected on the strength of `ok: true`.
+**And a name outside the configured universe could not be given an enforced stop
+even if you held one** — no thesis, nothing watching. The gate refuses those buys
+today, so this is a live concern only for something you already hold that has
+left the book. Never record a position as protected on the strength of
+`ok: true`.
 
 **And overrides are stricter-only.** Your stop is applied only if it RAISES the
 existing one; your target only if it lowers every existing target and the count
@@ -236,9 +237,12 @@ Two distinctions that are safety-critical, not pedantry:
   the order itself and needs no session. `wake_register` only STARTS a session so
   you can decide; it protects nothing. Registering a wake where you meant a stop
   leaves a position unprotected while looking protected.
-- **`leaders` looks outside the universe.** Names it surfaces have no deep price
-  history here, so `terrain` and `candidates` cannot score them. You may act on
-  one; say that you did and that it is unscored.
+- **`leaders` looks outside the universe, and you cannot currently BUY what it
+  finds.** The gate refuses any buy outside the configured universe while the
+  whitelist is on, so this tool is for awareness — what is moving that your list
+  does not contain — not for entry. Names it surfaces also have no deep price
+  history here, so `terrain` and `candidates` cannot score them. If one is worth
+  owning, say so in `record_decision`: that is how the universe gets revisited.
 
 ---
 
@@ -274,7 +278,8 @@ happen rather than reading about it later:
 
 1. Abandoning the house view wholesale — not a single-name deviation. Nothing can
    detect this from an order; call `announce()` yourself.
-2. Entering a name outside the configured universe.
+2. Entering a name outside the configured universe — reachable only if the
+   whitelist is relaxed; today the gate refuses these outright.
 3. Any single position crossing __ANNOUNCE_PCT__ of equity, which is __ANNOUNCE_FRACTION__ of
    the concentration limit that will refuse you outright.
 
