@@ -68,10 +68,20 @@ def ping() -> str:
     return "pong"
 
 
-# How old a broker snapshot may be before the agent must be told. The snapshot
-# is refreshed by the 10:00 fast loop and by the monitor; a close session at
-# 15:15 normally sees data hours old, not days.
-SNAPSHOT_STALE_HOURS = 8.0
+# How stale a broker snapshot may be before the agent must be told, measured in
+# TRADING DAYS, not wall-clock hours.
+#
+# ⚠️ An hours threshold measures the wrong thing. The writers (the 10:00 fast
+# loop, the monitor during RTH) stop at the close by design, so a PREMARKET
+# session at 09:00 legitimately sees a 17h-old snapshot and a Monday premarket
+# sees a 65h-old one -- both are the freshest data that exists, and an 8h rule
+# would have fired the alarm on every premarket run from the day it shipped. An
+# alert that fires on correct behaviour is one the agent learns to scroll past,
+# which costs the alert its meaning at the moment it is finally right.
+#
+# One trading day of gap is normal (yesterday's close is today's premarket
+# truth). Two means a writer has actually failed.
+SNAPSHOT_STALE_BUSDAYS = 1
 
 
 def _staleness(v: dict) -> dict | None:
@@ -106,12 +116,15 @@ def _staleness(v: dict) -> dict | None:
                 "warning": ("This snapshot's timestamp could not be parsed, so "
                             "its age is unknown. Read positions from Robinhood "
                             "directly before acting on them.")}
+    import numpy as _np                              # noqa: PLC0415
     hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
-    if hours <= SNAPSHOT_STALE_HOURS:
+    gap = int(_np.busday_count(dt.date(), datetime.now(timezone.utc).date()))
+    if gap <= SNAPSHOT_STALE_BUSDAYS:
         return None
-    return {"age": f"{hours:.1f}h", "as_of": str(raw), "stale": True,
-            "warning": (f"⚠️ THIS SNAPSHOT IS {hours:.1f} HOURS OLD (limit "
-                        f"{SNAPSHOT_STALE_HOURS:.0f}h). Whoever refreshes it has "
+    return {"age": f"{hours:.1f}h ({gap} trading days)", "as_of": str(raw),
+            "stale": True,
+            "warning": (f"⚠️ THIS SNAPSHOT IS {gap} TRADING DAYS OLD (limit "
+                        f"{SNAPSHOT_STALE_BUSDAYS}). Whoever refreshes it has "
                         f"probably failed. The positions and dollar figures below "
                         f"may describe a book you no longer hold. Call "
                         f"get_equity_positions and get_portfolio for the real "
@@ -1137,13 +1150,29 @@ def _selftest() -> None:
     # failed planned against YESTERDAY'S holdings with placement allowed. Not
     # zero orders -- confident wrong ones, against positions possibly sold.
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    import numpy as _np2
     fresh = (_dt.now(_tz.utc) - _td(hours=2)).isoformat()
-    old_ts = (_dt.now(_tz.utc) - _td(hours=30)).isoformat()
+    old_ts = (_dt.now(_tz.utc) - _td(days=9)).isoformat()      # >1 trading day, always
 
     assert _staleness({"marked_at": fresh}) is None, "a fresh snapshot must be silent"
     st = _staleness({"marked_at": old_ts})
-    assert st and st["stale"] is True and "30." in st["age"], st
-    assert "HOURS OLD" in st["warning"] and "get_equity_positions" in st["warning"], st
+    assert st and st["stale"] is True and "trading days" in st["age"], st
+
+    # ⚠️ MEASURED IN TRADING DAYS, NOT HOURS. The writers stop at the close by
+    # design, so a 09:00 premarket session legitimately sees a 17h-old snapshot
+    # and a MONDAY premarket a 65h-old one -- both the freshest data that
+    # exists. An hours threshold fired on every premarket run.
+    def _ago(days):        # a timestamp exactly N calendar days back
+        return (_dt.now(_tz.utc) - _td(days=days)).isoformat()
+    for back in range(1, 5):
+        gap = int(_np2.busday_count((_dt.now(_tz.utc) - _td(days=back)).date(),
+                                    _dt.now(_tz.utc).date()))
+        got = _staleness({"marked_at": _ago(back)})
+        if gap <= 1:
+            assert got is None, f"{back}d back = {gap} trading days, must be silent"
+        else:
+            assert got and got["stale"] is True, (back, gap, got)
+    assert "TRADING DAYS OLD" in st["warning"] and "get_equity_positions" in st["warning"], st
     # no timestamp at all, and an unparseable one, are BOTH stale -- never "fine"
     assert _staleness({})["stale"] is True          # a snapshot with no ts IS stale
     # ...but NO snapshot at all is a different, already-handled state: the
@@ -1155,9 +1184,14 @@ def _selftest() -> None:
     finally:
         marks.load = _no_snap
     assert _staleness({"marked_at": "not-a-date"})["stale"] is True
-    # a bare date is midnight, not "now" -- yesterday's date must read as stale
+    # A bare date parses as midnight, and under the TRADING-DAY rule yesterday's
+    # date is normal, not stale -- that is the premarket case. (It read as stale
+    # under the old hours rule, which is exactly the false alarm being removed.)
     y = (_dt.now(_tz.utc) - _td(days=1)).date().isoformat()
-    assert _staleness({"as_of": y})["stale"] is True, y
+    if int(_np2.busday_count(_dt.fromisoformat(y).date(), _dt.now(_tz.utc).date())) <= 1:
+        assert _staleness({"as_of": y}) is None, y
+    week = (_dt.now(_tz.utc) - _td(days=8)).date().isoformat()
+    assert _staleness({"as_of": week})["stale"] is True, week
     # the banner reaches BOTH tools, not just account()
     _real_load = marks.load
     try:

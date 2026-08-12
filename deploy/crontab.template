@@ -72,6 +72,17 @@ HOME=/root
 # interleaving was measured DROPPING a risk_review protective stop. close times
 # out at 1200s, so this ends by 15:35 with ten minutes of margin. Do not "tidy"
 # these two onto the same minute.
+# premarket 09:00 — BEFORE the 09:30 bell. NOT the 09:25 the plan proposed:
+# that mode times out at 900s, so 09:25 would run 10 minutes INTO the session,
+# placing at the open — the most volatile stretch of the day, which the plan
+# itself sequenced last on purpose.
+0 9 * * 1-5   /opt/agentic-trader/deploy/run_session.sh premarket >> /opt/agentic-trader/logs/session.log 2>&1
+
+# open 10:35 — deliberately AFTER run_fast_loop.sh (10:00, measured to finish by
+# ~10:04), so the two never write research_store concurrently. open times out at
+# 1800s, ending by 11:05, clear of risk_review at 12:00.
+35 10 * * 1-5 /opt/agentic-trader/deploy/run_session.sh open >> /opt/agentic-trader/logs/session.log 2>&1
+
 15 15 * * 1-5 /opt/agentic-trader/deploy/run_session.sh close >> /opt/agentic-trader/logs/session.log 2>&1
 
 # --- WEEKLY INVESTOR LETTER (headless Claude narrative, then email) ---
