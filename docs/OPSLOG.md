@@ -8,6 +8,62 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+
+## 2026-08-12 — the trade record cannot yet judge the trade geometry
+
+Written down because it was nearly written into the CHARTER instead, where it
+would have made the agent hesitant without changing a single decision.
+
+**The question.** The inherited geometry puts the first target ~5.5 sigma out on
+a hold of a few days (`stop_atr_mult = 2.5`, `target_r_mults = [2.2, 4.0]`). It
+guarantees reward:risk >= 2 BY CONSTRUCTION -- and the ratio is satisfiable in
+exactly one easy way, by moving the target further out. Nothing ever asked
+whether price could reach it in the time a position is actually held. The
+validation gate that "checked" this was tautological and was deleted (a99b052).
+
+**Why the record cannot answer it.** All 18 closed outcomes are confounded:
+
+  regime_off  11   avg -7.65%, worst -18.16%  -- ALL single names, one timestamp
+                   2026-07-27T14:05:34. Static liquidation, being removed.
+  rebalanced   6   avg +1.22%, best  +3.19%   -- ALL ETF sleeve. Weekly rotation,
+                   small by construction.
+  stop         1   -24.09% (WDC)              -- entry_price 542.78 -> 412.01 in
+                   ONE day. An earnings gap. `earnings_soon` was inert in
+                   production until 2026-08-09, three days AFTER this close.
+
+So: 0 targets ever hit, and 1 stop ever hit -- on a position that gapped through
+it overnight on an event the system could not see. There is no clean observation
+of the geometry anywhere in the record.
+
+**The trap this creates.** The aggregate reads as a textbook failure -- 33% win
+rate, avg win +1.70%, avg loss -9.26%, payoff ratio 0.18, best trade ever
++3.19%. It is tempting (I did it, mid-conversation, with numbers attached) to
+diagnose "cuts winners, runs losers" and reach for the override mechanism as the
+cause. The pairing refutes it: the small wins are ETF rotations and the large
+losses are one liquidation event. NO target was ever pulled in and NO stop was
+ever tightened into a winner. The pattern is produced entirely by two static
+mechanisms operating on two different sleeves.
+
+**What is nonetheless true by inspection, not by evidence.** `apply_overrides`
+is a one-way ratchet: a stop may only be RAISED and a target may only be LOWERED.
+Both permitted directions shorten the trade; both blocked directions let it run.
+Raising a target increases no loss risk at all -- the stop is unchanged -- so
+blocking it has no safety justification. Whether to open that direction is a
+design decision on principle, NOT one this record supports either way. Left open
+deliberately.
+
+**When it becomes answerable.** Only after the regime liquidation is removed and
+the agent is setting its own levels: until then every position is closed by
+something else before its geometry can be tested. Outcome recording now covers
+all seven close paths (62a280c), so the evidence will accumulate from here.
+
+**Charter consequence.** The charter states only what changes an action: use
+`terrain()`, and do not inherit a target without checking it, because none has
+ever been reached. The confound analysis, the payoff ratio and the "we cannot
+yet tell" live here. A trader does not need a methodology note; given this
+model's documented bias toward overcaution, one would cost more than it bought.
+
+
 ## 2026-08-11 — the safety gate stopped being optional: a PreToolUse hook in front of every order
 
 `check_order()` (`src/agent_env/`) was **advisory**. It is a tool the agent MAY call, and

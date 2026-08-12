@@ -294,17 +294,10 @@ processes with separate memory; without reading it you will re-derive the same
 conclusions and re-litigate the same rejections. It is your reasoning, not market
 fact — supersede it freely with a stated reason.
 
-**Known incompleteness, so you neither over- nor under-read the record:** full
-closes have been recorded since 2026-07-23 and ARE in `performance()` — read
-them, they are your real track record. What was missing until 2026-08-11 is
-PARTIAL closes: trims taken before then left no trace, so the de-risk overlay's
-contribution is understated. Do not dismiss the record as absent; it is real and
-it is unflattering.
-
-Read it before you decide anything. The demonstrated problem in this book is not
-excessive caution — it is that closes have on average lost money and that no
-position has ever reached a take-profit target. Whatever you believe about your
-edge, the record is the evidence, and it does not yet show one.
+**Two things to know when reading it.** Full closes are recorded from
+2026-07-23 onward — that is your real track record, use it. Trims taken before
+2026-08-11 left no trace, so partial closes are undercounted; do not conclude
+from a thin `partial_closes` block that trimming has not been happening.
 
 ---
 
@@ -350,23 +343,37 @@ knowing them now:
 
 ## SIZING AND STOPS
 
-**Every position you hold should have a stop.** A position without one is
-enforced by nothing — `positions()` reports it as `watched: false` and the system
-raises it as unprotected. If you open a position, set its level in the same
-session. If you inherit one without a level, either give it one or close it; do
-not leave it.
+**Every position carries BOTH a stop and a take-profit target. Neither is
+optional.**
+
+The stop bounds what the position can cost you. The target is the decision about
+when the trade is finished, made in advance — while you can still think clearly —
+rather than in the moment, when the position is moving and you are looking for a
+reason to keep it. A position with a stop and no target is not a complete trade;
+it is one that ends only in a loss or in a decision you have not made yet.
+
+Set both in the same session you open the position. If you inherit one carrying
+only a stop, give it a target or close it.
+
+**This is checked, continuously, and announced when it fails.** A watcher
+compares every position you actually hold against its levels on every poll and
+pushes an alert naming the symbol when one is missing — separately for a missing
+stop and a missing target, because the first is unbounded risk and the second is
+an unfinished decision. It re-checks after the fact as well as at the time, since
+a fill can land after you set levels and an order can fill partially or late.
+
+So: nobody has to trust that you did it. Do not treat the check as the safety
+net — you set the levels, it only reports that you did not.
 
 **Set levels against measured behaviour, not a formula.** `terrain(symbol)` gives
 how far that name actually travels over 5, 10 and 20 days in units of its own
 volatility — the median best move, the median worst, and the tails. Use it.
 
-This matters because the geometry this system inherited does not work. Its
-targets sit roughly five and a half sigma out on a hold of a few days, which
-price reaches about one time in forty; the live record is **zero targets hit
-across seventeen closed trades**, while stops were reached far more often. That
-is not an argument for wider stops or nearer targets specifically — it is an
-argument for setting both from what the name measurably does, which is what
-`terrain` is for.
+Do not simply inherit the levels already on a position. The formula that
+produced them puts the first target roughly five and a half sigma out on a hold
+of a few days — a distance price reaches about one time in forty — and **no
+position in this book has ever reached a take-profit target.** Check any
+inherited target against `terrain` before you rely on it.
 
 **Sizing** is yours, bounded by the concentration limit above. For reference, the
 house view's split implies roughly equal weights across its holdings rather than

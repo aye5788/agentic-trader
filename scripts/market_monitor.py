@@ -64,6 +64,7 @@ _LAST_HALTED: bool | None = None      # log kill-switch mode on transition, not 
 # _LAST_HALTED above — not a re-push every 15s poll while the condition holds.
 _LAST_UNPROTECTED: frozenset = frozenset()
 _LAST_SUSPECT_EMPTY: bool = False
+_LAST_NO_TARGET: frozenset = frozenset()
 
 
 def _now_et():
@@ -201,6 +202,31 @@ def _selftest() -> None:
     print("monitor selftest OK: corporate-action guard (split suppressed, "
           "real crash and real target still act)")
 
+    # ⚠️ EVERY POSITION CARRIES BOTH LEVELS. A stop bounds the loss; a target is
+    # the decision about when the trade is finished, made in advance instead of
+    # in the moment. A stop-only position is NOT fully protected and must be
+    # announced -- separately, because the urgency differs.
+    b_ok = Thesis(symbol="AAA", rank=1, verdict="buy", stop=10.0,
+                  targets=[20.0], target_weight=0.1)
+    b_notgt = Thesis(symbol="BBB", rank=2, verdict="buy", stop=10.0,
+                     targets=[], target_weight=0.1)
+    b_nostop = Thesis(symbol="CCC", rank=3, verdict="buy", stop=None,
+                      targets=[20.0], target_weight=0.1)
+    out = unprotected_positions([b_ok, b_notgt, b_nostop], {"AAA", "BBB", "CCC"})
+    assert out["unprotected"] == ["CCC"], out          # no stop = unbounded risk
+    assert out["no_target"] == ["BBB"], out            # stop but no finish line
+    # a fully-levelled book raises neither
+    out = unprotected_positions([b_ok], {"AAA"})
+    assert out["unprotected"] == [] and out["no_target"] == [], out
+    # a name with NO stop is reported once, as unprotected -- never twice
+    assert "CCC" not in unprotected_positions(
+        [b_nostop], {"CCC"})["no_target"]
+    # torn snapshot still fails open on BOTH findings
+    out = unprotected_positions([b_notgt], None)
+    assert out["unprotected"] == [] and out["no_target"] == [], out
+    print("monitor selftest OK: every position needs BOTH a stop and a target "
+          "(missing target announced separately, no double-report, fail-open)")
+
     print("monitor selftest OK: unprotected-position invariant (held-no-thesis, "
           "held-no-stop, empty-snapshot suspicion, torn-snapshot fail-open, "
           "all-protected no-alert)")
@@ -242,8 +268,24 @@ def apply_overrides(held: dict, overrides: dict) -> dict:
             continue
         try:
             t = copy.copy(th)
-            if isinstance(ov.get("stop"), (int, float)) and t.stop is not None and ov["stop"] > t.stop:
-                t.stop = float(ov["stop"])
+            # STRICTER BY DEFAULT: a stop may only be raised. That guard exists
+            # so a de-risk pass -- which never sets `widen` -- cannot loosen a
+            # live stop by accident, and so a malformed file can never weaken
+            # protection.
+            #
+            # WIDENING IS OPT-IN, NOT IMPOSSIBLE. An inherited stop can sit
+            # inside the name's own noise, where it is not protection but a
+            # guarantee of being taken out by nothing. Refusing to widen it left
+            # exactly one compliant move -- close the position -- turning a
+            # routine adjustment into a forced exit. So a loosening is honoured
+            # ONLY when the override says so explicitly AND carries a reason.
+            # Deliberate, attributable, and announced by the caller; never a
+            # silent side effect of a stray number.
+            ov_stop = ov.get("stop")
+            if isinstance(ov_stop, (int, float)) and t.stop is not None:
+                widen = bool(ov.get("widen")) and str(ov.get("reason") or "").strip()
+                if ov_stop > t.stop or widen:
+                    t.stop = float(ov_stop)
             ot = ov.get("targets")
             if (isinstance(ot, list) and t.targets and len(ot) == len(t.targets)
                     and all(isinstance(o, (int, float)) for o in ot)):
@@ -302,12 +344,23 @@ def unprotected_positions(theses, owned) -> dict:
         not to panic about stops.
     """
     if owned is None:
-        return {"unprotected": [], "suspect_empty_snapshot": False}
+        return {"unprotected": [], "no_target": [], "suspect_empty_snapshot": False}
     watched = {t.symbol for t in theses if t.target_weight > 0 and t.stop}
     if not owned:
         expects_holdings = any(t.target_weight > 0 for t in theses)
-        return {"unprotected": [], "suspect_empty_snapshot": expects_holdings}
-    return {"unprotected": sorted(owned - watched), "suspect_empty_snapshot": False}
+        return {"unprotected": [], "no_target": [],
+                "suspect_empty_snapshot": expects_holdings}
+    # A position needs BOTH levels. A stop bounds the loss; a target is the
+    # decision about when the trade is finished, made in advance rather than in
+    # the moment. Reported SEPARATELY from `unprotected` because the urgency
+    # differs -- a missing stop is unbounded risk right now, a missing target is
+    # an unfinished decision -- but both are announced, because the standing
+    # instruction is that every position carries both and neither is optional.
+    targeted = {t.symbol for t in theses
+                if t.target_weight > 0 and t.stop and (t.targets or [])}
+    return {"unprotected": sorted(owned - watched),
+            "no_target": sorted((owned & watched) - targeted),
+            "suspect_empty_snapshot": False}
 
 
 def _load(path, default):
@@ -529,6 +582,7 @@ def check_once(cfg, client) -> int:
     _save(MON / "unprotected.json", {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "unprotected": unprot["unprotected"],
+        "no_target": unprot.get("no_target", []),
         "suspect_empty_snapshot": unprot["suspect_empty_snapshot"],
     })
     global _LAST_UNPROTECTED, _LAST_SUSPECT_EMPTY
@@ -543,6 +597,23 @@ def check_once(cfg, client) -> int:
                    f"for nothing. Set a stop or exit by hand.",
                    tags="rotating_light")
         _LAST_UNPROTECTED = cur_unprot
+    # A held position with a stop but NO TARGET. Separate push from the
+    # unprotected one: the risk is bounded, but the trade has no pre-decided
+    # finish, which is the standing instruction it violates. Fire-on-CHANGE so a
+    # standing condition does not re-push every 15s poll.
+    global _LAST_NO_TARGET
+    cur_nt = frozenset(unprot.get("no_target", []))
+    if cur_nt != _LAST_NO_TARGET:
+        if cur_nt:
+            names = ", ".join(sorted(cur_nt))
+            print(f"  ⚠ NO TARGET — stop set, no take-profit: {names}")
+            notify("⚠️ Position(s) with no take-profit target",
+                   f"{names}: stopped but with no target, so nothing decides when "
+                   f"the trade is finished. Every position is meant to carry both. "
+                   f"Set one, or say why this position ends only at its stop.",
+                   tags="warning")
+        _LAST_NO_TARGET = cur_nt
+
     if unprot["suspect_empty_snapshot"] != _LAST_SUSPECT_EMPTY:
         if unprot["suspect_empty_snapshot"]:
             print("  ⚠ snapshot reports ZERO positions but the book expects holdings"

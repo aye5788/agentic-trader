@@ -351,8 +351,20 @@ def _selftest() -> None:
     assert "NOTHING ACTS ON THEM" in out, "the mandate is advisory; do not reclaim it"
     assert "You are the enforcement" in out
     assert "never\nthe resulting POSITION" in out or "never the resulting POSITION" in out.replace("\n"," ")
-    assert "full\ncloses have been recorded since 2026-07-23" in out or "recorded since 2026-07-23" in out
+    assert "2026-07-23" in out, "the agent must know its record starts here"
+    # ⚠️ Pinned as an INSTRUCTION, not a verdict. An earlier draft added "the
+    # record is unflattering", "closes have on average lost money", "it does not
+    # yet show an edge". All true, none of it changing a single decision -- and a
+    # trader told its evidence is worthless has been handed a rigorous-sounding
+    # reason to do nothing. Facts belong here only where they change an action.
+    assert "unflattering" not in out
+    assert "does not yet show" not in out
     assert "Pace is a decision" in out, "the deployment brake was removed"
+    # Every position carries BOTH levels, and the agent is told the check exists.
+    assert "BOTH a stop and a take-profit target" in out
+    assert "Neither is\noptional" in out or "Neither is optional" in out.replace("\n", " ")
+    assert "This is checked, continuously" in out
+    assert "Do not treat the check as the safety" in out
     # ⚠️ The single largest realised loss in this book came from a mechanism the
     # charter did not describe: 11 of 18 closes fired in ONE minute on 2026-07-27
     # when the regime gate flipped, mean -7.65%. An agent cannot reason about its
