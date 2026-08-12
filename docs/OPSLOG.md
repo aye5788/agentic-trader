@@ -9,6 +9,57 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-12 — the agent sessions go live, and six defects found by review
+
+**The inversion landed.** `scripts/session.py` runs on cron — `open` 10:35,
+`close` 15:15 ET weekdays. A session is not handed a procedure: it gets the
+charter and decides. The legacy loops are untouched and still run. Orders still
+pass the PreToolUse gate (kill switch, order cap, whitelist, live_approved).
+
+Times are collision-avoidance, not preference: 10:35 clears `run_fast_loop.sh`
+(10:00, finishes ~10:04); 15:15 lands before `risk_review` (15:45) because both
+read-modify-write `monitor/overrides.json` with no shared lock, and the
+interleaving was measured **dropping a risk_review protective stop**. No
+premarket slot — nothing gates an order to market hours, so a 09:00 session
+could queue a market order filling at the opening print.
+
+**Adversarial review found six defects in the runner I had verified myself**,
+two critical: a lock timeout did not stop the session (it ran UNLOCKED and
+reported ok — `acquire()` returns None on timeout, it does not raise, so the
+`except TimeoutError` was dead code), and no session could start at all
+(`--allowedTools` is variadic and ate the brief as a 47th tool name). Both lived
+in the spawn path, which `--selftest` and `--dry-run` never touch.
+
+**Three defects in the EXISTING system, unrelated to the cutover:**
+- The exit executor had **never been gated**. `market_monitor` spawned it with
+  no `--settings`, so every stop-triggered market sell this system has placed
+  went out with the order gate not bound.
+- `set_levels` accepted a stop **above** the live price and reported it
+  enforced. The armed monitor reads that as an instant breach and sells the
+  whole position at market — a full liquidation reached without any order being
+  placed, which is how it bypassed the gate. Demonstrated on AMD: 474.00 stop
+  against a 473.65 mark.
+- Agent-set levels **never expired** (`read_overrides` prunes on a "9999"
+  default), so one stop armed the monitor forever. Now 5 trading days.
+
+**Also:** the panel recorded MNST's 2:1 split as a real −50.2% return
+(`scripts/adjust_splits.py` — 21 candidates, 1 confirmed, 20 real crashes left
+alone); the liquidity floor measured Alpaca IEX against a consolidated-tape
+threshold **and was 26 days stale**; `wakes.due()` had no caller anywhere;
+regime-off sold the book rather than pausing it; and `rebalance = "weekly"` was
+read by nothing while the loop rotated nightly.
+
+**Two self-inflicted, same day:** a latency probe fired three real "UNUSUAL BUY:
+AMAT" pushes for an order that never existed (no trade occurred; `GATE_PROBE=1`
+now severs delivery), and `touch research_store/SHADOW` — believed to sandbox
+the new sessions — actually disarmed order placement for the LIVE fast loop and
+the armed risk-review overlay. Removed at 08:07, two hours before either ran.
+
+**The pattern worth keeping:** every defect above is the same class — a control
+that reads as present and does nothing. Three tests found this session had never
+run at all (`slow_loop`, `moomoo/prices`, and one I wrote that morning which
+passed identically with the code reverted).
+
 ## 2026-08-12 — the trade record cannot yet judge the trade geometry
 
 Written down because it was nearly written into the CHARTER instead, where it

@@ -9,6 +9,54 @@ itself on cron; this is the short list of things that need *you*. Keep this hand
 
 ---
 
+## 0a. WHAT ACTUALLY RUNS, AND WHEN  (changed 2026-08-12)
+
+Two kinds of thing trade this book now. They are different and it matters.
+
+**The legacy loops — a script the agent follows.** Unchanged, running for months:
+
+| Time (ET) | What |
+| --- | --- |
+| 10:00 | `run_fast_loop.sh` — buys/sells the difference between the stored book and what you hold |
+| 12:00, 15:45 | `run_risk_review.sh` — intraday de-risk overlay, **armed**, places real trades |
+| 16:15 | equity logged for the dashboard curve |
+| 18:00 (Sun 20:00) | `run_slow_loop.sh` — rebuilds the target book |
+| always | `agentic-monitor.service` — watches stops/targets every 15s during RTH |
+
+**The agent sessions — the agent DECIDES.** New, live since 2026-08-12:
+
+| Time (ET) | What |
+| --- | --- |
+| 10:35 | `run_session.sh open` |
+| 15:15 | `run_session.sh close` |
+
+A session is not handed a procedure. It gets the charter (`prompts/charter.md`,
+rendered live from config), its tools, and its own judgment about what this book
+should hold. That is the whole point of the change — the code defines the field
+and the guardrails; the agent plays.
+
+**It is still fenced.** Every order goes through the same gate as everything
+else: kill switch, per-order size cap, universe whitelist, `live_approved`. The
+gate runs in the harness, so the agent cannot skip it by forgetting.
+
+**Why those odd times.** Not preference — collision avoidance. 10:35 is after
+the 10:00 loop finishes (~10:04) so two Claude processes are never writing at
+once. 15:15 is *before* risk_review at 15:45 because both write the same
+overrides file with no lock, and a session write was measured erasing a
+risk_review protective stop.
+
+**There is deliberately no premarket session.** Nothing in this system stops an
+order being placed into a closed market, so a 09:00 session could queue a market
+order that fills at whatever the opening print turns out to be.
+
+**To stop just the sessions** and leave everything else running:
+```
+crontab -l | grep -v run_session.sh | crontab -
+```
+To stop *everything*, use the kill switch below.
+
+---
+
 ## 0. The safety switches — know these before anything else
 
 There are **two** stop switches. Which one you want depends on whether the

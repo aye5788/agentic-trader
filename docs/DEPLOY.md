@@ -97,6 +97,23 @@ nothing.** The template is documentation of intent; the box is the source of
 truth. Any plan step that says "schedule X" is not done until the line is in
 `crontab -l`. (2026-07-20 universe refresh, 2026-07-24 signal panel.)
 
+## Agent sessions (live 2026-08-12)
+
+```
+35 10 * * 1-5 /opt/agentic-trader/deploy/run_session.sh open  >> logs/session.log 2>&1
+15 15 * * 1-5 /opt/agentic-trader/deploy/run_session.sh close >> logs/session.log 2>&1
+```
+
+⚠️ `deploy/run_session.sh` **must be executable (100755)**. A 100644 deploy makes
+cron fail at exit 126 *before* `alert.sh` installs the ERR trap — no phone push,
+no health check, the slot silently does nothing.
+
+⚠️ Insert **before** the trailing `CRON_TZ=America/New_York` a sibling repo
+appended; anything after that variable inherits it.
+
+Stop just the sessions: `crontab -l | grep -v run_session.sh | crontab -`.
+Stop everything: `touch research_store/HALT`.
+
 ## Going live — the deliberate switch
 
 The fast loop **cannot place an order** until you flip the master switch. Nothing

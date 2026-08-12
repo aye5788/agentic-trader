@@ -172,6 +172,25 @@ scripts/market_monitor.py Intraday stop/take-profit watcher. Polls moomoo quotes
                         prompts/exit.md (market sell) on a breach. Pure-Python
                         watching, Claude only on an event. Runs as a systemd
                         service; alert-only unless live_approved. [monitor] config.
+scripts/session.py      THE SESSION RUNNER — the inversion's entry point. LIVE since
+                        2026-08-12 (cron: open 10:35, close 15:15 ET weekdays,
+                        via deploy/run_session.sh). Starts ONE agent session and
+                        outlives it: signal handlers -> session lock -> BUILD
+                        BRIEF (facts gathered AFTER the lock, never before) ->
+                        integrity snapshot -> spawn -> finally kill the process
+                        GROUP, verify integrity, release. classify() exists
+                        because `ok = bool(output)` logs a dead session as a
+                        successful one — a headless claude that dies on a 529
+                        prints its banner to STDOUT and exits 0. should_retry()
+                        is deliberately narrow: a retry re-runs a session that
+                        may have ALREADY PLACED ORDERS.
+                        ⚠️ Unlike the legacy loops, a session is NOT handed a
+                        procedure — it gets prompts/charter.md and decides.
+prompts/charter.md      THE SESSION CHARTER — rendered from config by
+                        src/charter.py (mandate.toml + strategy.toml + the live
+                        MCP tool list), never hand-copied. A literal threshold in
+                        the template is a DEFECT; check_charter_no_literals
+                        enforces it.
 prompts/fast_loop.md    The headless-Claude execution procedure (RH is MCP-only).
                         Includes step 7b: post-take-profit re-entry judgment
                         (full/half/skip — veto/downsize ONLY; [reentry] config,
