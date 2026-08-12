@@ -71,7 +71,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -251,6 +253,35 @@ def decide(payload: dict, cfg: dict, valued: dict, shadow: bool) -> dict:
 # --------------------------------------------------------------------------- #
 # announcement (AFTER the verdict, never part of it)
 # --------------------------------------------------------------------------- #
+def _journal_announcement(symbol: str, reason: str, amount) -> None:
+    """Append the announcement to the journal. Never raises, never slow.
+
+    Loads research_store.store BY FILE PATH rather than importing the package.
+    `from research_store import store` runs the package __init__, which pulls the
+    models/validation/ledger chain and costs ~70ms -- most of this gate's ~0.1s
+    budget, paid on the critical path of every order. store.py itself is
+    stdlib-only (json/os/tempfile/pathlib) and derives its paths from __file__,
+    so loading the module alone is both cheap and exact. Reusing it rather than
+    re-writing the append keeps ONE journal format: a hand-rolled duplicate here
+    would drift the day store.py changes, and drift in the audit trail is the
+    failure this whole function exists to prevent.
+    """
+    try:
+        import importlib.util                     # noqa: PLC0415
+        spec = importlib.util.spec_from_file_location(
+            "_gate_store", REPO / "src" / "research_store" / "store.py")
+        store = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(store)
+        store.append_journal({
+            "event": "gate_announcement",
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "symbol": symbol, "side": "buy", "reason": reason,
+            "amount": amount, "source": "order_gate",
+        })
+    except Exception:     # noqa: BLE001 — an audit line must never affect an order
+        pass
+
+
 def announce_if_unusual(payload: dict, decision: dict, cfg: dict, valued: dict) -> str | None:
     """Push an ALLOWED-but-unusual buy to the operator's phone. -> the reason, or None.
 
@@ -301,11 +332,37 @@ def announce_if_unusual(payload: dict, decision: dict, cfg: dict, valued: dict) 
             valued or {}, uni, mandate.load())
         if not reason:
             return None
-        ann.push_detached(
-            f"UNUSUAL BUY: {sym}",
-            f"{reason}.\n\nThe order was PLACED — this is a notification, not an "
-            f"approval request. To intervene, use the kill switch.",
-            tags="warning")
+        # ⛔ A PROBE MUST NOT PAGE. Exercising this gate -- a latency
+        # measurement, a debug run, a payload replayed by hand -- runs this
+        # function for real against the live ntfy topic, and the body below says
+        # "The order was PLACED". On 2026-08-12 a latency probe sent the operator
+        # three texts claiming an AMAT buy that never existed; no order was
+        # placed (this hook only DECIDES -- placement is a separate MCP call),
+        # but the alert asserted otherwise. An alert channel that cries wolf when
+        # someone measures it is worse than no channel, because the one real
+        # alert is then read as another test. GATE_PROBE=1 keeps the full
+        # decision path, timing included, and severs delivery only.
+        if os.environ.get("GATE_PROBE"):
+            return reason
+
+        # "APPROVED and being sent", never "PLACED". This runs BEFORE the order
+        # reaches Robinhood -- it allows the call, and placement happens after
+        # and can still fail there. Claiming the order was placed states as fact
+        # something the gate cannot observe, and an alert channel that overstates
+        # is one the operator learns to discount.
+        body = (f"{reason}.\n\nThe order was APPROVED and is being sent — this "
+                f"is a notification, not an approval request. To intervene, use "
+                f"the kill switch.")
+
+        # JOURNAL BEFORE PUSHING. The push is fire-and-forget by design (see
+        # push_detached) -- which means the gate never learns whether it landed.
+        # If the phone is the only record, a dropped alert is indistinguishable
+        # from an order that was never unusual, and NOBODY is watching a 09:30
+        # cron run in real time. The journal line is the durable trace; the push
+        # is best-effort delivery of it. Failure here must not touch the order.
+        _journal_announcement(sym, reason, amount)
+
+        ann.push_detached(f"UNUSUAL BUY: {sym}", body, tags="warning")
         return reason
     except Exception:     # noqa: BLE001 — an alert must never affect an order
         return None
@@ -499,6 +556,11 @@ def _selftest() -> None:
             sent = []
             real_push = ann.push_detached
             ann.push_detached = lambda *a, **k: sent.append((a, k)) or True
+            # capture the journal line instead of appending to the LIVE journal
+            jrnl = []
+            real_jrnl = globals()["_journal_announcement"]
+            globals()["_journal_announcement"] = \
+                lambda sym, reason, amt: jrnl.append((sym, reason, amt))
             # the announcement needs the universe SOURCES even when the blocking
             # whitelist is off — off-list is announceable, not refusable, there
             ACFG = {**CFG, "universe": {"source": "config/universe.csv"},
@@ -514,6 +576,7 @@ def _selftest() -> None:
                 assert announce_if_unusual(small, d_small, ACFG, VP) is None, \
                     "an ordinary buy must not page anybody"
                 assert sent == []
+                assert jrnl == [], "an ordinary buy must not litter the journal"
 
                 # ...and the SAME $10 already held plus a $3 add crosses $12.
                 # The order gate passes both (each is far under max_order_pct);
@@ -526,8 +589,15 @@ def _selftest() -> None:
                 assert r and "already held" in r, r
                 assert len(sent) == 1, sent
                 body = sent[0][0][1]
-                assert "PLACED" in body and "not an approval request" in body, body
-                sent.clear()
+                assert "APPROVED and is being sent" in body, body
+                assert "PLACED" not in body, "the gate cannot know the order landed"
+                assert "not an approval request" in body, body
+                # the DURABLE half: the same announcement is journalled, and
+                # journalled BEFORE the push (which is fire-and-forget and can
+                # be silently lost -- the trace must not depend on it landing).
+                assert len(jrnl) == 1 and jrnl[0][0] == "MU", jrnl
+                assert jrnl[0][1] == r and jrnl[0][2] == 3.0, jrnl
+                sent.clear(); jrnl.clear()
 
                 # an off-universe BUY, when the whitelist gate is OFF (with it on,
                 # vet_plan denies and there is nothing to announce)
@@ -536,7 +606,8 @@ def _selftest() -> None:
                 d_off = decide(off, CFG, VP, shadow=False)
                 assert d_off["permissionDecision"] == "allow"
                 assert "OUTSIDE" in (announce_if_unusual(off, d_off, ACFG, VP) or "")
-                sent.clear()
+                assert len(jrnl) == 1 and jrnl[0][0] == "NFLX", jrnl
+                sent.clear(); jrnl.clear()
 
                 # ⚠️ a SELL is never announced, at any size
                 big_sell = {"tool_name": ORDER_TOOL,
@@ -558,8 +629,28 @@ def _selftest() -> None:
                 ann.push_detached = boom
                 assert announce_if_unusual(add, d_add, ACFG, VP) is None
                 assert decide(add, CFG, VP, shadow=False)["permissionDecision"] == "allow"
+                # THE WHOLE POINT: the push died and the record still exists.
+                assert len(jrnl) == 1 and jrnl[0][0] == "MU", jrnl
+                jrnl.clear()
+
+                # the REAL journal helper swallows its own failures, so a
+                # broken store can never reach the caller. Exercise it directly
+                # with a payload json.dumps cannot serialise.
+                real_jrnl(object(), "unserialisable", object())   # must not raise
+
+                # GATE_PROBE severs delivery while leaving the verdict and the
+                # reason intact -- so the gate can be measured without paging.
+                ann.push_detached = boom      # would explode if delivery ran
+                globals()["_journal_announcement"] = real_jrnl
+                os.environ["GATE_PROBE"] = "1"
+                try:
+                    assert announce_if_unusual(add, d_add, ACFG, VP) == r, \
+                        "a probe must still compute the reason"
+                finally:
+                    os.environ.pop("GATE_PROBE", None)
             finally:
                 ann.push_detached = real_push
+                globals()["_journal_announcement"] = real_jrnl
 
             # --- the driver FAILS CLOSED on anything it cannot parse ----------
             import io

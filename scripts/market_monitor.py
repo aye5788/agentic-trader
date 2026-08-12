@@ -86,15 +86,47 @@ def _selftest() -> None:
     # stricter override: stop up, first target pulled in
     out = apply_overrides(held, {"NVDA": {"stop": 108.0, "targets": [118.0, 140.0]}})
     assert out["NVDA"].stop == 108.0 and out["NVDA"].targets[0] == 118.0, out["NVDA"]
-    # looser override is IGNORED (stop can't move down, target can't move up)
+    # a looser STOP is ignored without the explicit widen flag; the TARGET moves
+    # freely (raising it adds no loss risk -- see the overlay's own comment).
     out = apply_overrides(held, {"NVDA": {"stop": 90.0, "targets": [130.0, 150.0]}})
-    assert out["NVDA"].stop == 100.0 and out["NVDA"].targets == [120.0, 140.0], out["NVDA"]
+    assert out["NVDA"].stop == 100.0, out["NVDA"]
+    assert out["NVDA"].targets == [130.0, 150.0], out["NVDA"]
     # malformed per-symbol override (not a dict) is IGNORED, not raised
     out = apply_overrides(held, {"NVDA": "garbage"})
     assert out["NVDA"].stop == 100.0 and out["NVDA"].targets == [120.0, 140.0], out["NVDA"]
     # malformed whole-overrides object (not a dict) is IGNORED, not raised
     out = apply_overrides(held, ["nope"])
     assert out["NVDA"].stop == 100.0 and out["NVDA"].targets == [120.0, 140.0], out["NVDA"]
+    # ⚠️ WIDENING A STOP IS OPT-IN, NOT IMPOSSIBLE. Refusing it left exactly one
+    # compliant move when an inherited stop sits inside the noise -- close the
+    # position -- turning a routine adjustment into a forced exit.
+    out = apply_overrides(held, {"NVDA": {"stop": 90.0, "widen": True,
+                                          "reason": "2.5 sigma sits inside the noise"}})
+    assert out["NVDA"].stop == 90.0, out["NVDA"]
+    # the flag alone is not enough: an unexplained loosening is refused
+    assert apply_overrides(held, {"NVDA": {"stop": 90.0, "widen": True}})["NVDA"].stop == 100.0
+    assert apply_overrides(held, {"NVDA": {"stop": 90.0, "widen": True,
+                                           "reason": "  "}})["NVDA"].stop == 100.0
+    # ...and a reason WITHOUT the flag is refused too -- the de-risk pass writes a
+    # reason on every override, so a reason alone must never loosen a stop.
+    assert apply_overrides(held, {"NVDA": {"stop": 90.0,
+                                           "reason": "de-risk"}})["NVDA"].stop == 100.0
+    # tightening never needs the flag
+    assert apply_overrides(held, {"NVDA": {"stop": 108.0}})["NVDA"].stop == 108.0
+
+    # ⚠️ TARGETS MOVE BOTH WAYS. Raising one adds no loss risk -- the stop is
+    # unchanged -- so letting a winner run must not require permission. Pulling
+    # one in only reduces exposure and never did.
+    out = apply_overrides(held, {"NVDA": {"targets": [130.0, 160.0]}})
+    assert out["NVDA"].targets == [130.0, 160.0], out["NVDA"]     # raised
+    out = apply_overrides(held, {"NVDA": {"targets": [118.0, 130.0]}})
+    assert out["NVDA"].targets == [118.0, 130.0], out["NVDA"]     # pulled in
+    # a count mismatch is still ignored -- that is a malformed override, not a move
+    assert apply_overrides(held, {"NVDA": {"targets": [130.0]}})["NVDA"].targets \
+        == [120.0, 140.0]
+    print("monitor selftest OK: stop widens only on an explicit reasoned flag; "
+          "targets move both ways (letting a winner run needs no permission)")
+
     print("monitor selftest OK: stricter-only override overlay")
 
     # holdings filter: only names actually held in RH are stop-watched. A book
@@ -286,10 +318,23 @@ def apply_overrides(held: dict, overrides: dict) -> dict:
                 widen = bool(ov.get("widen")) and str(ov.get("reason") or "").strip()
                 if ov_stop > t.stop or widen:
                     t.stop = float(ov_stop)
+            # TARGETS MOVE IN EITHER DIRECTION, FREELY.
+            #
+            # This was min() -- a target could only ever be pulled IN. Combined
+            # with a stop that could only be raised, BOTH permitted directions
+            # shortened the trade and both blocked directions let it run: a
+            # one-way ratchet toward cutting early, which is this model's
+            # documented bias encoded in code rather than chosen.
+            #
+            # Raising a target increases NO risk of loss. The stop is unchanged,
+            # the downside is identical; it costs only unrealised gain. There is
+            # no safety argument for blocking it, and blocking it is why nothing
+            # in this book has ever reached a take-profit. Pulling a target in
+            # needs no permission either -- it only ever reduces exposure.
             ot = ov.get("targets")
             if (isinstance(ot, list) and t.targets and len(ot) == len(t.targets)
                     and all(isinstance(o, (int, float)) for o in ot)):
-                t.targets = [min(cur, float(o)) for cur, o in zip(t.targets, ot)]
+                t.targets = [float(o) for o in ot]
             out[sym] = t
         except Exception:
             out[sym] = th

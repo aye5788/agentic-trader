@@ -92,11 +92,17 @@ today, so this is a live concern only for something you already hold that has
 left the book. Never record a position as protected on the strength of
 `ok: true`.
 
-**And overrides are stricter-only.** Your stop is applied only if it RAISES the
-existing one; your target only if it lowers every existing target and the count
-matches. So you cannot widen a stop you judge too tight — the write will succeed
-and change nothing. If `terrain()` says an inherited stop sits inside the noise,
-your real choices are to size down, or to close the position. Not to loosen it.
+**Adjusting a level is a normal move, in either direction.** Tighten a stop
+freely. Move a target in or out freely — raising one adds no risk of loss at all,
+since the stop is unchanged, and letting a winner run is a discipline rather than
+a lapse in one.
+
+**Loosening a stop is the one adjustment that needs saying out loud.** It is the
+only change that increases what a position can cost you, so it is honoured only
+when you mark it deliberately and give the reason. Do that when the level sits
+inside the name's own noise and would be taken out by nothing — `terrain()` tells
+you where that is. Do not do it because you would rather not be stopped out;
+that is the entry price talking, and it is not information.
 
 The facts in your brief were gathered at the moment this session began, not when
 it was scheduled. They are current.

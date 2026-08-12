@@ -31,6 +31,7 @@ from agent_env import memory                          # noqa: E402  sibling modu
 from agent_env import wakes                           # noqa: E402  sibling module
 import mandate                                  # noqa: E402
 import announce as announce_mod                 # noqa: E402  (module name != tool name)
+import notify                                   # noqa: E402
 import governance as gov                        # noqa: E402
 import strategy as strat                        # noqa: E402
 import momentum                                 # noqa: E402
@@ -350,13 +351,38 @@ def announce(headline: str, detail: str = "") -> str:
                                                  "announcement with no content is noise"},
                           indent=2)
     body = str(detail or "").strip() or text
+
+    # JOURNAL FIRST, PUSH SECOND. A push can fail -- a wedged ntfy server, an
+    # unset topic, a header that will not encode (which silently killed SEVEN of
+    # eight alert titles in this repo until 2026-08-12). If the announcement
+    # exists only as a push, a failed one leaves NO trace and nobody can tell
+    # afterwards whether the agent announced and the channel dropped it, or the
+    # agent never announced at all. The journal entry is the durable record; the
+    # push is best-effort delivery of it.
     try:
-        spawned = bool(announce_mod.push_detached(f"AGENT: {text}", body,
-                                                  tags="loudspeaker"))
+        store.append_journal({
+            "event": "announcement",
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "headline": text, "detail": body, "source": "agent",
+        })
+        journalled = True
+    except Exception:       # noqa: BLE001
+        journalled = False
+
+    # Plain blocking push, NOT push_detached. That helper forks, and this server
+    # is threaded -- forking from a threaded process risks a child deadlocking on
+    # a lock held by a thread that does not exist after the fork. It exists for
+    # the ORDER-GATE hook, which is on a ~0.1s critical path and cannot afford a
+    # 10s timeout. A tool call is not on that path: waiting is fine here, and the
+    # fork hazard is not worth buying latency nobody needs.
+    try:
+        notify.push(f"AGENT: {text}", body, tags="loudspeaker")
+        spawned = True
     except Exception:       # noqa: BLE001 — a failed alert must never end a session
         spawned = False
     return json.dumps({"ok": True, "sent": spawned,
                        "announced": {"headline": text, "detail": body},
+                       "journalled": journalled,
                        "note": "NOTIFICATION ONLY — nothing waits for a reply; "
                                "proceed with your decision. The kill switch is "
                                "the operator's intervention, after the fact."},
@@ -974,18 +1000,32 @@ def _selftest() -> None:
     print("selftest OK: mcp server boots, ping responds, degrades to JSON without a snapshot")
 
     # --- announce(): a NOTIFICATION, and it must never send during a test ----
-    real_push = announce_mod.push_detached
-    sent = []
-    announce_mod.push_detached = lambda *a, **k: bool(sent.append((a, k))) or True
+    real_push = notify.push
+    real_jrnl = store.append_journal
+    sent, journalled = [], []
+    notify.push = lambda *a, **k: bool(sent.append((a, k))) or True
+    store.append_journal = lambda ev: journalled.append(ev)
     try:
+        # the tool must NOT fork: this server is threaded, and push_detached
+        # forks. A regression back to it would reintroduce that hazard silently,
+        # so assert the fork helper is never reached.
+        announce_mod.push_detached = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("announce() must not fork from the threaded server"))
         r = json.loads(announce("leaving the momentum book", "regime call, not a rotation"))
         assert r["ok"] is True and r["sent"] is True, r
         assert len(sent) == 1, sent
+        # DURABLE FIRST: the announcement is in the journal even though the push
+        # happened to succeed here -- that is what makes a FAILED push traceable.
+        assert r["journalled"] is True, r
+        assert len(journalled) == 1 and journalled[0]["event"] == "announcement", journalled
+        assert journalled[0]["headline"] == "leaving the momentum book", journalled
+        assert journalled[0]["detail"] == "regime call, not a rotation", journalled
         # the RETURN VALUE must not read as approval — the agent proceeds
         assert "NOTIFICATION ONLY" in r["note"] and "nothing waits for a reply" in r["note"], r
         # an empty announcement is refused rather than pushed as noise
         assert json.loads(announce("   "))["ok"] is False
         assert len(sent) == 1, "an empty headline must not reach the phone"
+        assert len(journalled) == 1, "an empty headline must not reach the journal"
         # detail defaults to the headline rather than sending a blank body
         sent.clear()
         json.loads(announce("halted for the day"))
@@ -995,12 +1035,26 @@ def _selftest() -> None:
         # sent:false and the agent carries on with its decision.
         def boom(*a, **k):
             raise RuntimeError("no network")
-        announce_mod.push_detached = boom
+        notify.push = boom
+        journalled.clear()
         r = json.loads(announce("still speaking"))
         assert r["ok"] is True and r["sent"] is False, r
+        # THE POINT OF JOURNALLING FIRST: the push died, the record survived.
+        assert r["journalled"] is True and len(journalled) == 1, (r, journalled)
+
+        # and the mirror case -- a dead JOURNAL must not stop the push either.
+        notify.push = lambda *a, **k: bool(sent.append((a, k))) or True
+        store.append_journal = boom
+        sent.clear()
+        r = json.loads(announce("journal is wedged"))
+        assert r["ok"] is True and r["sent"] is True and r["journalled"] is False, r
+        assert len(sent) == 1, sent
     finally:
-        announce_mod.push_detached = real_push
-    print("selftest OK: announce() pushes, refuses empty, survives a dead transport")
+        notify.push = real_push
+        store.append_journal = real_jrnl
+        announce_mod.push_detached = announce_mod.push_detached
+    print("selftest OK: announce() journals first, pushes without forking, "
+          "refuses empty, survives a dead transport AND a dead journal")
 
     # set_levels(): the response must report what the monitor will ACTUALLY
     # enforce (per docs/OPSLOG / this fix), never a bare ok:true. Redirect

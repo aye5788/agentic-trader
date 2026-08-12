@@ -369,7 +369,8 @@ def _selftest() -> None:
     # it was given in advance.
     assert "cannot currently BUY what it" in out
     assert "reachable only if the" in out
-    assert "stricter-only" in out, "the no-widening trap must be stated"
+    assert "in either direction" in out, "level adjustment must not read one-way"
+    assert "needs saying out loud" in out, "loosening must stay the deliberate one"
     assert "NOTHING ACTS ON THEM" in out, "the mandate is advisory; do not reclaim it"
     assert "You are the enforcement" in out
     assert "never\nthe resulting POSITION" in out or "never the resulting POSITION" in out.replace("\n"," ")
