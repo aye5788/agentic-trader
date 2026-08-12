@@ -172,6 +172,23 @@ def build(rows: list, closes: pd.DataFrame, horizon: int) -> dict:
                        "outcome": outcome, "reviewer": r,
                        "stance": stance_by_day.get(day)})
 
+    # ---- HEAD TO HEAD: only where they actually DISAGREED -----------------
+    # The overall hit rates are dominated by the cases both parties called the
+    # same way, where nobody learns anything. The contest is the DISSENTS: the
+    # agent acted, the reviewer said it should not have, and the tape settled
+    # it. That is the only column that says which judgment is worth more, and
+    # it is the one to read over months.
+    h2h = {"agent_won": 0, "reviewer_won": 0, "undecided": 0}
+    for d in detail:
+        if d["stance"] != "DISSENT" and d["stance"] != "SPLIT":
+            continue
+        if d["outcome"] == "agent_right":
+            h2h["agent_won"] += 1
+        elif d["outcome"] == "agent_wrong":
+            h2h["reviewer_won"] += 1
+        else:
+            h2h["undecided"] += 1
+
     scored = tally["agent_right"] + tally["agent_wrong"]
     rscored = rev["reviewer_right"] + rev["reviewer_wrong"]
     total_dir = bias["reduce"] + bias["increase"]
@@ -187,6 +204,11 @@ def build(rows: list, closes: pd.DataFrame, horizon: int) -> dict:
         # well-written caution moves the number.
         "direction": {**bias,
                       "reduce_share": round(bias["reduce"] / total_dir, 3) if total_dir else None},
+        "head_to_head": {**h2h,
+                         "decided": h2h["agent_won"] + h2h["reviewer_won"],
+                         "note": "only decisions the reviewer contested; the "
+                                 "agreed ones teach nothing about whose judgment "
+                                 "is better"},
         "decisions": detail,
     }
 
@@ -214,6 +236,9 @@ def main() -> None:
           + (f"  hit {ag['hit_rate']:.0%}" if ag["hit_rate"] is not None else ""))
     print(f"  reviewer : {rv['reviewer_right']} right / {rv['reviewer_wrong']} wrong"
           + (f"  hit {rv['hit_rate']:.0%}" if rv["hit_rate"] is not None else ""))
+    hh = card["head_to_head"]
+    print(f"  contested: agent {hh['agent_won']} / reviewer {hh['reviewer_won']}"
+          f"  ({hh['undecided']} undecided)  <- the column that matters")
     print(f"  direction: {dr['reduce']} reduce / {dr['increase']} increase"
           + (f"  ({dr['reduce_share']:.0%} of decisions cut exposure)"
              if dr["reduce_share"] is not None else ""))
@@ -278,8 +303,32 @@ def _selftest() -> None:
     assert card["direction"]["reduce"] == 2, card["direction"]
     assert card["direction"]["reduce_share"] == 1.0, card["direction"]
 
+    # HEAD TO HEAD counts only CONTESTED decisions. A dissent the tape proves
+    # right is a win for the reviewer; the same dissent proved wrong is a win
+    # for the agent. Agreed decisions are excluded -- they separate nobody.
+    rows2 = [
+        {"event": "agent_decision", "ts": "2026-08-03T14:00:00+00:00",
+         "symbol": "MU", "action": "trim"},                    # name then ROSE
+        {"event": "codex_review", "ts": "2026-08-03T15:00:00+00:00", "stance": "DISSENT"},
+    ]
+    c2 = build(rows2, closes, 5)
+    assert c2["head_to_head"]["reviewer_won"] == 1, c2["head_to_head"]
+    assert c2["head_to_head"]["agent_won"] == 0, c2["head_to_head"]
+
+    rows3 = [dict(rows2[0], action="hold"),                    # held, name ROSE
+             {"event": "codex_review", "ts": "2026-08-03T15:00:00+00:00", "stance": "DISSENT"}]
+    c3 = build(rows3, closes, 5)
+    assert c3["head_to_head"]["agent_won"] == 1, c3["head_to_head"]
+
+    # an AFFIRM is not a contest and must not appear in head-to-head at all
+    rows4 = [rows2[0], {"event": "codex_review",
+                        "ts": "2026-08-03T15:00:00+00:00", "stance": "AFFIRM"}]
+    c4 = build(rows4, closes, 5)
+    assert c4["head_to_head"]["decided"] == 0, c4["head_to_head"]
+
     print("score_reviews: OK -- both parties scored off the PANEL, noise is a "
-          "tie not skill, unscoreable is counted not hidden")
+          "tie not skill, unscoreable is counted not hidden, and head-to-head "
+          "counts only contested calls")
 
 
 if __name__ == "__main__":

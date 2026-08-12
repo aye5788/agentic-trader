@@ -1249,6 +1249,42 @@ def _selftest() -> None:
     print("selftest OK: dollar volume carries its SOURCE and window depth; short "
           "histories are labelled, absent sources fall through")
 
+    # ---- THE REVIEWER'S IDENTITY MUST NEVER REACH THE AGENT ---------------
+    # The journal records `reviewer: codex` for the OPERATOR's benefit. The
+    # agent must not see it: told the source, a model reasons about the source
+    # -- discounting a critic it decides misunderstands momentum, or deferring
+    # to one it decides is objective. That failure is NOT symmetric. It hands
+    # the agent an excuse to dismiss criticism, so the leak systematically
+    # favours the party under review.
+    #
+    # Today no agent-facing tool surfaces codex_review events. That is
+    # INCIDENTAL, not designed, and would silently stop being true the moment
+    # someone widens research_log's event filter. This test fails if that
+    # happens.
+    import tempfile as _tf3
+    _real_rj = store.read_journal
+    try:
+        store.read_journal = lambda: [
+            {"event": "codex_review", "ts": "2026-08-12T15:29:54+00:00",
+             "reviewer": "codex", "stance": "SPLIT",
+             "headline": "Idle cash was not justified."},
+            {"event": "agent_decision", "ts": "2026-08-12T14:38:56+00:00",
+             "symbol": "MU", "action": "trim", "reason": "sector concentration"},
+        ]
+        for tool in (research_log, performance):
+            try:
+                out = str(tool(limit=50)).lower()
+            except Exception:                       # noqa: BLE001
+                continue
+            for leak in ("codex", "openai", "gpt-", "reviewer"):
+                assert leak not in out, (
+                    f"{tool.__name__} leaks the reviewer's identity to the agent "
+                    f"({leak!r}) -- see the comment above; strip the field or "
+                    f"exclude codex_review from this tool")
+    finally:
+        store.read_journal = _real_rj
+    print("selftest OK: no agent-facing tool leaks who the reviewer is")
+
     # --- announce(): a NOTIFICATION, and it must never send during a test ----
     real_push = notify.push
     real_jrnl = store.append_journal

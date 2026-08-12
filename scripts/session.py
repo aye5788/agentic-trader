@@ -236,11 +236,91 @@ def _tool_names() -> list[str]:
     return names
 
 
+# The reviewer's verdict is shown to OPEN and CLOSE sessions only. Those are
+# the sessions that decide the book, so they are the ones a dissent is about.
+# The risk-review overlay is a separate legacy loop that never reads a brief,
+# and a `wake` fires on a price condition the agent pre-registered — handing
+# either one an argument about yesterday's rotation is noise at the moment it
+# most needs to act.
+REVIEWED_MODES = ("open", "close")
+
+
+def last_review() -> dict | None:
+    """The most recent independent verdict, or None. Never raises."""
+    try:
+        d = json.loads((REPO / "research_store" / "reviews" / "latest.json").read_text())
+        return d if d.get("stance") in ("AFFIRM", "DISSENT", "SPLIT") else None
+    except Exception:      # noqa: BLE001 — no review yet is normal, not an error
+        return None
+
+
+def render_review(rev: dict | None, mode: str) -> str:
+    """The dissent block for the brief. -> "" when there is nothing to answer.
+
+    ⚠️ THE AGENT MUST ANSWER IT, not merely receive it. A verdict the agent can
+    read and ignore is the same as one nobody wrote: this system's recurring
+    defect is a control that is present and does nothing. So the block ends in
+    an instruction to record a response, which lands in the journal and is
+    therefore checkable after the fact.
+
+    An AFFIRM is shown too. Telling the agent only when it was wrong trains it
+    toward the reviewer's preferences rather than toward being right, and a
+    session that was right deserves to know that as much as one that was not.
+    """
+    if not rev or mode not in REVIEWED_MODES:
+        return ""
+    stance = rev.get("stance")
+    head = (rev.get("headline") or "").strip()
+    would = (rev.get("what_i_would_have_done") or "").strip()
+    dis = (rev.get("strongest_disagreement") or "").strip()
+    change = (rev.get("what_would_change_my_mind") or "").strip()
+
+    # ⛔ THE REVIEWER IS NEVER IDENTIFIED. Not its model, not its vendor, not
+    # that it differs from you. Told the source, an agent reasons about the
+    # source: it discounts a critic it decides does not understand momentum, or
+    # defers to one it decides is more objective. Both are anchoring on who
+    # spoke instead of what was said, and both are available as excuses. The
+    # argument has to stand on the numbers in it, so only the argument is shown.
+    out = [f"## INDEPENDENT REVIEW OF YOUR LAST SESSION — {stance}",
+           "",
+           "Your last session was reviewed against your own charter, by a",
+           "reviewer with the same view of the book that you have. It cannot",
+           "trade and has no authority over you.",
+           "",
+           "Do not speculate about who or what produced this. You are not told,",
+           "deliberately. Judge it on its numbers — check them yourself against",
+           "the book — and on nothing else.",
+           ""]
+    if head:
+        out += [f"**{head}**", ""]
+    if would:
+        out += [f"- It would have: {would}", ""]
+    if dis:
+        out += [f"- Its strongest disagreement: {dis}", ""]
+    if change:
+        out += [f"- What would change its mind: {change}", ""]
+
+    if stance == "AFFIRM":
+        out += ["It agreed with you. That is information, not permission — the "
+                "tape has not settled it yet.", ""]
+    else:
+        out += ["**You must answer this.** Not defer to it — answer it. If it is "
+                "right, act differently today and say so. If it is wrong, say "
+                "why, with the number that makes it wrong. Record either as a "
+                "`record_decision` so the answer is on the record and can be "
+                "priced later alongside its claim.",
+                "",
+                "Do not treat a disagreement as an instruction to trade, or as "
+                "one to stand still. It is one more fact.", ""]
+    return "\n".join(out) + "\n---\n\n"
+
+
 def build_brief(mode: str) -> str:
     """Render the charter for this session. Called AFTER the lock is held."""
     text = charter.render(mandate_mod.load(), strategy.load(), _tool_names())
     stamp = datetime.now(timezone.utc).astimezone()
-    return (f"{text}\n\n---\n\nTHIS SESSION: **{mode}**, "
+    return (f"{text}\n\n---\n\n{render_review(last_review(), mode)}"
+            f"THIS SESSION: **{mode}**, "
             f"{stamp.strftime('%A %Y-%m-%d %H:%M %Z')}.\n")
 
 
@@ -493,6 +573,44 @@ def _selftest() -> None:
     assert _budget <= 30 * 60, (
         f"close ({TIMEOUT_S['close']}s) + review ({_rev.TIMEOUT_S}s) = {_budget}s "
         f"exceeds the 15:15->15:45 window before risk_review")
+
+    # ---- the reviewer's verdict must REACH the agent, and only the right ones
+    rev = {"stance": "SPLIT", "headline": "Idle cash was not justified.",
+           "what_i_would_have_done": "Deployed the $4.64 into FTNT.",
+           "strongest_disagreement": "$4.64 was 91% of a full position, not a stub.",
+           "what_would_change_my_mind": "A liquidity or event fact about FTNT."}
+    for m in ("open", "close"):
+        blk = render_review(rev, m)
+        assert "SPLIT" in blk and "91% of a full position" in blk, m
+        assert "You must answer this" in blk, "a verdict the agent may ignore is decoration"
+        # ⛔ THE REVIEWER'S IDENTITY MUST NOT LEAK. Told the source, the agent
+        # reasons about the source -- discounting a critic it decides does not
+        # understand momentum, or deferring to one it decides is objective.
+        low = blk.lower()
+        for leak in ("codex", "openai", "gpt", "different model", "another model",
+                     "does not share your priors", "anthropic", "claude", "gemini"):
+            assert leak not in low, f"reviewer identity leaked to the agent: {leak!r}"
+    # ...but NOT to a wake (it fires on a price condition and must act) and not
+    # to premarket. The risk-review overlay never reads a brief at all.
+    for m in ("wake", "premarket"):
+        assert render_review(rev, m) == "", m
+    # no review yet is normal on a fresh deploy, not an error
+    assert render_review(None, "open") == ""
+
+    # an AFFIRM is shown too -- telling the agent only when it was wrong trains
+    # it toward the reviewer's taste rather than toward being right
+    aff = render_review({**rev, "stance": "AFFIRM"}, "open")
+    assert "AFFIRM" in aff and "It agreed with you" in aff, aff
+    assert "You must answer this" not in aff, "an affirmation is not a demand"
+
+    # and it must actually land in the brief the agent receives
+    import unittest.mock as _mock
+    with _mock.patch.object(sys.modules[__name__], "last_review", lambda: rev), \
+         _mock.patch.object(sys.modules[__name__], "_tool_names", lambda: ["mcp__x__y"]):
+        b = build_brief("open")
+        assert "INDEPENDENT REVIEW" in b, "the verdict never reached the brief"
+        assert "91% of a full position" in b, b[-800:]
+        assert "INDEPENDENT REVIEW" not in build_brief("wake")
 
     # _kill_group on a dead/None process is a no-op, not an exception
     _kill_group(None)
