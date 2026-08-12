@@ -269,13 +269,20 @@ it implies has a measured record of missing. The owner's standing instruction:
 ## WHAT TO ANNOUNCE BEFORE YOU ACT
 
 Ordinary trades need no announcement — every action is pushed after the fact with
-its reason. Three classes are pushed BEFORE you act, so a human can veto the
-unusual without gating the routine:
+its reason. Three classes are pushed as you act, so the operator sees the unusual
+happen rather than reading about it later:
 
-1. Abandoning the house view wholesale — not a single-name deviation.
+1. Abandoning the house view wholesale — not a single-name deviation. Nothing can
+   detect this from an order; call `announce()` yourself.
 2. Entering a name outside the configured universe.
 3. Any single position crossing __ANNOUNCE_PCT__ of equity, which is __ANNOUNCE_FRACTION__ of
    the concentration limit that will refuse you outright.
+
+2 and 3 are pushed by the order gate as the order goes out; you need not repeat
+them. **A push is a notification, not a veto.** Nobody is waiting to answer a
+headless session, nothing blocks for a reply, and silence is neither approval nor
+refusal — announce, then proceed. The kill switch is the operator's actual
+intervention, used afterwards.
 
 Settlement and buying-power deferrals are NOT announced. They self-heal, and
 noise about them trains a human to ignore the channel.

@@ -49,6 +49,7 @@ VENV_SELFTESTS=(
     "scripts/record_rotation_outcome.py"
     "scripts/record_partial_outcome.py"
     "src/charter.py"
+    "src/announce.py"
     "src/integrity.py"
     "src/session_lock.py"
     "src/agent_env/live.py"

@@ -30,6 +30,7 @@ from agent_env import live as live_mod                # noqa: E402  sibling modu
 from agent_env import memory                          # noqa: E402  sibling module
 from agent_env import wakes                           # noqa: E402  sibling module
 import mandate                                  # noqa: E402
+import announce as announce_mod                 # noqa: E402  (module name != tool name)
 import governance as gov                        # noqa: E402
 import strategy as strat                        # noqa: E402
 import momentum                                 # noqa: E402
@@ -310,6 +311,56 @@ def record_decision(symbol: str, action: str, reason: str) -> str:
         return json.dumps({"ok": False, "error": str(e)}, indent=2)
     store.append_journal(entry)
     return json.dumps({"ok": True, "recorded": entry}, indent=2)
+
+
+@mcp.tool()
+def announce(headline: str, detail: str = "") -> str:
+    """Push a message to the operator's phone. THIS IS A NOTIFICATION, NOT A GATE.
+
+    ⚠️ NOBODY IS WAITING TO ANSWER. This session is headless, started by cron.
+    Calling this sends a message and returns immediately; it does not and cannot
+    block for a reply, and there is no reply channel. So announce and then
+    PROCEED — do not wait, do not treat silence as approval, and do not treat
+    silence as refusal. The operator's actual intervention is the kill switch,
+    exercised after the fact on a position that is already open.
+
+    Use it for the unusual, before you act on it:
+      - abandoning the house view wholesale, not a single-name deviation. This
+        is the one class nothing else can detect — it is a property of YOUR
+        reasoning, invisible in any single order — so it is yours to announce.
+      - anything a person reading the journal tomorrow would wish they had known
+        today.
+    Off-universe entries and positions crossing the announce line are pushed
+    automatically by the order gate as the order goes out; you do not need to
+    duplicate those, and duplicating them trains the operator to ignore the
+    channel.
+
+    Do NOT announce the routine: every fill is already pushed with its reason,
+    and settlement/buying-power deferrals self-heal and are deliberately silent.
+
+    Delivery is best-effort and unconfirmed. The message is handed to a detached
+    sender so a slow or unreachable ntfy server cannot stall you; if no push
+    topic is configured on this box it is a silent no-op. `sent: true` means the
+    sender was started, never that a phone lit up. An unsent announcement is not
+    an error to retry — say it in `record_decision` instead, which is durable.
+    """
+    text = str(headline or "").strip()
+    if not text:
+        return json.dumps({"ok": False, "error": "headline is empty — an "
+                                                 "announcement with no content is noise"},
+                          indent=2)
+    body = str(detail or "").strip() or text
+    try:
+        spawned = bool(announce_mod.push_detached(f"AGENT: {text}", body,
+                                                  tags="loudspeaker"))
+    except Exception:       # noqa: BLE001 — a failed alert must never end a session
+        spawned = False
+    return json.dumps({"ok": True, "sent": spawned,
+                       "announced": {"headline": text, "detail": body},
+                       "note": "NOTIFICATION ONLY — nothing waits for a reply; "
+                               "proceed with your decision. The kill switch is "
+                               "the operator's intervention, after the fact."},
+                      indent=2)
 
 
 def _dollar_volume(symbol: str) -> tuple[float | None, str | None]:
@@ -921,6 +972,35 @@ def _selftest() -> None:
     finally:
         marks.load = orig_load
     print("selftest OK: mcp server boots, ping responds, degrades to JSON without a snapshot")
+
+    # --- announce(): a NOTIFICATION, and it must never send during a test ----
+    real_push = announce_mod.push_detached
+    sent = []
+    announce_mod.push_detached = lambda *a, **k: bool(sent.append((a, k))) or True
+    try:
+        r = json.loads(announce("leaving the momentum book", "regime call, not a rotation"))
+        assert r["ok"] is True and r["sent"] is True, r
+        assert len(sent) == 1, sent
+        # the RETURN VALUE must not read as approval — the agent proceeds
+        assert "NOTIFICATION ONLY" in r["note"] and "nothing waits for a reply" in r["note"], r
+        # an empty announcement is refused rather than pushed as noise
+        assert json.loads(announce("   "))["ok"] is False
+        assert len(sent) == 1, "an empty headline must not reach the phone"
+        # detail defaults to the headline rather than sending a blank body
+        sent.clear()
+        json.loads(announce("halted for the day"))
+        assert sent[0][0][1] == "halted for the day", sent
+
+        # a transport that BLOWS UP must not end the session — the tool reports
+        # sent:false and the agent carries on with its decision.
+        def boom(*a, **k):
+            raise RuntimeError("no network")
+        announce_mod.push_detached = boom
+        r = json.loads(announce("still speaking"))
+        assert r["ok"] is True and r["sent"] is False, r
+    finally:
+        announce_mod.push_detached = real_push
+    print("selftest OK: announce() pushes, refuses empty, survives a dead transport")
 
     # set_levels(): the response must report what the monitor will ACTUALLY
     # enforce (per docs/OPSLOG / this fix), never a bare ok:true. Redirect

@@ -131,7 +131,7 @@ def render_tools(tool_names) -> str:
         ("SELECT", ("candidates", "universe", "leaders", "sectors")),
         ("PRICE", ("quote", "depth", "terrain")),
         ("EVENTS", ("earnings", "macro_calendar", "macro", "news")),
-        ("DECIDE", ("check_order", "set_levels", "record_decision")),
+        ("DECIDE", ("check_order", "set_levels", "record_decision", "announce")),
         ("REMEMBER", ("research_log", "rule_out", "revisit", "open_question",
                       "close_question")),
         ("ATTENTION", ("wake_register", "wake_status", "wake_deregister")),
@@ -271,6 +271,20 @@ def _selftest() -> None:
 
     # announce fires BELOW the blocking limit, derived from it -- never a 2nd number
     assert "12%" in out, "announce trigger must be 80% of the 15% concentration cap"
+
+    # ⚠️ AN ANNOUNCEMENT IS NOT A VETO. The charter said these classes were pushed
+    # "so a human can veto the unusual" -- false in the way that matters: a push
+    # does not block, the loops are headless, and nobody is at the other end. An
+    # agent that believed it had been vetted by a human would defer to a review
+    # that never happened. State what is true instead: it is seen as it happens,
+    # and the kill switch is the intervention. The tool must also be NAMED, or the
+    # first class (wholesale abandonment, undetectable from any order) has no way
+    # to be announced at all -- the gap this text used to paper over.
+    assert "can veto" not in out, "an announcement must never be described as a veto"
+    assert "A push is a notification, not a veto." in out
+    assert "announce, then proceed" in out
+    assert "`announce()`" in out, "the announce tool must be named where it is needed"
+    assert "announce" in render_tools(TOOLS + ["mcp__agentic-trader__announce"]).split("DECIDE")[1][:120]
 
     # no placeholder survives
     for ph in ("__MANDATE__", "__TERMS__", "__GATE__", "__TOOLS__",

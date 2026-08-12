@@ -40,6 +40,20 @@ LATENCY BUDGET
     pandas — a full cold start including imports measures ~0.1s; a parquet read
     would make that seconds, on every single order.
 
+    The announcement (below) obeys the same budget: the phone push is a blocking
+    HTTPS POST with a 10-second timeout, so it is handed to a DETACHED process
+    (src/announce.push_detached) that the gate does not wait for and whose
+    stdout is closed. A dead ntfy server costs this hook a fork, not ten
+    seconds. See push_detached's docstring for why a thread would not do.
+
+ANNOUNCEMENT (not a gate)
+    An ALLOWED buy that is unusual — off-universe, or one that would push the
+    resulting POSITION past the announce line — is pushed to the operator's
+    phone as it happens, and then placed. It is NOT held for a reply: these
+    sessions are headless and nobody is waiting. The push failing, being slow,
+    or being switched off cannot change a verdict; the verdict is already
+    printed before the announcement is attempted.
+
 INVOCATION
     hook (deploy/loop_settings.json):  ... pretooluse_order_gate.py --hook
         reads the hook JSON on stdin, prints a PreToolUse decision, exits 0.
@@ -235,6 +249,69 @@ def decide(payload: dict, cfg: dict, valued: dict, shadow: bool) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# announcement (AFTER the verdict, never part of it)
+# --------------------------------------------------------------------------- #
+def announce_if_unusual(payload: dict, decision: dict, cfg: dict, valued: dict) -> str | None:
+    """Push an ALLOWED-but-unusual buy to the operator's phone. -> the reason, or None.
+
+    Deliberately NOT part of decide(): decide() is pure and its verdict must not
+    depend on whether a phone alert succeeded. This runs after the decision has
+    already been printed, and its return value changes nothing — an order that is
+    announced is placed exactly as an order that is not.
+
+    ⚠️ ANNOUNCE-FIRST IS NOT APPROVAL-FIRST. The operator sees the message as the
+    order goes out; nothing waits for an answer, because these sessions run under
+    cron with nobody at the other end. The real intervention is the kill switch,
+    used afterwards.
+
+    Only ALLOWED orders are announced. A refusal is not an unusual action taken —
+    it is an action prevented, and the agent is already told why in the deny
+    reason. Note that with [governance] require_whitelist on, an off-universe BUY
+    is DENIED by vet_plan and so never reaches this function; the off-universe
+    limb of needs_announcement is live only when that whitelist is off. The
+    concentration limb fires under either setting, because the gate caps a single
+    ORDER and never the resulting POSITION.
+
+    Never raises, and never delays: the push is handed to a detached process.
+    """
+    try:
+        if (decision or {}).get("permissionDecision") != "allow":
+            return None
+        if (payload or {}).get("tool_name") != ORDER_TOOL:
+            return None
+        ti = (payload or {}).get("tool_input") or {}
+        if not isinstance(ti, dict):
+            return None
+        if str(ti.get("side") or "").strip().lower() != "buy":
+            return None       # a SELL is never announced; see src/announce.py
+
+        import announce as ann        # noqa: PLC0415 — off the import path of decide()
+        import mandate                # noqa: PLC0415 — stdlib-only (tomllib), no pandas
+
+        amount, _how = _notional(ti)
+        sym = str(ti.get("symbol") or "").strip().upper()
+        try:
+            uni = gov.whitelist(cfg)
+        except Exception:
+            uni = None     # unreadable universe: needs_announcement then SKIPS the
+                           # off-list limb rather than firing on every symbol — and,
+                           # critically, the concentration limb still runs.
+        reason = ann.needs_announcement(
+            {"symbol": sym, "side": "buy", "amount": amount},
+            valued or {}, uni, mandate.load())
+        if not reason:
+            return None
+        ann.push_detached(
+            f"UNUSUAL BUY: {sym}",
+            f"{reason}.\n\nThe order was PLACED — this is a notification, not an "
+            f"approval request. To intervene, use the kill switch.",
+            tags="warning")
+        return reason
+    except Exception:     # noqa: BLE001 — an alert must never affect an order
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # driver
 # --------------------------------------------------------------------------- #
 def _emit(d: dict) -> None:
@@ -261,7 +338,9 @@ def driver(raw: str) -> int:
         import marks             # noqa: PLC0415
         cfg = strategy.load()
         valued = marks.load() or {}
-        _emit(decide(payload, cfg, valued, SHADOW_FILE.exists()))
+        d = decide(payload, cfg, valued, SHADOW_FILE.exists())
+        _emit(d)                          # the verdict goes out FIRST, always
+        announce_if_unusual(payload, d, cfg, valued)
     except Exception as e:       # noqa: BLE001 — deliberate catch-all, see docstring
         _emit(_deny(
             f"order gate FAILED CLOSED: {type(e).__name__}: {e} — the safety gate "
@@ -413,6 +492,74 @@ def _selftest() -> None:
                 p = {"tool_name": ORDER_TOOL,
                      "tool_input": {"symbol": "MU", "side": ok_side, "amount": 10.0}}
                 assert decide(p, CFG, V, shadow=False)["permissionDecision"] == "allow", ok_side
+
+            # --- the ANNOUNCEMENT: fires on an ALLOWED unusual buy, changes
+            #     nothing, and NEVER touches the network in a test -------------
+            import announce as ann                       # noqa: PLC0415
+            sent = []
+            real_push = ann.push_detached
+            ann.push_detached = lambda *a, **k: sent.append((a, k)) or True
+            # the announcement needs the universe SOURCES even when the blocking
+            # whitelist is off — off-list is announceable, not refusable, there
+            ACFG = {**CFG, "universe": {"source": "config/universe.csv"},
+                    "etf_sleeve": {"source": "config/etf_universe.csv"}}
+            try:
+                # real mandate: 15% concentration -> announce at 80% of it = 12%
+                VP = {"account_value": 100.0,
+                      "positions": {"MU": {"qty": 1, "value": 10.0}}}
+                small = {"tool_name": ORDER_TOOL,
+                         "tool_input": {"symbol": "MU", "side": "buy", "amount": 1.0}}
+                d_small = decide(small, CFG, VP, shadow=False)
+                assert d_small["permissionDecision"] == "allow"
+                assert announce_if_unusual(small, d_small, ACFG, VP) is None, \
+                    "an ordinary buy must not page anybody"
+                assert sent == []
+
+                # ...and the SAME $10 already held plus a $3 add crosses $12.
+                # The order gate passes both (each is far under max_order_pct);
+                # only the RESULTING POSITION is unusual.
+                add = {"tool_name": ORDER_TOOL,
+                       "tool_input": {"symbol": "MU", "side": "buy", "amount": 3.0}}
+                d_add = decide(add, CFG, VP, shadow=False)
+                assert d_add["permissionDecision"] == "allow", d_add
+                r = announce_if_unusual(add, d_add, ACFG, VP)
+                assert r and "already held" in r, r
+                assert len(sent) == 1, sent
+                body = sent[0][0][1]
+                assert "PLACED" in body and "not an approval request" in body, body
+                sent.clear()
+
+                # an off-universe BUY, when the whitelist gate is OFF (with it on,
+                # vet_plan denies and there is nothing to announce)
+                off = {"tool_name": ORDER_TOOL,
+                       "tool_input": {"symbol": "NFLX", "side": "buy", "amount": 1.0}}
+                d_off = decide(off, CFG, VP, shadow=False)
+                assert d_off["permissionDecision"] == "allow"
+                assert "OUTSIDE" in (announce_if_unusual(off, d_off, ACFG, VP) or "")
+                sent.clear()
+
+                # ⚠️ a SELL is never announced, at any size
+                big_sell = {"tool_name": ORDER_TOOL,
+                            "tool_input": {"symbol": "NFLX", "side": "sell", "amount": 90.0}}
+                d_sell = decide(big_sell, CFG, VP, shadow=False)
+                assert d_sell["permissionDecision"] == "allow"
+                assert announce_if_unusual(big_sell, d_sell, ACFG, VP) is None
+                assert sent == []
+
+                # a DENIED order is not announced — nothing happened to report
+                d_shadow = decide(add, CFG, VP, shadow=True)
+                assert d_shadow["permissionDecision"] == "deny"
+                assert announce_if_unusual(add, d_shadow, ACFG, VP) is None
+                assert sent == []
+
+                # a broken announcement can NEVER change or break a verdict
+                def boom(*a, **k):
+                    raise RuntimeError("ntfy exploded")
+                ann.push_detached = boom
+                assert announce_if_unusual(add, d_add, ACFG, VP) is None
+                assert decide(add, CFG, VP, shadow=False)["permissionDecision"] == "allow"
+            finally:
+                ann.push_detached = real_push
 
             # --- the driver FAILS CLOSED on anything it cannot parse ----------
             import io
