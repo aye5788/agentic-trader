@@ -68,6 +68,56 @@ def ping() -> str:
     return "pong"
 
 
+# How old a broker snapshot may be before the agent must be told. The snapshot
+# is refreshed by the 10:00 fast loop and by the monitor; a close session at
+# 15:15 normally sees data hours old, not days.
+SNAPSHOT_STALE_HOURS = 8.0
+
+
+def _staleness(v: dict) -> dict | None:
+    """How old is this snapshot, and is that a problem? -> dict, or None if fine.
+
+    ⚠️ NOTHING USED TO SAY THIS. marks.py carries a comment acknowledging the
+    total may be "possibly stale" and surfaced it nowhere, so a session whose
+    snapshot writer had failed would plan against YESTERDAY'S holdings -- with
+    placement allowed and no signal anything was wrong. That is the worst shape
+    of failure available here: not zero orders, but confident wrong ones, sized
+    and targeted against positions that may already have been sold.
+
+    The writers are the 10:00 fast loop and the monitor. Retiring the fast loop
+    (plan Task 8 step 5) removes one of them, so this must be loud before that
+    happens, not after.
+    """
+    from datetime import datetime, timezone           # noqa: PLC0415
+    raw = v.get("marked_at") or v.get("ts") or v.get("as_of")
+    if not raw:
+        return {"age": "UNKNOWN", "stale": True,
+                "warning": ("This snapshot carries NO timestamp, so its age "
+                            "cannot be established. Treat every holding and "
+                            "dollar figure in it as unverified: read positions "
+                            "from Robinhood directly before acting on them.")}
+    try:
+        txt = str(raw)
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+        if dt.tzinfo is None:                 # a bare date is midnight, not now
+            dt = dt.replace(tzinfo=timezone.utc)
+    except Exception:                         # noqa: BLE001
+        return {"age": f"UNPARSEABLE ({raw})", "stale": True,
+                "warning": ("This snapshot's timestamp could not be parsed, so "
+                            "its age is unknown. Read positions from Robinhood "
+                            "directly before acting on them.")}
+    hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
+    if hours <= SNAPSHOT_STALE_HOURS:
+        return None
+    return {"age": f"{hours:.1f}h", "as_of": str(raw), "stale": True,
+            "warning": (f"⚠️ THIS SNAPSHOT IS {hours:.1f} HOURS OLD (limit "
+                        f"{SNAPSHOT_STALE_HOURS:.0f}h). Whoever refreshes it has "
+                        f"probably failed. The positions and dollar figures below "
+                        f"may describe a book you no longer hold. Call "
+                        f"get_equity_positions and get_portfolio for the real "
+                        f"state before sizing, stopping or selling anything.")}
+
+
 @mcp.tool()
 def positions() -> str:
     """Every position actually held, with the stop and target set for it.
@@ -76,9 +126,20 @@ def positions() -> str:
     unprotected. That is deliberately reported rather than hidden.
     """
     prod = read_current()
-    return json.dumps(state.holdings(marks.load(),
-                                     prod.theses if prod else [],
-                                     _overrides()), indent=2, default=str)
+    v = marks.load()
+    out = state.holdings(v, prod.theses if prod else [], _overrides())
+    # The staleness banner rides with the HOLDINGS too, not only account(). An
+    # agent that reads positions() and never calls account() would otherwise act
+    # on a stale book with nothing telling it so.
+    # NO snapshot is a different state from a STALE one, and already handled:
+    # the agent gets {} here and nulls from account(). Blurring them would put a
+    # scary banner on a fresh deploy that simply has not marked yet. The banner
+    # is for a snapshot that EXISTS and is old -- data that looks usable and
+    # is not.
+    stale = _staleness(v) if v else None
+    if stale:
+        out = {"STALE": stale, "holdings": out}
+    return json.dumps(out, indent=2, default=str)
 
 
 @mcp.tool()
@@ -93,6 +154,9 @@ def account() -> str:
     out = {k: v.get(k) for k in
            ("account_number", "account_value", "cash", "invested",
             "as_of", "marked_at")}
+    stale = _staleness(v)
+    if stale:
+        out["STALE"] = stale
     bp = v.get("buying_power")
     out["buying_power"] = bp
     out["unsettled_funds"] = v.get("unsettled_funds")
@@ -1023,6 +1087,49 @@ def _selftest() -> None:
     finally:
         marks.load = orig_load
     print("selftest OK: mcp server boots, ping responds, degrades to JSON without a snapshot")
+
+    # ---- a STALE snapshot must announce itself ----------------------------
+    # Nothing used to say this: marks.py acknowledged "possibly stale" in a
+    # comment and surfaced it nowhere, so a session whose snapshot writer had
+    # failed planned against YESTERDAY'S holdings with placement allowed. Not
+    # zero orders -- confident wrong ones, against positions possibly sold.
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    fresh = (_dt.now(_tz.utc) - _td(hours=2)).isoformat()
+    old_ts = (_dt.now(_tz.utc) - _td(hours=30)).isoformat()
+
+    assert _staleness({"marked_at": fresh}) is None, "a fresh snapshot must be silent"
+    st = _staleness({"marked_at": old_ts})
+    assert st and st["stale"] is True and "30." in st["age"], st
+    assert "HOURS OLD" in st["warning"] and "get_equity_positions" in st["warning"], st
+    # no timestamp at all, and an unparseable one, are BOTH stale -- never "fine"
+    assert _staleness({})["stale"] is True          # a snapshot with no ts IS stale
+    # ...but NO snapshot at all is a different, already-handled state: the
+    # holdings tool must still degrade to a bare {} rather than a scary banner
+    _no_snap = marks.load
+    try:
+        marks.load = lambda *a, **k: None
+        assert json.loads(positions()) == {}, "no snapshot must stay a bare {}"
+    finally:
+        marks.load = _no_snap
+    assert _staleness({"marked_at": "not-a-date"})["stale"] is True
+    # a bare date is midnight, not "now" -- yesterday's date must read as stale
+    y = (_dt.now(_tz.utc) - _td(days=1)).date().isoformat()
+    assert _staleness({"as_of": y})["stale"] is True, y
+    # the banner reaches BOTH tools, not just account()
+    _real_load = marks.load
+    try:
+        marks.load = lambda *a, **k: {"marked_at": old_ts, "positions": {},
+                                      "account_value": 1.0, "cash": 1.0}
+        assert "STALE" in json.loads(account()), "account() must carry the banner"
+        assert "STALE" in json.loads(positions()), "positions() must carry it too"
+        marks.load = lambda *a, **k: {"marked_at": fresh, "positions": {},
+                                      "account_value": 1.0, "cash": 1.0}
+        assert "STALE" not in json.loads(account()), "fresh must not cry wolf"
+        assert "STALE" not in json.loads(positions()), "fresh must not cry wolf"
+    finally:
+        marks.load = _real_load
+    print("selftest OK: a stale/undateable snapshot announces itself in BOTH "
+          "account() and positions(); a fresh one stays silent")
 
     # --- announce(): a NOTIFICATION, and it must never send during a test ----
     real_push = notify.push
