@@ -60,7 +60,11 @@ LOCK = REPO / "research_store" / "session.lock"
 # every LATER session is blocked behind it -- one wedged process silently ends
 # the trading day rather than just its own slot. Generous, because a session
 # that is merely slow must not be killed mid-order.
-TIMEOUT_S = {"premarket": 900, "open": 1800, "close": 1200, "wake": 600}
+# `close` is 900, NOT 1200: the independent review runs immediately after this
+# in deploy/run_session.sh, and 15:15 + 900s + a 600s review must land before
+# risk_review at 15:45. Today's first live session took 433s, so 900 is ample.
+# If you raise this, lower TIMEOUT_S in scripts/review_session.py to match.
+TIMEOUT_S = {"premarket": 900, "open": 1800, "close": 900, "wake": 600}
 
 # Signatures that mean the MODEL never ran, so no work was done and no order was
 # placed.
@@ -475,6 +479,20 @@ def _selftest() -> None:
     assert argv[i + 1] == "", f"--tools must be followed by the empty string: {argv[i:i+3]}"
     assert "--permission-mode" in argv and argv[argv.index("--permission-mode") + 1] == "dontAsk"
     assert argv[-1] != "--allowedTools", "allowlist must not be empty"
+
+    # ⏱ THE SESSION + ITS REVIEW MUST FINISH BEFORE THE NEXT ARMED JOB.
+    # close starts 15:15; risk_review (armed, places real trades) starts 15:45.
+    # Two headless model runs overlapping on this ~2GB box forced a reboot on
+    # 2026-08-12, so the budget is asserted rather than left to whoever edits
+    # these numbers next.
+    import importlib.util as _il
+    _sp = _il.spec_from_file_location("_rev", REPO / "scripts" / "review_session.py")
+    _rev = _il.module_from_spec(_sp)
+    _sp.loader.exec_module(_rev)
+    _budget = TIMEOUT_S["close"] + _rev.TIMEOUT_S
+    assert _budget <= 30 * 60, (
+        f"close ({TIMEOUT_S['close']}s) + review ({_rev.TIMEOUT_S}s) = {_budget}s "
+        f"exceeds the 15:15->15:45 window before risk_review")
 
     # _kill_group on a dead/None process is a no-op, not an exception
     _kill_group(None)

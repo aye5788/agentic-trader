@@ -43,7 +43,15 @@ sys.path.insert(0, str(REPO / "src"))
 
 PROMPT = REPO / "prompts" / "review.md"
 OUT = REPO / "research_store" / "reviews"
-TIMEOUT_S = 900
+# ⏱ THE ARITHMETIC HAS TO CLOSE, not just look reasonable.
+#   close session starts 15:15, worst case 900s -> ends 15:30
+#   + this review, worst case 600s              -> ends 15:40
+#   risk_review starts                             15:45  (5 min of margin)
+# Anything longer and the review is still running when an ARMED de-risk pass
+# starts, which is two headless model runs at once on a ~2GB box -- the
+# combination that forced a reboot on 2026-08-12. If you lengthen this, shorten
+# TIMEOUT_S["close"] in scripts/session.py by the same amount.
+TIMEOUT_S = 600
 
 # Codex gates third-party MCP tool calls behind an approval its headless mode
 # auto-cancels, so the reviewer reaches the book through agent_view.py instead —

@@ -42,6 +42,26 @@ mkdir -p logs
 .venv/bin/python scripts/session.py "$MODE"
 rc=$?
 
+# ---------------------------------------------------------------------------
+# INDEPENDENT REVIEW — a DIFFERENT model (Codex) judges what the session did.
+#
+# ⚠️ SEQUENTIAL, NEVER CONCURRENT. This line sits AFTER session.py has returned,
+# which means the agent's process group is already killed and the lock already
+# released — so the two model runs never overlap. Running them together took the
+# droplet down on 2026-08-12 (~2GB box, ~500MB per headless model run, live stop
+# watcher on the same machine, market hours, full reboot required).
+#
+# review_session.py ALSO refuses on its own if a session still holds the lock or
+# the box is short of memory, and runs under a kernel-enforced MemoryMax. Belt
+# and braces: this ordering is the design, those guards are the backstop for
+# when someone calls it from somewhere else.
+#
+# `|| true` because a review must NEVER fail the trading run. The session has
+# already happened; a reviewer that errors is a missing opinion, not a problem
+# with the book.
+# ---------------------------------------------------------------------------
+.venv/bin/python scripts/review_session.py || true
+
 # mirror the non-regenerable ledger off-box (best-effort; never fails the run)
 deploy/backup_ledger.sh || true
 
