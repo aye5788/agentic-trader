@@ -62,6 +62,12 @@ rc=$?
 # ---------------------------------------------------------------------------
 .venv/bin/python scripts/review_session.py || true
 
+# Score BOTH parties against the panel. Pure pandas, no model, ~1s — and it is
+# what stops the reviewer being decoration: a verdict nobody prices is a second
+# opinion, and an agent whose reasoning is never checked against the tape is
+# just a persuasive writer. Neither model grades itself here.
+.venv/bin/python scripts/score_reviews.py >> logs/session.log 2>&1 || true
+
 # mirror the non-regenerable ledger off-box (best-effort; never fails the run)
 deploy/backup_ledger.sh || true
 
