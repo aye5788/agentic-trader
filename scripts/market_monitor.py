@@ -269,12 +269,21 @@ def _selftest() -> None:
     # could register a wake, get an ok, and be woken by nothing.
     import tempfile as _tf, json as _js
     _real_wakes, _real_notify = WAKES, notify
-    _pushes, _spawns = [], []
+    _pushes, _spawns, _journalled = [], [], []
     with _tf.TemporaryDirectory() as _d:
         wf = Path(_d) / "wakes.json"
         try:
             globals()["WAKES"] = wf
             globals()["notify"] = lambda *a, **k: _pushes.append(a)
+            # ⛔ AND THE JOURNAL. Stubbing the wakes FILE and the notifier is not
+            # enough: _fire_wakes also calls store.append_journal, which writes
+            # the REAL research_store/journal.jsonl. Every run of this suite
+            # appended a fabricated `wake_fired` event for NVDA at 505.0 to the
+            # live append-only ledger -- 15 of them on 2026-08-12 before it was
+            # noticed, indistinguishable from real ones at a glance. A test that
+            # writes production state is not a test, it is a mutation.
+            _real_append = store.append_journal
+            store.append_journal = lambda ev: _journalled.append(ev)
 
             # no file at all -> no symbols, no crash, no fire
             assert _wake_symbols() == set()
@@ -312,9 +321,15 @@ def _selftest() -> None:
             assert _should_poll({"MU": 1}, set()) is True
             assert _should_poll({"MU": 1}, {"NVDA"}) is True
             assert _should_poll({}, set()) is False, "nothing to watch -> skip"
+            # the journal entry is part of the contract -- assert it, having
+            # made sure it lands in a list rather than the live ledger
+            assert len(_journalled) == 1, _journalled
+            assert _journalled[0]["event"] == "wake_fired", _journalled[0]
+            assert _journalled[0]["symbol"] == "NVDA", _journalled[0]
         finally:
             globals()["WAKES"] = _real_wakes
             globals()["notify"] = _real_notify
+            store.append_journal = _real_append
     print("monitor selftest OK: wakes fire on unheld symbols, respect budget, "
           "and alert-only when not armed")
 
