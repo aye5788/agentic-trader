@@ -26,8 +26,20 @@ import time
 
 from moomoo import RET_OK, AuType, KLType, TradeDateMarket
 
-from .client import quote_ctx
-from .research import _bare, _us
+# Relative imports break when this file is run DIRECTLY (`python3 prices.py
+# --selftest`) rather than imported as a package member -- "attempted relative
+# import with no known parent package". That is why its _selftest() had never
+# once run: it was written, it passed, and nothing could invoke it. The fallback
+# makes the module executable so deploy/run_selftests.sh can actually cover it.
+try:
+    from .client import quote_ctx
+    from .research import _bare, _us
+except ImportError:                        # run as a script, not as a package
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+    from adapters.moomoo.client import quote_ctx
+    from adapters.moomoo.research import _bare, _us
 
 # moomoo ceiling is 60 history calls / 30s and OpenD is shared, so pace every
 # call rather than discovering the limit. Mirrors research.py's snapshot pacing.
@@ -148,6 +160,59 @@ def is_trading_day(day, ctx=None):
         return any(str(r.get("time", ""))[:10] == day for r in (data or []))
     except Exception:                      # noqa: BLE001 -- unknown, never a guess
         return None
+    finally:
+        if own and q is not None:
+            try:
+                q.close()
+            except Exception:              # noqa: BLE001
+                pass
+
+
+def splits(ticker: str, ctx=None):
+    """Split history for one ticker -> [{"ex_date": "YYYY-MM-DD", "ratio": float}].
+
+    `ratio` is moomoo's `split_ratio`: the factor a PRE-split price must be
+    MULTIPLIED by to express it on the post-split basis. A 2:1 split is 0.5, a
+    3:1 is 0.3333. Verified against MNST, whose real history reads
+    2012-02-16 0.5, 2016-11-10 0.3333, 2023-03-28 0.5, 2026-08-11 0.5.
+
+    WHY THIS MATTERS: the daily panel stores raw closes, so a split lands in it
+    as a genuine one-day return -- MNST's 2:1 on 2026-08-11 appears as -50.2%.
+    That is not cosmetic: momentum's R, sigma and trend are all computed off
+    these returns, so one split poisons a name's score for a full lookback year,
+    and sigma is what sets stop distance and target geometry.
+
+    Returns [] on any failure -- an empty split history is indistinguishable
+    from an unreachable one HERE, so the caller must never treat [] as proof a
+    name did not split; scripts/adjust_splits.py only ever ADDS an adjustment on
+    positive evidence, and does nothing on [].
+
+    ⚠️ get_rehab is PER-SYMBOL (one call per code), so this is not something to
+    sweep across a 168-name universe daily. The caller detects split-SHAPED
+    moves from the panel for free and confirms only those.
+    """
+    own = ctx is None
+    q = None
+    try:
+        q = ctx or quote_ctx()
+        ret, data = _paced(q.get_rehab, _us(ticker))
+        if ret != RET_OK or data is None or not len(data):
+            return []
+        out = []
+        for rec in data.to_dict("records"):
+            r = rec.get("split_ratio")
+            d = str(rec.get("ex_div_date") or "")[:10]
+            try:
+                r = float(r)
+            except (TypeError, ValueError):
+                continue
+            # NaN-safe, and 1.0 is a no-op row (a dividend-only record)
+            if not (r == r) or r <= 0 or r == 1.0 or len(d) != 10:
+                continue
+            out.append({"ex_date": d, "ratio": r})
+        return sorted(out, key=lambda x: x["ex_date"])
+    except Exception:                      # noqa: BLE001
+        return []
     finally:
         if own and q is not None:
             try:

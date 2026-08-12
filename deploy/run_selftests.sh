@@ -75,6 +75,8 @@ VENV_SELFTESTS=(
 # Scripts that `import moomoo` at module scope — MUST run under system python3.
 SYS_SELFTESTS=(
     "scripts/market_monitor.py"
+    "scripts/adjust_splits.py"
+    "src/adapters/moomoo/prices.py"
 )
 
 fail=0

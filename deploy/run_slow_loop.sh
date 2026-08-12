@@ -12,6 +12,16 @@ PY=.venv/bin/python
 # `--force` is gone: the panel is appended to, not re-pulled (moomoo caps history
 # at 100 distinct stocks, so a 168-name re-pull cannot succeed).
 /usr/bin/python3 scripts/fetch_prices.py
+
+# Re-base the panel for any split that landed today, BEFORE the signal reads it.
+# The panel stores RAW closes, so a split enters as a genuine one-day return
+# (MNST's 2:1 on 2026-08-11 read as -50.2%) and momentum's R, sigma and trend
+# are all computed off those returns -- sigma being what sets stop distance and
+# target geometry, so it reaches real orders, not just the ranking. Detection is
+# free and local; only split-SHAPED moves cost a get_rehab call, and nothing is
+# adjusted without positive confirmation. Never fails the loop: an unadjusted
+# split is a bad score for one name, a dead slow loop is no book at all.
+/usr/bin/python3 scripts/adjust_splits.py || true
 "$PY" scripts/slow_loop.py
 # mirror the non-regenerable ledger off-box (best-effort; never fails the run)
 deploy/backup_ledger.sh || true
