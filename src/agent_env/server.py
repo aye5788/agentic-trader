@@ -398,6 +398,88 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
 
 
 @mcp.tool()
+def record_fills(orders: str) -> str:
+    """Journal the orders you PLACED, so the fill is on the permanent record.
+
+    ⛔ CALL THIS AFTER EVERY SESSION IN WHICH YOU PLACED AN ORDER, before you
+    finish. Pass the raw JSON you got back from `get_equity_orders` — the whole
+    thing; this reads it, keeps only the FILLED ones, and skips any order_id
+    already recorded, so calling it twice is safe and calling it with extra
+    orders in the payload is safe.
+
+    WHY IT MATTERS AND WHAT BREAKS WITHOUT IT
+        `record_decision` records what you DECIDED. This records what actually
+        EXECUTED, and they are different things: a decision can be right and the
+        order rejected, or filled at a price you did not expect. Everything
+        downstream keys on the execution, not the decision — the weekly letter
+        counts trades from it, reconcile_ledger.py checks it against the broker,
+        the outcome ledger attaches realized P&L to it, and `performance` reads
+        it back to you next session.
+
+        Measured 2026-08-12: two real sells filled at the broker and NOTHING
+        journalled them, because the legacy loop's record_fills.py is a shell
+        script you have no shell to run. The letter would have reported a week
+        in which you did nothing.
+
+    Returns what it wrote, and says plainly when it wrote nothing.
+    """
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        raw = json.loads(orders) if isinstance(orders, str) else orders
+    except Exception as e:      # noqa: BLE001
+        return json.dumps({"ok": False, "error": f"could not parse orders JSON: {e}"},
+                          indent=2)
+
+    # accept the tool's own envelope, a bare list, or {"orders": [...]}
+    if isinstance(raw, dict):
+        raw = (raw.get("data") or raw).get("orders", raw.get("orders", []))
+    if not isinstance(raw, list):
+        return json.dumps({"ok": False, "error": "no orders[] found in the payload"},
+                          indent=2)
+
+    try:
+        seen = set()
+        for e in store.read_journal():
+            if e.get("event") == "execution":
+                for f in (e.get("fills") or []):
+                    if f.get("order_id"):
+                        seen.add(str(f["order_id"]))
+    except Exception:           # noqa: BLE001
+        seen = set()
+
+    fills = []
+    for o in raw:
+        if not isinstance(o, dict) or str(o.get("state")) != "filled":
+            continue
+        oid = str(o.get("id") or "")
+        if not oid or oid in seen:
+            continue           # idempotent: never double-append an order_id
+        qty = o.get("cumulative_quantity") or o.get("quantity")
+        px = o.get("average_price") or o.get("price")
+        amt = ((o.get("dollar_based_amount") or {}).get("amount")
+               if isinstance(o.get("dollar_based_amount"), dict) else None)
+        try:
+            amount = float(amt) if amt is not None else (
+                float(qty) * float(px) if qty and px else None)
+        except (TypeError, ValueError):
+            amount = None
+        fills.append({"symbol": o.get("symbol"), "side": o.get("side"),
+                      "quantity": qty, "avg_price": px, "amount": amount,
+                      "order_id": oid, "status": "filled",
+                      "placed_at": o.get("created_at")})
+
+    if not fills:
+        return json.dumps({"ok": True, "recorded": 0,
+                           "note": ("nothing new to record — every filled order "
+                                    "in this payload was already journalled, or "
+                                    "none were filled")}, indent=2)
+
+    store.append_journal({"event": "execution", "ts": ts,
+                          "source": "session", "fills": fills})
+    return json.dumps({"ok": True, "recorded": len(fills), "fills": fills}, indent=2)
+
+
+@mcp.tool()
 def record_decision(symbol: str, action: str, reason: str) -> str:
     """Record a decision and WHY, to the append-only journal.
 
@@ -1284,6 +1366,51 @@ def _selftest() -> None:
     finally:
         store.read_journal = _real_rj
     print("selftest OK: no agent-facing tool leaks who the reviewer is")
+
+    # ---- record_fills: what EXECUTED, not what was decided ----------------
+    # On 2026-08-12 two real sells filled and nothing journalled them: the
+    # legacy loop records fills with a shell script, and a session has no shell.
+    # The weekly letter, reconcile_ledger and the outcome ledger all key on the
+    # `execution` event, so the letter would have reported a week of no trading.
+    _payload = json.dumps({"data": {"orders": [
+        {"id": "abc", "symbol": "AMAT", "side": "sell", "state": "filled",
+         "cumulative_quantity": "0.004646", "average_price": "547.0328",
+         "created_at": "2026-08-12T14:38:14Z"},
+        {"id": "def", "symbol": "TER", "side": "sell", "state": "cancelled",
+         "cumulative_quantity": "0", "average_price": None},
+    ]}})
+    _journalled2 = []
+    _real_ap, _real_rj2 = store.append_journal, store.read_journal
+    try:
+        store.append_journal = lambda ev: _journalled2.append(ev)
+        store.read_journal = lambda: []
+        r = json.loads(record_fills.fn(_payload) if hasattr(record_fills, "fn")
+                       else record_fills(_payload))
+        assert r["ok"] and r["recorded"] == 1, r          # cancelled is NOT a fill
+        f = _journalled2[0]["fills"][0]
+        assert f["symbol"] == "AMAT" and f["order_id"] == "abc", f
+        assert abs(f["amount"] - 0.004646 * 547.0328) < 1e-6, f
+        assert _journalled2[0]["event"] == "execution", _journalled2[0]
+
+        # IDEMPOTENT: an order already on the record must never double-append,
+        # or the letter counts the same trade twice and P&L is fabricated
+        _journalled2.clear()
+        store.read_journal = lambda: [{"event": "execution",
+                                       "fills": [{"order_id": "abc"}]}]
+        r2 = json.loads(record_fills.fn(_payload) if hasattr(record_fills, "fn")
+                        else record_fills(_payload))
+        assert r2["recorded"] == 0 and _journalled2 == [], r2
+
+        # garbage in must not raise, and must not write
+        for bad in ("not json", "[]", '{"nope": 1}'):
+            rb = json.loads(record_fills.fn(bad) if hasattr(record_fills, "fn")
+                            else record_fills(bad))
+            assert rb.get("recorded", 0) == 0, (bad, rb)
+        assert _journalled2 == []
+    finally:
+        store.append_journal, store.read_journal = _real_ap, _real_rj2
+    print("selftest OK: record_fills journals only FILLED orders, is idempotent "
+          "on order_id, and never writes on a malformed payload")
 
     # --- announce(): a NOTIFICATION, and it must never send during a test ----
     real_push = notify.push

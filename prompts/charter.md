@@ -124,6 +124,17 @@ for names you are actually considering: `quote()` for the live price and session
 committing size to a thinner name. Then `check_order()`, place, `set_levels()` in
 the same session, `record_decision()`.
 
+**If you placed anything, you MUST finish with `record_fills()`** — pass it the
+raw output of `get_equity_orders`. `record_decision` records what you decided;
+`record_fills` records what actually EXECUTED, and they are different facts. A
+decision can be right and the order rejected, or filled at a price you did not
+expect. Everything downstream keys on the execution: the weekly letter counts
+trades from it, the reconciler checks it against the broker, realized P&L
+attaches to it, and `performance` reads it back to you next session. It is
+idempotent — calling it twice, or with orders already recorded, changes nothing.
+A session that traded and did not call it looks, forever after, like a session
+that did nothing.
+
 **Gap risk is priced HERE, at entry, because this is the only place it can be.**
 You cannot trade the overnight session — this account holds fractional positions
 and the broker accepts fractional orders only during regular hours. From 16:00 to

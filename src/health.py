@@ -134,6 +134,43 @@ SPECS = {
 }
 
 
+def unrecorded_fills(journal: list, day: str) -> list:
+    """Symbols the agent DECIDED to trade on `day` with no execution recorded.
+
+    PURE. -> list of symbols, empty when the record is complete.
+
+    ⚠️ THE FAILURE THIS CATCHES. A session records WHY it acted
+    (`agent_decision`) and, separately, WHAT EXECUTED (`execution`). Those are
+    different events and only the second reaches the weekly letter, the ledger
+    reconciler and realized P&L. On 2026-08-12 two real sells filled at the
+    broker and neither was journalled: the legacy loop records fills with a
+    shell script and a session has no shell, so the letter would have reported a
+    week in which the agent did nothing.
+
+    The charter now requires `record_fills()`. That is a PROMPT instruction, and
+    this session has proved repeatedly that prompt instructions get skipped — so
+    the gap is also checked here, where forgetting is caught rather than assumed
+    away.
+
+    Only trading actions count: `hold`, `skip` and portfolio-level findings
+    execute nothing and must never be reported as a missing fill.
+    """
+    traded = {"exit", "trim", "sell", "buy", "add", "open", "increase", "reduce"}
+    want, got = set(), set()
+    for e in journal:
+        if str(e.get("ts", ""))[:10] != day:
+            continue
+        if e.get("event") == "agent_decision":
+            sym = e.get("symbol")
+            if sym and sym != "PORTFOLIO" and str(e.get("action", "")).lower() in traded:
+                want.add(str(sym).upper())
+        elif e.get("event") == "execution":
+            for f in (e.get("fills") or []):
+                if f.get("symbol"):
+                    got.add(str(f["symbol"]).upper())
+    return sorted(want - got)
+
+
 def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
     """Pure: {key: timestamp|None} -> verdicts. No I/O."""
     out: list[Check] = []
@@ -406,6 +443,26 @@ def _selftest() -> None:
     # past its window -> stale
     r = {c.key: c for c in evaluate(now, {"slow_loop": now - 5 * day})}
     assert r["slow_loop"].status == "stale", r["slow_loop"]
+
+    # ---- unrecorded fills: decided to trade, no execution on the record ----
+    j = [
+        {"event": "agent_decision", "ts": "2026-08-12T14:38:00Z", "symbol": "AMAT", "action": "exit"},
+        {"event": "agent_decision", "ts": "2026-08-12T14:39:00Z", "symbol": "TER", "action": "trim"},
+        {"event": "agent_decision", "ts": "2026-08-12T14:41:00Z", "symbol": "AMD", "action": "hold"},
+        {"event": "agent_decision", "ts": "2026-08-12T14:41:00Z", "symbol": "PORTFOLIO", "action": "derisk"},
+        {"event": "execution", "ts": "2026-08-12T14:40:00Z", "fills": [{"symbol": "AMAT"}]},
+    ]
+    miss = unrecorded_fills(j, "2026-08-12")
+    assert miss == ["TER"], miss          # AMAT recorded; TER traded and was not
+    # a HOLD executes nothing and must never be reported as a missing fill
+    assert "AMD" not in miss and "PORTFOLIO" not in miss, miss
+    # a complete record is silent
+    j2 = j + [{"event": "execution", "ts": "2026-08-12T14:40:00Z",
+               "fills": [{"symbol": "TER"}]}]
+    assert unrecorded_fills(j2, "2026-08-12") == []
+    # other days are not this day's problem
+    assert unrecorded_fills(j, "2026-08-11") == []
+    assert unrecorded_fills([], "2026-08-12") == []
 
     # never seen at all -> "never" (the signal-panel case that motivated this)
     r = {c.key: c for c in evaluate(now, {})}

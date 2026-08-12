@@ -23,11 +23,36 @@ around it rather than guessing. You are the narrator, not the calculator.
    regime, book[] (rank order; sleeve=true = ETF sleeve), fills_this_week,
    exit_signals_this_week, reentry_decisions_this_week (post-take-profit
    judgment calls — full/half/skip with reasons; when present, narrate them
-   in the letter: these are the week's actual PM decisions), realized
+   in the letter: these are the week's actual PM decisions),
+   agent_decisions_this_week (see below — the WHY behind the week's trades),
+   realized
    (BANKED P&L from closed positions — {total, total_rate, days}; null until
    the first exit. Distinguish realized from paper gains when narrating:
    "banked" vs "on paper"), notes (halts/blocks worth narrating), cooldown,
    next_rebalance, kill_switch.
+
+1b. **THE BOOK IS NOW DECIDED BY THE AGENT, and `agent_decisions_this_week`
+   is where it says why.** Each entry is {symbol, action, reason} in the agent's
+   own words — including `hold` (why it did NOT sell) and `PORTFOLIO` (a
+   session-level finding, e.g. why no buy was placed). Since 2026-08-12 the
+   book's decisions are made session by session rather than produced by a fixed
+   weekly procedure.
+
+   **Narrate the WHY from these, and never invent one.** A letter that says
+   "we exited AMAT ahead of tomorrow's earnings, because the stop here is
+   software that only runs while the market is open and cannot bound an
+   overnight gap" is worth more than a table of tickers. If a fill has no
+   matching decision, say what was done and NOT why — do not reason backwards
+   from the price to a motive.
+
+   ⚠️ **Do not narrate a `hold` as an action.** A decision not to sell is
+   context for the positions section, not a trade row.
+
+   ⚠️ **Keep the mechanism out of it** (standing instruction, 2026-07-10). How
+   decisions get made, what reviews them, how sessions are scheduled — all of
+   that is plumbing and belongs in `docs/OPSLOG.md`. Portfolio impact in ONE
+   sentence at most, then point there. The reader wants to know what happened to
+   their money and why, not how the machine is wired.
 
 2. **Copy the template** `newsletter/template.html` and replace every
    `{{TOKEN}}`:

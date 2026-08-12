@@ -161,6 +161,13 @@ def main() -> None:
     events = [e for e in _jsonl(RS / "journal.jsonl") if _in_window(e, since)]
     fills, exits, notes, reentries = [], [], [], []
     risk_actions = []
+    # ⚠️ THE AGENT'S OWN REASONS. Since 2026-08-12 the book is decided by an
+    # agent that records WHY, not only what. Without this the letter can say a
+    # position was sold and never why — and "we exited AMAT ahead of earnings
+    # because the stop is software that only runs during RTH" is the most
+    # investor-relevant sentence in the whole file. Reasons are truncated here
+    # rather than in the prompt so the narrator cannot pad them out.
+    agent_decisions = []
     for e in events:
         if e.get("event") == "execution":
             for f in e.get("fills", e.get("placed", [])):
@@ -176,6 +183,10 @@ def main() -> None:
             reentries.extend(e.get("reentry_decisions", []))
             if e.get("halt_reason"):
                 notes.append(e["halt_reason"])
+        elif e.get("event") == "agent_decision":
+            agent_decisions.append({
+                "symbol": e.get("symbol"), "action": e.get("action"),
+                "reason": str(e.get("reason") or "")[:600]})
         elif e.get("event") == "exit_signal":
             exits.extend(e.get("triggers", []))
         elif e.get("event") == "risk_review":
@@ -229,6 +240,9 @@ def main() -> None:
         "book": book,
         "fills_this_week": fills,
         "exit_signals_this_week": exits,
+        # Narrate FROM these, never invent a motive for a trade. If a fill has
+        # no decision here, say what was done and not why.
+        "agent_decisions_this_week": agent_decisions,
         "reentry_decisions_this_week": reentries,
         "risk_actions_this_week": risk_actions,
         "realized": _read_json(RS / "rh" / "realized.json", None),
