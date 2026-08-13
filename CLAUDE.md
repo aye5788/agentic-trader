@@ -198,9 +198,21 @@ scripts/review_session.py
                         the stop watcher. It is DATA-ONLY: it cannot place,
                         cancel, set a level or record a decision. Its verdict is
                         journalled (`codex_review`), pushed on DISSENT/SPLIT,
-                        and injected ANONYMOUSLY into the next open/close brief,
-                        which must answer it. NOT a veto — no second model sits
-                        on the critical path of an order.
+                        and scored against the tape by score_reviews.py. NOT a
+                        veto — no second model sits on the critical path.
+                        ⛔ THE VERDICT DOES NOT REACH THE AGENT. It used to be
+                        injected into the next open/close brief; switched OFF
+                        2026-08-13 at session.py:SHOW_REVIEW_TO_AGENT by the
+                        principal, who is judging reviewer-vs-agent himself
+                        first. The agent is STATELESS (a verdict shown once is
+                        not learning, and its recorded answer was never read
+                        back) and the charter never named the review process at
+                        all, so an unexplained critique was ambiguity the agent
+                        would resolve by inventing a reason for it. Whether and
+                        HOW to feed it back is an OPEN question, not an
+                        oversight. The renderer is kept live and selftested with
+                        the flag forced on, so reconnecting is a one-line flip —
+                        but name the process in the charter first.
                         ⚠️ NEEDS THE `codex` BINARY (/root/.local/bin) — see
                         Setup. ⛔ Parse the LAST ===VERDICT=== block, never the
                         first: our own prompt echoes the template back. A

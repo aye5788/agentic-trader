@@ -9,6 +9,63 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-13 — the reviewer's verdict is disconnected from the agent (OPEN question)
+
+Switched off the same day the reviewer was fixed, and for a better reason than
+the bug: **it was never going to teach the agent anything in the form it had.**
+
+The agent is **stateless**. Each session is a fresh context, so a verdict shown
+once is one extra input to one session, not learning. The design said the loop
+closed — the agent "must answer" the verdict, and its answer is journalled — but
+**nothing has ever read that answer back**. `answer_review` decisions have no
+direction, so `score_reviews.py` files them as unscoreable and they are never
+looked at again. An open loop wearing a closed loop's description.
+
+For a stateless agent, learning cannot live in the agent; it can only live in
+the environment. There are three channels and the review used the weakest:
+
+| Channel | Carries between sessions? | Review's use |
+| ------- | ------------------------- | ------------ |
+| Charter (config-derived, standing) | yes | **none — silent** |
+| Brief (per-session facts) | no, one shot | the last verdict |
+| Ledger / scorecard | yes, but shown to nobody | answer written, never read |
+
+**And the process was never named.** The charter — the agent's entire standing
+account of the game it is playing — contains no mention of being reviewed or
+scored (`grep` of `charter.md`, `charter.py`, `mandate.toml`: nothing). So an
+anonymous critique arrived with no provenance and no stated purpose, and an
+agent resolving that ambiguity **invents** a reason for it. That is uncontrolled
+anchoring, and it is the same failure this repo already fixed once in
+`render_gate()`: the charter claimed orders were pushed "so a human can veto the
+unusual", which was false, and *an agent that believed it had been vetted by a
+human would defer to a review that never happened*. A process described wrongly
+— or not at all — is worse than one not shown.
+
+**So: the operator is the audience for now.** The reviewer still runs after every
+session, still journals, still pushes on DISSENT/SPLIT, and is still scored
+against the tape. Only the agent-facing path is off, at
+`scripts/session.py:SHOW_REVIEW_TO_AGENT`. The principal is weighing the
+reviewer's judgment against the agent's before deciding whether feeding it back
+is useful at all.
+
+**This makes `scorecard.json` the primary instrument**, which promotes the
+day-keying defect below from a nuisance to the thing that matters.
+
+Corrected three places that would otherwise have stated something false —
+including `prompts/review.md`, which told the *reviewer* its verdict would be
+read by the agent it was reviewing. Same failure class, other party.
+
+**OPEN — do not treat as settled or quietly re-enable.** Whether to feed the
+review back, and in what form, is undecided. The live candidates: show the
+standing *behavioural* pattern (a tally of what the agent actually did) rather
+than a single opinion, since that is a fact about itself it cannot otherwise
+see; withhold outcome hit-rates until n stops being noise; and name the process
+in the charter first, since reconnecting without that reintroduces the exact
+ambiguity this turned off. Reconnecting is one boolean — the renderer, the
+anonymity guard and the mode filter are all kept live and selftested with the
+flag forced on, so nothing rots meanwhile.
+
+
 ## 2026-08-13 — the independent reviewer had never once run under cron
 
 Checked before the open. The book, the services and the scheduled jobs were

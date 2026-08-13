@@ -22,11 +22,20 @@ WHAT IT CAN DO
 
 WHAT ITS VERDICT DOES
     Nothing automatic, deliberately. It is journalled, pushed to the operator on
-    a dissent, and injected into the NEXT session's brief, which must answer it.
-    It is NOT a veto: a veto puts a second model on the critical path of every
-    order, adds a failure mode, and replaces the agent's judgment with the
-    reviewer's rather than testing it. Being read by the thing you are
-    reviewing is how a dissent does its work.
+    a dissent, and scored against the tape alongside the agent's decisions
+    (scripts/score_reviews.py). It is NOT a veto: a veto puts a second model on
+    the critical path of every order, adds a failure mode, and replaces the
+    agent's judgment with the reviewer's rather than testing it.
+
+    ⛔ AND IT DOES NOT CURRENTLY REACH THE AGENT. It used to be injected into the
+    next session's brief; that path is switched off at
+    scripts/session.py:SHOW_REVIEW_TO_AGENT (2026-08-13, by the principal, who
+    is evaluating the reviewer's judgment against the agent's before deciding
+    whether feeding it back is useful at all). The agent is STATELESS, so a
+    verdict shown once was never learning, and nothing named the review process
+    to it — an unexplained critique is ambiguity the agent resolves by inventing
+    a reason for it. So today the OPERATOR is the audience. Read that flag's
+    comment before changing anything here on the assumption the agent sees this.
 """
 from __future__ import annotations
 

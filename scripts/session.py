@@ -244,6 +244,40 @@ def _tool_names() -> list[str]:
 # most needs to act.
 REVIEWED_MODES = ("open", "close")
 
+# ---------------------------------------------------------------------------
+# ⛔ THE VERDICT DOES NOT REACH THE AGENT RIGHT NOW. THIS IS DELIBERATE.
+#
+# Turned off 2026-08-13 by the principal. The reviewer still runs after every
+# session, still journals, still pushes to the phone and is still scored against
+# the tape — the OPERATOR is the audience. What is switched off is the one path
+# that put a verdict in front of the agent.
+#
+# WHY, so a future session does not "fix" this:
+#   1. The agent is STATELESS. Showing it yesterday's verdict once is not
+#      learning; it is a single extra input to one session. The answer it
+#      records lands in the journal and nothing has ever read it back. The loop
+#      was open while looking closed.
+#   2. Nothing here named the PROCESS to the agent. The charter — its whole
+#      standing account of the game — never mentioned that sessions are
+#      reviewed or scored, so an anonymous critique arrived with no provenance
+#      and no stated purpose. An agent resolving that ambiguity invents a reason
+#      for it, and that is uncontrolled anchoring. Compare render_gate()'s
+#      "a human can veto the unusual", which was false and had the agent
+#      deferring to a review that never happened: a process described wrongly —
+#      or not at all — is worse than one not shown.
+#   3. So the principal is evaluating the reviewer's judgment against the
+#      agent's FIRST, and will then decide whether feeding it back is useful and
+#      what would have to be true for it to work. That question is OPEN, not
+#      forgotten. See docs/OPSLOG.md 2026-08-13.
+#
+# TO RECONNECT: set this True. That is the whole change — every piece below
+# (render_review, last_review, the anonymity guard, the mode filter) is kept
+# live and selftested precisely so this stays a one-line flip and not a rewrite.
+# If you reconnect it, resolve (2) first: name the process in the charter, or
+# the same ambiguity comes back with it.
+# ---------------------------------------------------------------------------
+SHOW_REVIEW_TO_AGENT = False
+
 
 def last_review() -> dict | None:
     """The most recent independent verdict, or None. Never raises."""
@@ -257,6 +291,11 @@ def last_review() -> dict | None:
 def render_review(rev: dict | None, mode: str) -> str:
     """The dissent block for the brief. -> "" when there is nothing to answer.
 
+    ⛔ CURRENTLY RETURNS "" ALWAYS — SHOW_REVIEW_TO_AGENT is False (see there for
+    why, and for how to reconnect). Everything below still runs, and is still
+    selftested with the flag forced on, so the behaviour is proven rather than
+    remembered. Read the rest as "what this does WHEN reconnected".
+
     ⚠️ THE AGENT MUST ANSWER IT, not merely receive it. A verdict the agent can
     read and ignore is the same as one nobody wrote: this system's recurring
     defect is a control that is present and does nothing. So the block ends in
@@ -267,6 +306,11 @@ def render_review(rev: dict | None, mode: str) -> str:
     toward the reviewer's preferences rather than toward being right, and a
     session that was right deserves to know that as much as one that was not.
     """
+    # The flag is checked HERE, at the single point the block is built, rather
+    # than at the call site — so there is exactly one gate and no second path
+    # can be added later that quietly bypasses it.
+    if not SHOW_REVIEW_TO_AGENT:
+        return ""
     if not rev or mode not in REVIEWED_MODES:
         return ""
     stance = rev.get("stance")
@@ -574,43 +618,67 @@ def _selftest() -> None:
         f"close ({TIMEOUT_S['close']}s) + review ({_rev.TIMEOUT_S}s) = {_budget}s "
         f"exceeds the 15:15->15:45 window before risk_review")
 
-    # ---- the reviewer's verdict must REACH the agent, and only the right ones
+    # ---- the verdict is DISCONNECTED from the agent, and the renderer is kept
+    #      alive underneath it -----------------------------------------------
+    # Two separate claims, tested separately on purpose:
+    #   (a) as shipped, no verdict reaches the agent by ANY mode or stance;
+    #   (b) with the flag forced on, the renderer still behaves correctly.
+    # (b) is what makes reconnecting a one-line flip instead of a rewrite: the
+    # anonymity guard, the mode filter and the AFFIRM rule cannot rot while
+    # switched off, because they are still exercised on every selftest run.
+    import unittest.mock as _mock
     rev = {"stance": "SPLIT", "headline": "Idle cash was not justified.",
            "what_i_would_have_done": "Deployed the $4.64 into FTNT.",
            "strongest_disagreement": "$4.64 was 91% of a full position, not a stub.",
            "what_would_change_my_mind": "A liquidity or event fact about FTNT."}
-    for m in ("open", "close"):
-        blk = render_review(rev, m)
-        assert "SPLIT" in blk and "91% of a full position" in blk, m
-        assert "You must answer this" in blk, "a verdict the agent may ignore is decoration"
-        # ⛔ THE REVIEWER'S IDENTITY MUST NOT LEAK. Told the source, the agent
-        # reasons about the source -- discounting a critic it decides does not
-        # understand momentum, or deferring to one it decides is objective.
-        low = blk.lower()
-        for leak in ("codex", "openai", "gpt", "different model", "another model",
-                     "does not share your priors", "anthropic", "claude", "gemini"):
-            assert leak not in low, f"reviewer identity leaked to the agent: {leak!r}"
-    # ...but NOT to a wake (it fires on a price condition and must act) and not
-    # to premarket. The risk-review overlay never reads a brief at all.
-    for m in ("wake", "premarket"):
-        assert render_review(rev, m) == "", m
-    # no review yet is normal on a fresh deploy, not an error
-    assert render_review(None, "open") == ""
-
-    # an AFFIRM is shown too -- telling the agent only when it was wrong trains
-    # it toward the reviewer's taste rather than toward being right
-    aff = render_review({**rev, "stance": "AFFIRM"}, "open")
-    assert "AFFIRM" in aff and "It agreed with you" in aff, aff
-    assert "You must answer this" not in aff, "an affirmation is not a demand"
-
-    # and it must actually land in the brief the agent receives
-    import unittest.mock as _mock
+    # (a) AS SHIPPED: nothing reaches the agent, whatever the stance or mode.
+    assert SHOW_REVIEW_TO_AGENT is False, (
+        "SHOW_REVIEW_TO_AGENT was flipped on. That is a real decision, not a "
+        "tidy-up -- read the block above it, and name the review process in the "
+        "charter before letting a verdict reach the agent again.")
+    for st in ("SPLIT", "DISSENT", "AFFIRM", "UNPARSED"):
+        for m in ("open", "close", "wake", "premarket"):
+            assert render_review({**rev, "stance": st}, m) == "", (st, m)
     with _mock.patch.object(sys.modules[__name__], "last_review", lambda: rev), \
          _mock.patch.object(sys.modules[__name__], "_tool_names", lambda: ["mcp__x__y"]):
-        b = build_brief("open")
-        assert "INDEPENDENT REVIEW" in b, "the verdict never reached the brief"
-        assert "91% of a full position" in b, b[-800:]
-        assert "INDEPENDENT REVIEW" not in build_brief("wake")
+        for m in ("open", "close", "wake", "premarket"):
+            assert "INDEPENDENT REVIEW" not in build_brief(m), m
+            assert "91% of a full position" not in build_brief(m), m
+
+    # (b) THE RENDERER UNDERNEATH, forced on. Everything here is the contract
+    #     that must still hold on the day the flag goes back to True.
+    with _mock.patch.object(sys.modules[__name__], "SHOW_REVIEW_TO_AGENT", True):
+        for m in ("open", "close"):
+            blk = render_review(rev, m)
+            assert "SPLIT" in blk and "91% of a full position" in blk, m
+            assert "You must answer this" in blk, "a verdict the agent may ignore is decoration"
+            # ⛔ THE REVIEWER'S IDENTITY MUST NOT LEAK. Told the source, the agent
+            # reasons about the source -- discounting a critic it decides does not
+            # understand momentum, or deferring to one it decides is objective.
+            low = blk.lower()
+            for leak in ("codex", "openai", "gpt", "different model", "another model",
+                         "does not share your priors", "anthropic", "claude", "gemini"):
+                assert leak not in low, f"reviewer identity leaked to the agent: {leak!r}"
+        # ...but NOT to a wake (it fires on a price condition and must act) and not
+        # to premarket. The risk-review overlay never reads a brief at all.
+        for m in ("wake", "premarket"):
+            assert render_review(rev, m) == "", m
+        # no review yet is normal on a fresh deploy, not an error
+        assert render_review(None, "open") == ""
+
+        # an AFFIRM is shown too -- telling the agent only when it was wrong trains
+        # it toward the reviewer's taste rather than toward being right
+        aff = render_review({**rev, "stance": "AFFIRM"}, "open")
+        assert "AFFIRM" in aff and "It agreed with you" in aff, aff
+        assert "You must answer this" not in aff, "an affirmation is not a demand"
+
+        # and it lands in the brief the agent receives
+        with _mock.patch.object(sys.modules[__name__], "last_review", lambda: rev), \
+             _mock.patch.object(sys.modules[__name__], "_tool_names", lambda: ["mcp__x__y"]):
+            b = build_brief("open")
+            assert "INDEPENDENT REVIEW" in b, "the verdict never reached the brief"
+            assert "91% of a full position" in b, b[-800:]
+            assert "INDEPENDENT REVIEW" not in build_brief("wake")
 
     # _kill_group on a dead/None process is a no-op, not an exception
     _kill_group(None)
