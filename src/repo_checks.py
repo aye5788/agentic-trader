@@ -235,7 +235,9 @@ def check_cron_paths(root: pathlib.Path) -> list[str]:
 CRON_SUBSTRINGS = {
     "slow_loop":     "run_slow_loop.sh",
     "fast_loop":     "run_fast_loop.sh",
-    "risk_review":   "run_risk_review.sh",
+    # "risk_review" removed 2026-08-13 — the overlay was retired into the
+    # sessions and its health.SPECS key went with it, so a mapping here would
+    # point at a job that no longer exists.
     "ledger_backup": "backup_ledger.sh",
     "signal_panel":  "collect_signals.py",
     "newsletter":    "run_newsletter.sh",

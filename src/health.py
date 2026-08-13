@@ -110,10 +110,9 @@ SPECS = {
     # These two track their OUTPUT, not their log — see the 2026-07-30 note in the
     # module docstring. fast_loop.py rewrites order_plan.json on EVERY run by
     # design (it must never leave a stale plan for the placement agent), and
-    # risk_review.py --facts rewrites risk_review_facts.json on every run, so an
-    # unchanged mtime means the job did not get through its work.
+    # (The risk-review overlay was watched here the same way until it was retired
+    # 2026-08-13 and folded into the sessions — see deploy/crontab.template.)
     "fast_loop":     ("Fast loop (execution)",   4,  "research_store/rh/order_plan.json"),
-    "risk_review":   ("Risk review",             4,  "research_store/rh/risk_review_facts.json"),
     # 4d, not 2d: this artifact only advances during RTH, so Friday's close ->
     # Monday's 08:00 check is ~2.7d of legitimate dead air (3.7d when Monday is
     # a market holiday). 2d alarmed every Monday. Matches the other weekday-only
@@ -502,8 +501,6 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         # (output, log): the pair is what makes a blocked run visible.
         "fast_loop":     halted or (_mtime(root / "research_store" / "rh" / "order_plan.json"),
                                     _mtime(root / "logs" / "fast.log")),
-        "risk_review":   halted or (_mtime(root / "research_store" / "rh" / "risk_review_facts.json"),
-                                    _mtime(root / "logs" / "risk_review.log")),
         "monitor":       _mtime(root / "research_store" / "monitor" / "state.json"),
         "ledger_backup": _mtime(root / "logs" / "backup.log"),
         "signal_panel":  _newest_journal_event(root, "signal_panel"),
@@ -676,8 +673,8 @@ def _selftest() -> None:
 
     # a deliberately halted job is "unknown" too: not healthy, but never alerting.
     # Throwing the kill-switch is an operator decision, not a fault to nag about.
-    r = {c.key: c for c in evaluate(now, {"fast_loop": HALTED, "risk_review": HALTED})}
-    for k in ("fast_loop", "risk_review"):
+    r = {c.key: c for c in evaluate(now, {"fast_loop": HALTED})}
+    for k in ("fast_loop",):
         assert r[k].status == "unknown", r[k]
         assert not r[k].alertable, "a thrown kill-switch must not alert daily"
         assert not r[k].healthy, "halted is not a clean bill of health"
@@ -690,14 +687,13 @@ def _selftest() -> None:
     # a stale output must read STALE. Pin the sources so a future edit cannot
     # quietly point them back at a log.
     assert SPECS["fast_loop"][2] == "research_store/rh/order_plan.json", SPECS["fast_loop"]
-    assert SPECS["risk_review"][2] == "research_store/rh/risk_review_facts.json", SPECS["risk_review"]
     assert not any(s[2].startswith("logs/") for k, s in SPECS.items()
-                   if k in ("fast_loop", "risk_review")), \
+                   if k in ("fast_loop",)), \
         "a log proves the job started, not that it did its work"
-    outage = {"fast_loop": now - 3 * day, "risk_review": now - 3 * day}   # logs were fresh
+    outage = {"fast_loop": now - 3 * day}   # logs were fresh
     r = {c.key: c for c in evaluate(now, outage)}
     assert all(r[k].status == "ok" for k in outage), "3d is inside the 4d window"
-    outage = {"fast_loop": now - 5 * day, "risk_review": now - 5 * day}
+    outage = {"fast_loop": now - 5 * day}
     r = {c.key: c for c in evaluate(now, outage)}
     for k in outage:
         assert r[k].status == "stale" and r[k].alertable, r[k]
@@ -705,8 +701,7 @@ def _selftest() -> None:
     # ...but staleness alone was too slow: at the moment Aaron noticed by hand, the
     # outage was 2.4d old and a 4d window still read "ok". The PAIR is what catches
     # it after one bad run. Replay the real shape: log fresh, output two days back.
-    blocked = {"fast_loop": (now - 2 * day, now - dt.timedelta(hours=2)),
-               "risk_review": (now - 2 * day, now - dt.timedelta(hours=2))}
+    blocked = {"fast_loop": (now - 2 * day, now - dt.timedelta(hours=2))}
     r = {c.key: c for c in evaluate(now, blocked)}
     for k in blocked:
         assert r[k].status == "blocked", r[k]

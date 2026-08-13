@@ -59,12 +59,39 @@ HOME=/root
 # see _drop_unsettled_session() in scripts/fetch_prices.py. See scripts/log_equity.py.
 15 16 * * 1-5 cd /opt/agentic-trader && .venv/bin/python scripts/log_equity.py >> /opt/agentic-trader/logs/equity.log 2>&1
 
-# --- INTRADAY RISK REVIEW (headless Claude, stricter-only de-risk overlay) ---
-# Times are ET per this file's header convention (box is set to US/Eastern) —
-# no CRON_TZ needed, direct local-time entries like the other jobs.
-# 12:00 ET midday check + 15:45 ET pre-close tend, Mon–Fri.
-0 12 * * 1-5  /opt/agentic-trader/deploy/run_risk_review.sh >> /opt/agentic-trader/logs/risk_review.log 2>&1
-45 15 * * 1-5 /opt/agentic-trader/deploy/run_risk_review.sh >> /opt/agentic-trader/logs/risk_review.log 2>&1
+# --- INTRADAY RISK REVIEW — RETIRED 2026-08-13, folded into the sessions ------
+# Was: 12:00 + 15:45 ET headless Claude de-risk overlay, armed 2026-07-15.
+#
+# ⛔ DO NOT RE-ADD without re-reading this. It was not removed for cost; it was
+# SUPERSEDED, and the record is unambiguous:
+#
+#   37 runs BEFORE the session runner existed -> 3 orders intended
+#    3 runs AFTER  the session runner went live -> 0 orders intended
+#   40 runs total: 93 `watch` no-ops, 7 stop tightens, 3 trims.
+#
+# All three trims predate 2026-08-12. It has placed nothing since sessions
+# began, because the sessions do the same work with judgment: the open/close
+# sessions assess the book, re-anchor stops, and de-risk into events (measured
+# 2026-08-13 — a session exited a name into an after-close print unprompted,
+# and caught that the mechanical loop had re-bought it, which this overlay
+# would not have noticed).
+#
+# Nothing else covered by it is now uncovered: market_monitor.py watches every
+# stop and target CONTINUOUSLY through RTH, which strictly dominates a twice-
+# daily snapshot; and there is no extended-hours trading, so the last decision
+# that matters is the 15:15 close session, not a 15:45 pass 15 minutes before
+# the bell.
+#
+# Removing it also DELETES A RACE: this overlay and the close session both
+# read-modify-write monitor/overrides.json with no shared lock, and that
+# interleaving was measured DROPPING a protective stop. One writer fewer.
+#
+# scripts/risk_review.py and prompts/risk_review.md remain on disk, unwired.
+# `risk_review.py --facts` is pure Python (3s, no model) and is the only
+# producer of the earnings_soon / near_stop / giveback / vol_expansion /
+# ma_break flags — deliberately NOT kept on cron, because nothing consumes them
+# (src/controls.py, their only reader, is not wired to run live). If controls.py
+# is ever wired, add the facts job back DELIBERATELY rather than assuming.
 
 # --- AGENT SESSIONS (the inversion) - the agent decides, LIVE 2026-08-12 ---
 # Supervision (lock, brief, process group, integrity tripwire, verdict) lives in
@@ -80,10 +107,13 @@ HOME=/root
 #  10:35 - run_fast_loop.sh starts 10:00 and finishes ~10:04 (logs/fast.log).
 #          Running inside that window puts two Claude processes in
 #          research_store at once.
-#  15:15 - must land BEFORE risk_review at 15:45. Both read-modify-write
-#          monitor/overrides.json with no shared lock, and the interleaving was
-#          measured DROPPING a risk_review protective stop. close times out at
-#          1200s, so this ends by 15:35 with ten minutes of margin.
+#  15:15 - the last decision point that matters: there is no extended-hours
+#          trading, so whatever is held at 16:00 goes through the overnight gap.
+#          (Until 2026-08-13 this also had to land before risk_review at 15:45,
+#          because both read-modify-write monitor/overrides.json with no shared
+#          lock and the interleaving was measured DROPPING a protective stop.
+#          That overlay is retired, so the race is gone — but keep 15:15: it
+#          leaves the session its full 1200s budget before the close.)
 #          Do NOT "tidy" these onto the same minute.
 35 10 * * 1-5 /opt/agentic-trader/deploy/run_session.sh open >> /opt/agentic-trader/logs/session.log 2>&1
 15 15 * * 1-5 /opt/agentic-trader/deploy/run_session.sh close >> /opt/agentic-trader/logs/session.log 2>&1

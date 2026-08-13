@@ -72,6 +72,29 @@ class Binding:
 
 # The registry. Adding a guard to the system means adding it HERE — that is the
 # point: an unregistered control is invisible, and invisible is how they die.
+#
+# ⚠️ 2026-08-13 — FIVE OF THESE NO LONGER HAVE A LIVE PRODUCER, and saying so
+# here is the whole purpose of this file. The intraday risk-review overlay was
+# retired into the agent sessions (deploy/crontab.template explains why: 0 orders
+# in the 3 runs after sessions went live, 93 `watch` no-ops in 40 runs). It was
+# the ONLY thing computing `risk_review facts flags`, so:
+#
+#   earnings_soon, near_stop, giveback, vol_expansion, ma_break
+#       -> their producer, `risk_review.py --facts`, is no longer scheduled.
+#   risk_review_order
+#       -> obsolete outright; there is no risk-review agent to place an order.
+#
+# These duties did NOT vanish — the open/close sessions assess events, stops and
+# giveback with judgment, and market_monitor watches every stop CONTINUOUSLY
+# through RTH. What vanished is the flag-shaped EVIDENCE that they were assessed.
+# That is a measurement gap, not a coverage gap, and it is left declared rather
+# than deleted so the next person to wire this file sees it.
+#
+# ⛔ Nothing here fires today anyway: main() raises "live roll-call not wired
+# yet". This registry is a declaration, not a live detector — which is why
+# retiring the overlay broke no runtime behaviour. If you wire gather(), decide
+# THEN whether these five are re-pointed at session evidence, re-fed by putting
+# `risk_review.py --facts` back on cron (pure Python, 3s, no model), or retired.
 REGISTRY = {
     "stop_fired":     Control("stop_fired", "Stop-loss exits", 30,
                               "journal exit_signal (reason=stop)"),
