@@ -190,10 +190,25 @@ and neither `CLAUDE.md` nor `docs/` mentioned `review_session.py`,
 that is auto-loaded as operating context for every agent working here described
 a system without its reviewer in it. Added to the repo layout and setup notes.
 
-Standing gap, unchanged: nothing checks that a review actually happened.
-`src/health.py` asks "did each job leave evidence it ran", and a review is now
-the obvious next artifact for it to watch — deliberately not added today rather
-than layering a second guard over a root cause already fixed.
+**Closed the same day: nothing checked that a review actually happened.** Now
+`health.SPECS["review"]` watches the `codex_review` journal event on the same 4-day
+window as the other weekday-only jobs. The event is the right artifact precisely
+because a failed review journals *nothing* after the fix above — a reviewer that
+cannot launch goes silent there, which is the signal. (Not the `reviews/`
+directory mtime: that moves even when the run failed, which is how this stayed
+invisible in the first place.)
+
+Two things fell out of wiring it, both of which were themselves defects:
+
+- `_newest_journal_event()` read only `at`/`as_of`. Every session-era event —
+  `agent_decision`, `codex_review`, `risk_review` — carries `ts` instead, so the
+  probe would have returned `None` forever and reported a perfectly healthy
+  reviewer as one that had never run: a liveness check that is itself dead. Now
+  falls back to `ts`, pinned by a selftest.
+- `repo_checks.py` refused the new key until it was mapped to a cron line —
+  working exactly as intended. The review has no cron line of its own (it runs
+  *inside* `run_session.sh`), so the session's arming is its arming: comment out
+  the session and this check correctly reports the reviewer unarmed too.
 
 
 ## 2026-08-12 — the agent sessions go live, and six defects found by review

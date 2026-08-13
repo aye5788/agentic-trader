@@ -121,6 +121,19 @@ SPECS = {
     "monitor":       ("Intraday monitor",        4,  "research_store/monitor/state.json"),
     "ledger_backup": ("Ledger backup",           3,  "logs/backup.log"),
     "signal_panel":  ("moomoo signal panel",    10,  "signal_panel journal event"),
+    # 4d for the same weekday-only reason as monitor/fast_loop above: the last
+    # review of the week lands ~15:30 ET Friday, so Monday 08:00 is ~2.7d of
+    # legitimate dead air (3.7d when Monday is a holiday).
+    #
+    # ⚠️ THIS IS THE CHECK THAT WAS MISSING ON 2026-08-13, when the reviewer was
+    # found never to have run under cron -- `codex` was off cron's PATH, the
+    # review died on every scheduled run, and nothing noticed because
+    # run_session.sh runs it behind `|| true` so it can never fail a trading run.
+    # The event is the right artifact precisely BECAUSE a failed review now
+    # journals nothing at all: a reviewer that cannot launch goes silent here,
+    # which is the whole point. Do not switch this to the reviews/ directory
+    # mtime -- that moves even when the run failed.
+    "review":        ("Independent review",      4,  "codex_review journal event"),
     "newsletter":    ("Investor letter",        10,  "research_store/newsletters/"),
     "adaptive_tune": ("Adaptive tuner (CI)",    10,  "GitHub Actions run"),
     # Design spec 2026-08-09 §8 invariant: "every position has an agent-set
@@ -308,7 +321,14 @@ def _newest_journal_event(root: pathlib.Path, event: str) -> dt.datetime | None:
                 continue
             if d.get("event") != event:
                 continue
-            raw = d.get("at") or d.get("as_of")
+            # `ts` LAST, and it is not optional: the journal has three time-field
+            # conventions (outcome uses `at`, product uses `as_of`, and every
+            # session-era event -- agent_decision, codex_review, risk_review --
+            # uses `ts`). Reading only the first two silently returns None for a
+            # whole class of events, which reads as "this job has never run"
+            # rather than as a probe that cannot see it. Order matters only for
+            # `execution`, which carries both; `as_of` stays authoritative there.
+            raw = d.get("at") or d.get("as_of") or d.get("ts")
             if not raw:
                 continue
             try:
@@ -413,6 +433,7 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "monitor":       _mtime(root / "research_store" / "monitor" / "state.json"),
         "ledger_backup": _mtime(root / "logs" / "backup.log"),
         "signal_panel":  _newest_journal_event(root, "signal_panel"),
+        "review":        _newest_journal_event(root, "codex_review"),
         "newsletter":    _newest_in_dir(root / "research_store" / "newsletters", "*.sent"),
         "adaptive_tune": _last_actions_run() if use_network else SKIPPED,
         "unprotected_positions": _unprotected_probe(root),
@@ -463,6 +484,40 @@ def _selftest() -> None:
     # other days are not this day's problem
     assert unrecorded_fills(j, "2026-08-11") == []
     assert unrecorded_fills([], "2026-08-12") == []
+
+    # ---- the independent review is a scheduled job like any other -----------
+    # 2026-08-13: it had never once run under cron and nothing noticed, because
+    # run_session.sh runs it behind `|| true`. It is now watched.
+    r = {c.key: c for c in evaluate(now, {"review": now - day})}
+    assert r["review"].status == "ok", r["review"]
+    r = {c.key: c for c in evaluate(now, {"review": now - 5 * day})}
+    assert r["review"].status == "stale", r["review"]
+    # a Friday-close review read on Monday morning is NOT stale
+    r = {c.key: c for c in evaluate(now, {"review": now - 3 * day})}
+    assert r["review"].status == "ok", r["review"]
+    # and a reviewer that has never run at all is reported, not assumed absent
+    r = {c.key: c for c in evaluate(now, {})}
+    assert r["review"].status == "never", r["review"]
+
+    # ⛔ THE PROBE MUST SEE `ts`. codex_review (like every session-era event)
+    # carries only `ts`; _newest_journal_event read `at`/`as_of` alone, so
+    # reusing it would have returned None forever and reported a HEALTHY
+    # reviewer as one that had never run -- a liveness check that is itself dead.
+    import tempfile as _tf, os as _os
+    with _tf.TemporaryDirectory() as _d:
+        _root = pathlib.Path(_d)
+        (_root / "research_store").mkdir()
+        (_root / "research_store" / "journal.jsonl").write_text(
+            json.dumps({"event": "codex_review", "ts": "2026-08-13T19:24:13+00:00",
+                        "stance": "SPLIT"}) + "\n"
+            + json.dumps({"event": "signal_panel", "as_of": "2026-08-10T20:15:00+00:00"}) + "\n")
+        got = _newest_journal_event(_root, "codex_review")
+        assert got is not None, "the review probe cannot see a `ts`-stamped event"
+        assert got.isoformat() == "2026-08-13T19:24:13+00:00", got
+        # the existing `as_of` convention still resolves -- `ts` is a fallback,
+        # not a replacement
+        sp = _newest_journal_event(_root, "signal_panel")
+        assert sp is not None and sp.isoformat() == "2026-08-10T20:15:00+00:00", sp
 
     # never seen at all -> "never" (the signal-panel case that motivated this)
     r = {c.key: c for c in evaluate(now, {})}

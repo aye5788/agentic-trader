@@ -239,6 +239,12 @@ CRON_SUBSTRINGS = {
     "ledger_backup": "backup_ledger.sh",
     "signal_panel":  "collect_signals.py",
     "newsletter":    "run_newsletter.sh",
+    # The review has no cron line of its own — it runs INSIDE run_session.sh,
+    # sequentially after the session (never beside it; two model runs at once
+    # took the droplet down 2026-08-12). So the session's arming is its arming:
+    # comment out the session lines and the reviewer stops too, which is exactly
+    # what this check should then report.
+    "review":        "run_session.sh",
 }
 
 # health.SPECS keys that are legitimately NOT cron lines:
@@ -1436,6 +1442,8 @@ HOME=/root
 0 12 * * 1-5 /opt/agentic-trader/deploy/run_risk_review.sh >> logs/risk_review.log 2>&1
 0 21 * * 0   /opt/agentic-trader/deploy/run_newsletter.sh >> logs/newsletter.log 2>&1
 30 22 * * *  cd /opt/agentic-trader && deploy/backup_ledger.sh >> logs/backup.log 2>&1
+35 10 * * 1-5 /opt/agentic-trader/deploy/run_session.sh open >> logs/session.log 2>&1
+15 15 * * 1-5 /opt/agentic-trader/deploy/run_session.sh close >> logs/session.log 2>&1
 """
     with tempfile.TemporaryDirectory() as td:
         root = pathlib.Path(td)
