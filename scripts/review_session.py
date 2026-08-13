@@ -495,7 +495,12 @@ trailing"""
 
     # ...and the unit must actually carry them, so a deploy that forgets the
     # unit fails HERE and not at 15:25 on a live box.
-    _unit = Path("/etc/systemd/system/agentic-review.service")
+    #
+    # Reads the REPO copy, which is the source of truth and is what code review
+    # sees. Whether the box is running that copy is a separate question, checked
+    # by repo_checks.check_units_match_installed — deliberately not conflated:
+    # this asserts the config is CORRECT, that one asserts it is DEPLOYED.
+    _unit = REPO / "deploy" / "agentic-review.service"
     if _unit.exists():
         _u = _unit.read_text()
         for _need in ("MemoryHigh=", "MemoryMax=", "RuntimeMaxSec=",

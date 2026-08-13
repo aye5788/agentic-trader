@@ -140,6 +140,28 @@ A read-only monitor of the live account. **Live at `dash.ethobs.uk`.** Served by
 Flask on the droplet (127.0.0.1:8787 only), fronted by a Cloudflare Tunnel, and
 **password-gated by the app itself** (not Cloudflare Access — see the note).
 
+### systemd units live in `deploy/` — installing them is a MANUAL step
+
+Every `deploy/*.service` is the source of truth; `/etc/systemd/system/` is what
+actually runs. A `git pull` does **not** deploy a unit. Since 2026-08-13 these
+files carry live config — the reviewer's memory and run-time limits moved out of
+`review_session.py` into `deploy/agentic-review.service` — so an uncopied edit
+means the box enforces yesterday's numbers while the repo shows today's.
+
+```bash
+cp deploy/<unit>.service /etc/systemd/system/ && systemctl daemon-reload
+```
+
+`src/repo_checks.py` (`check_units_match_installed`) compares every repo unit
+against its installed copy and fails if they differ or if one was never
+installed. It compares file CONTENT only: it cannot see a `systemctl edit`
+drop-in, nor whether `daemon-reload` was actually run. `systemctl show <unit>`
+is the only authority on the values in force.
+
+`agentic-review.service` is a `oneshot` started on demand by
+`deploy/run_session.sh` — it is deliberately **not** `enable`d, because it must
+run after a session, never on a timer of its own.
+
 ```bash
 # 1. dashboard service (Flask, binds 127.0.0.1:8787 only)
 .venv/bin/pip install -r requirements.txt          # picks up flask

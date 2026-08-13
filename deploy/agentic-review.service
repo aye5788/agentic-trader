@@ -1,0 +1,47 @@
+[Unit]
+Description=agentic-trader independent session review (different model)
+Documentation=file:/opt/agentic-trader/docs/OPSLOG.md
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/agentic-trader
+ExecStart=/opt/agentic-trader/.venv/bin/python scripts/review_session.py
+
+# PATH must be declared: /root/.local/bin holds the `codex` binary and is not on
+# a default service PATH — the same gap that silently killed every cron review
+# until 2026-08-13.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
+Environment=HOME=/root
+
+# --- resources: DECLARED HERE, not assembled as a command line in Python ------
+# This replaces review_session.py's _LIMITS list, which built a `systemd-run`
+# invocation in Python strings. Same enforcement, one place, and visible to
+# `systemctl show` instead of buried in a script.
+#
+# MemoryHigh throttles (forces reclaim, never kills). MemoryMax kills. The
+# reviewer is the lowest-priority process on this box, so it should be made SLOW
+# under pressure, not killed: on 2026-08-13 a hard 700M cap OOM-killed it on
+# every single run and the failure was invisible for a day. High is the working
+# control; Max is a catastrophe backstop, set well above anything observed.
+MemoryAccounting=yes
+MemoryHigh=900M
+MemoryMax=1400M
+MemorySwapMax=300M
+CPUAccounting=yes
+CPUWeight=20
+IOWeight=20
+TasksMax=200
+Nice=19
+IOSchedulingClass=idle
+
+# A hung reviewer must not run forever. review_session.py has its own 1200s
+# limit on the model call; this is the outer bound if the wrapper itself wedges,
+# and must stay ABOVE it or it would pre-empt the inner timeout and turn an
+# orderly "reviewer timed out" into an abrupt kill.
+#   observed run 2026-08-13: 8m18s   inner limit: 20m   this: 25m
+RuntimeMaxSec=1500
+TimeoutStartSec=1500
+
+# systemd refuses to start a unit that is already running, so this cannot
+# overlap itself. That replaces hand-rolled lock code for this job.

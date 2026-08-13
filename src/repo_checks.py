@@ -1264,9 +1264,56 @@ def check_settings_no_exec_wildcard(root: pathlib.Path) -> list[str]:
 
 # ---------------------------------------------------------------- driver
 
+def check_units_match_installed(root: pathlib.Path,
+                                installed_dir: pathlib.Path | None = None) -> list[str]:
+    """Every deploy/*.service must match the copy running on the box.
+
+    WHY THIS EXISTS. Units are installed by hand (`cp deploy/x.service
+    /etc/systemd/system/`, docs/DEPLOY.md), and nothing has ever verified the
+    copy afterwards. That is the same shape as the crontab: the repo is
+    documentation, the installed file is what actually runs, and "I edited it"
+    is not "it is live". check_scheduled_jobs_armed catches that for cron; this
+    catches it for units.
+
+    It matters more since 2026-08-13, when the reviewer's memory and run-time
+    limits MOVED from a Python list into a unit file. Those limits are now
+    load-bearing config that a plain `git pull` does not deploy — edit
+    deploy/agentic-review.service, forget the cp, and the box keeps enforcing
+    yesterday's numbers while the repo shows today's.
+
+    Scope, stated honestly: this compares FILE CONTENT only. It cannot see a
+    `systemctl edit` drop-in overriding the unit, nor whether daemon-reload was
+    run after the copy. Both would show as "in sync" here while behaving
+    differently — `systemctl show <unit>` is the only authority on live values.
+
+    Skipped entirely when /etc/systemd/system is unreadable (CI, containers),
+    because absence of the directory is not evidence of drift.
+    """
+    out: list[str] = []
+    installed_dir = installed_dir or pathlib.Path("/etc/systemd/system")
+    if not installed_dir.is_dir():
+        return out
+    for src in sorted((root / "deploy").glob("*.service")):
+        live = installed_dir / src.name
+        if not live.exists():
+            out.append(f"deploy/{src.name} is not installed at {live} — the repo "
+                       f"defines a unit the box has never seen (cp it and "
+                       f"`systemctl daemon-reload`)")
+            continue
+        try:
+            if src.read_text() != live.read_text():
+                out.append(f"deploy/{src.name} DIFFERS from the installed {live} — "
+                           f"the box is running different config from the repo; "
+                           f"cp it and `systemctl daemon-reload`")
+        except OSError:
+            continue
+    return out
+
+
 CHECKS = (
     check_cron_paths,
     check_scheduled_jobs_armed,
+    check_units_match_installed,
     check_workflow_failure_exits,
     check_workflow_swallowed_failures,
     check_workflow_toplevel_indent,
@@ -1438,6 +1485,32 @@ HOME=/root
         root = pathlib.Path(td)
         bad = check_cron_paths(root)
         assert len(bad) == 1 and "missing" in bad[0], bad
+
+    # -------------------- check_units_match_installed -------------------
+    # Units are installed by hand, so the repo copy and the running copy can
+    # differ silently — and since 2026-08-13 those files carry the reviewer's
+    # memory and run-time limits, which is live config, not documentation.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td) / "repo"
+        inst = pathlib.Path(td) / "etc"
+        inst.mkdir()
+        _write(root, "deploy/agentic-x.service", "[Service]\nMemoryMax=1200M\n")
+
+        # never installed -> reported, not silently passed
+        bad = check_units_match_installed(root, inst)
+        assert len(bad) == 1 and "not installed" in bad[0], bad
+
+        # installed and identical -> clean
+        (inst / "agentic-x.service").write_text("[Service]\nMemoryMax=1200M\n")
+        assert check_units_match_installed(root, inst) == []
+
+        # edited in the repo, never copied -> the failure this exists for
+        _write(root, "deploy/agentic-x.service", "[Service]\nMemoryMax=1400M\n")
+        bad = check_units_match_installed(root, inst)
+        assert len(bad) == 1 and "DIFFERS" in bad[0], bad
+
+        # no installed dir at all (CI, container) -> skip, never a false alarm
+        assert check_units_match_installed(root, pathlib.Path(td) / "nope") == []
 
     # -------------------- check 2: check_scheduled_jobs_armed ----------
     clean_cron = """\
