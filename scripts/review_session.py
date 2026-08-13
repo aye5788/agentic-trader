@@ -82,8 +82,32 @@ TIMEOUT_S = 600
 #
 # systemd-run gives a hard MemoryMax the kernel enforces (the process is killed,
 # not the box), CPUWeight puts it behind everything else, and nice reinforces it.
+# ⚠️ 700M WAS TOO SMALL AND SILENTLY KILLED EVERY REVIEW. Raised to 1200M/300M
+# on 2026-08-13 after the first review to survive the PATH fix was SIGKILLed:
+#
+#   memory: usage 716800kB, limit 716800kB, failcnt 31715
+#   swap:   usage 204800kB, limit 204800kB, failcnt   190
+#   oom-kill:constraint=CONSTRAINT_MEMCG ... task=codex
+#
+# CONSTRAINT_MEMCG, not CONSTRAINT_NONE: it hit ITS OWN ceiling with ~1GB free on
+# the box. A cgroup cap is private and absolute — it does not widen when the
+# machine is idle, so this would have died identically on a quiet droplet. Both
+# ceilings were pinned at 100% and it was still asking (31,715 failed charges),
+# so the job needs more than the 900M total it was allowed.
+#
+# Two things make it hungrier than it looks: the cap covers CHILDREN (every
+# agent_view.py call spawns a fresh pandas-importing Python inside this cgroup —
+# the kill log shows a python child dying first), and cgroup memory counts PAGE
+# CACHE, so reading the parquet price panel charges against the limit.
+#
+# ⛔ THE CAP ITSELF IS NOT NEGOTIABLE, only its size. Uncapped, this took the
+# whole droplet down on 2026-08-12 during market hours with the live stop watcher
+# on it. The cap is what turns "the box dies" into "the review dies". Sizing:
+# 1200M+300M on a 1963M box leaves ~500M for the monitor, OpenD, dashboard and
+# cloudflared, and the review runs strictly AFTER session.py has exited, so it
+# never overlaps another model run.
 _LIMITS = ["systemd-run", "--scope", "--quiet",
-           "--property=MemoryMax=700M", "--property=MemorySwapMax=200M",
+           "--property=MemoryMax=1200M", "--property=MemorySwapMax=300M",
            "--property=CPUWeight=20", "--property=TasksMax=200",
            "nice", "-n", "19", "ionice", "-c", "3"]
 
@@ -207,7 +231,7 @@ def _charter() -> str:
 
 
 def busy_now() -> str | None:
-    """Is this a bad moment to spend 700MB and a CPU? -> reason, or None.
+    """Is this a bad moment to spend ~1.2GB and a CPU? -> reason, or None.
 
     The reviewer is the lowest-priority process on the box. It must not run
     while a trading session holds the lock — two model runs at once is what took
@@ -449,6 +473,17 @@ trailing"""
     assert any("MemoryMax" in a for a in CODEX), CODEX
     assert any("CPUWeight" in a for a in CODEX), CODEX
     assert "nice" in CODEX, CODEX
+    # ...but the cap must also be BIG ENOUGH TO FINISH. 700M killed every single
+    # review (CONSTRAINT_MEMCG, both RAM and swap ceilings pinned, 31,715 failed
+    # charges). A cap that always kills is indistinguishable from no reviewer.
+    # Floor, not a target -- raise deliberately, never shrink below this by
+    # accident. The box is ~1963M, so keep headroom for the stop watcher too.
+    _mem = [a for a in CODEX if a.startswith("--property=MemoryMax=")][0]
+    _mb = int(_mem.split("=")[-1].rstrip("M"))
+    assert 1000 <= _mb <= 1500, (
+        f"MemoryMax={_mb}M. Below ~1000M the reviewer is OOM-killed mid-run "
+        f"(measured 2026-08-13); above ~1500M it crowds the monitor on a 1963M "
+        f"box. Change this deliberately or not at all.")
 
     # busy_now() must refuse rather than compete
     assert busy_now.__doc__ and "lowest-priority" in busy_now.__doc__

@@ -9,6 +9,57 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-13 — the reviewer's memory cap was killing every run; it stays on the droplet
+
+The first review to survive the PATH fix was **SIGKILLed**, and the new
+returncode check caught it as a failure rather than recording a fake verdict:
+
+```
+memory: usage 716800kB, limit 716800kB, failcnt 31715
+swap:   usage 204800kB, limit 204800kB, failcnt   190
+oom-kill:constraint=CONSTRAINT_MEMCG ... task=codex
+```
+
+**`CONSTRAINT_MEMCG`, not `CONSTRAINT_NONE`** — it hit its *own* cgroup ceiling
+with ~1 GB free on the box. A cgroup cap is private and absolute: it does not
+widen when the machine is idle, so this would have died identically on a quiet
+droplet. Both ceilings were pinned at 100% and it was still asking (31,715
+failed charges), so the job needs more than the 900 MB it was allowed.
+
+Two reasons it is hungrier than it looks: the cap covers **children** (every
+`agent_view.py` call spawns a fresh pandas-importing Python inside the same
+cgroup — the kill log shows a python child dying first), and cgroup memory
+counts **page cache**, so reading the parquet price panel charges against it.
+
+Raised to **1200M / 300M swap**, with a selftest that now enforces a *floor* as
+well as the cap's existence — a cap that always kills is indistinguishable from
+having no reviewer. The cap itself is not negotiable, only its size: uncapped,
+this took the whole droplet down on 2026-08-12 during market hours. The cap is
+what turns "the box dies" into "the review dies".
+
+**Why NOT GitHub Actions** — recorded so it is not re-proposed:
+
+- **Minutes are fine.** Measured 54 min/month across 67 runs (claude auto-fix
+  42, validate 6, adaptive-tune 4). Adding ~44 review runs/month at ≤600s caps
+  the projection at ~275–495 min against a **2,000 min Free-tier allowance for
+  private repos** — 14–25%. Both repos are private, so minutes are billed.
+- **Auth is the blocker, not minutes.** `codex` here runs on **ChatGPT
+  subscription OAuth** (`auth_mode: chatgpt`; `OPENAI_API_KEY` is null; rotating
+  id/access/refresh tokens). On Actions it would need an API key — **per-token
+  billing, a new metered cost on top of a subscription already paid** — and
+  transplanting rotating OAuth tokens into a repo secret breaks on next refresh.
+  Exactly the trap CLAUDE.md documents for `ANTHROPIC_API_KEY`, other vendor.
+
+So the reviewer stays on the droplet. The earlier off-box proposal was withdrawn
+on this evidence, not on preference.
+
+⚠️ **The cap raise is not yet proven live.** A manual test was deliberately not
+run: with an interactive session resident (~510 MB of a 1963 MB box) only 976 MB
+was available, and firing a 1200 MB-capped reviewer into that during RTH with the
+stop watcher live is the 2026-08-12 shape. Unattended headroom is ~1.5 GB. The
+first close-session review is the real proof.
+
+
 ## 2026-08-13 — the reviewer's verdict is disconnected from the agent (OPEN question)
 
 Switched off the same day the reviewer was fixed, and for a better reason than
