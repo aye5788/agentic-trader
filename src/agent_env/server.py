@@ -1358,7 +1358,20 @@ def _selftest() -> None:
                 out = str(tool(limit=50)).lower()
             except Exception:                       # noqa: BLE001
                 continue
-            for leak in ("codex", "openai", "gpt-", "reviewer"):
+            # ⛔ IDENTITY WORDS ONLY. The hazard is the agent learning WHO
+            # reviewed it -- told the source, it reasons about the source rather
+            # than the argument. That the agent knows a review EXISTS is not the
+            # hazard, and cannot be prevented anyway: on 2026-08-13 this tripped
+            # on the agent's OWN prose ("the reviewer argued for halving on
+            # 08-12"), written into its decision record while verdicts were
+            # still being shown to it. research_log replays the agent's past
+            # decisions, so its own words come back. Stripping them would mean
+            # censoring the agent's record to keep a test green -- which buys
+            # nothing, and costs the agent the reasoning it wrote down.
+            #
+            # A generic word left in this list makes the check fire on something
+            # unpreventable, and a check that is permanently red catches nothing.
+            for leak in ("codex", "openai", "gpt-"):
                 assert leak not in out, (
                     f"{tool.__name__} leaks the reviewer's identity to the agent "
                     f"({leak!r}) -- see the comment above; strip the field or "
