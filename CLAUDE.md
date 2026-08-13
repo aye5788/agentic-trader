@@ -186,6 +186,38 @@ scripts/session.py      THE SESSION RUNNER — the inversion's entry point. LIVE
                         may have ALREADY PLACED ORDERS.
                         ⚠️ Unlike the legacy loops, a session is NOT handed a
                         procedure — it gets prompts/charter.md and decides.
+scripts/review_session.py
+                        THE INDEPENDENT REVIEW — a DIFFERENT model (Codex)
+                        judges what the session just did. Runs SEQUENTIALLY
+                        after session.py in deploy/run_session.sh, never beside
+                        it (two headless model runs at once took the droplet
+                        down 2026-08-12) and never during RTH; capped by
+                        systemd-run MemoryMax=700M + nice/ionice, because a
+                        review is the LEAST important process on this box — it
+                        judges work that already happened and must never starve
+                        the stop watcher. It is DATA-ONLY: it cannot place,
+                        cancel, set a level or record a decision. Its verdict is
+                        journalled (`codex_review`), pushed on DISSENT/SPLIT,
+                        and injected ANONYMOUSLY into the next open/close brief,
+                        which must answer it. NOT a veto — no second model sits
+                        on the critical path of an order.
+                        ⚠️ NEEDS THE `codex` BINARY (/root/.local/bin) — see
+                        Setup. ⛔ Parse the LAST ===VERDICT=== block, never the
+                        first: our own prompt echoes the template back. A
+                        non-zero exit with no block = the reviewer NEVER RAN =
+                        a failure, NOT a stance — it journals nothing and leaves
+                        the last real verdict standing (OPSLOG 2026-08-13).
+scripts/score_reviews.py
+                        Scores BOTH the agent and its reviewer against the tape
+                        `horizon` days later — pure pandas, no model, neither
+                        party grades itself. This is what stops the reviewer
+                        being decoration: a verdict nobody prices is just a
+                        second opinion. `contested` (only decisions the reviewer
+                        disputed) is the column that matters. -> reviews/
+                        scorecard.json.
+prompts/review.md       The reviewer's procedure. Phase 1 = form its OWN view
+                        before reading the agent's reasoning (which is handed
+                        over BY PATH, never inlined, so it cannot anchor).
 prompts/charter.md      THE SESSION CHARTER — rendered from config by
                         src/charter.py (mandate.toml + strategy.toml + the live
                         MCP tool list), never hand-copied. A literal threshold in
@@ -371,3 +403,13 @@ Copy `.env.example` → `.env` and fill in credentials. Keys:
   fine-grained PAT with *read* on the `agentic-trader-ledger` mirror).
 Market data needs no key: moomoo authenticates via OpenD. There is no longer any
 weekly credential step — that was Schwab's, removed 2026-07-29.
+
+- **`codex`** (the independent reviewer, `scripts/review_session.py`) is a
+  BINARY dependency, not a Python one: it lives in **`/root/.local/bin`** and
+  authenticates through its own `/root/.codex/auth.json` (no `.env` key). That
+  dir is NOT on a default cron PATH — it is appended explicitly in
+  `deploy/crontab.template`, and its absence silently killed every cron review
+  until 2026-08-13 while interactive runs all passed.
+  ⚠️ **Check any new binary dependency the way cron sees it**, never with
+  `which` in your own shell — a login shell's PATH is not cron's:
+  `env -i PATH="$(crontab -l | grep '^PATH=' | cut -d= -f2-)" command -v <bin>`

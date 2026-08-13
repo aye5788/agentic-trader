@@ -265,6 +265,37 @@ def run(dry: bool = False, force: bool = False) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     verdict = parse_verdict(text)
+
+    # ⛔ A REVIEWER THAT NEVER SPOKE IS NOT A VERDICT OF "UNPARSED".
+    # proc.returncode went unread until 2026-08-13, and the two failures it
+    # conflates are not the same event:
+    #   - the reviewer RAN and its prose lacked the block  -> UNPARSED, a real
+    #     (if useless) opinion, worth journalling and scoring against.
+    #   - the reviewer NEVER LAUNCHED (binary off cron's PATH, MemoryMax kill,
+    #     sandbox refusal) -> there is no opinion at all.
+    # Recorded identically, the second one is INVISIBLE: it writes a codex_review
+    # event, overwrites latest.json, and hands score_reviews.py a day's decisions
+    # marked "reviewed, unscoreable" — a scorecard that reports the reviewer
+    # examined work it never saw. Measured 2026-08-12: the first and ONLY cron
+    # review recorded 8 such decisions while `codex` was not on cron's PATH.
+    # Exit status is the general signal here — it catches the missing binary, an
+    # OOM kill and a crash alike, so this stays ONE check rather than a preflight
+    # per failure mode.
+    if verdict["stance"] == "UNPARSED" and proc.returncode != 0:
+        (OUT / f"{day}-review.txt").write_text(text)
+        err = (f"the reviewer never produced a verdict: exit {proc.returncode}. "
+               f"Last output: {(text or '').strip()[-300:] or '(nothing)'}")
+        # Nothing else pages on this. run_session.sh runs this behind `|| true`
+        # so a dead reviewer can never fail a trading run — which is right, and
+        # is exactly why the silence has to be broken HERE. A reviewer that has
+        # been dead for weeks is the failure this system exists to not have.
+        try:
+            import notify                          # noqa: PLC0415
+            notify.push("Independent review did not run", err, tags="warning")
+        except Exception:           # noqa: BLE001
+            pass
+        return {"ok": False, "error": err, "returncode": proc.returncode}
+
     (OUT / f"{day}-review.txt").write_text(text)
     (OUT / "latest.json").write_text(json.dumps(
         {"day": day, "reviewed_decisions": len(decisions), **verdict}, indent=2))
@@ -391,8 +422,55 @@ trailing"""
     # busy_now() must refuse rather than compete
     assert busy_now.__doc__ and "lowest-priority" in busy_now.__doc__
 
+    # ⛔ "THE REVIEWER NEVER RAN" IS NOT A VERDICT. Exit status went unread
+    # until 2026-08-13, so a reviewer that never launched (codex off cron's
+    # PATH) was recorded as a UNPARSED *opinion*: journalled, latest.json
+    # overwritten, and a day of decisions handed to the scorecard as "reviewed".
+    # These three cases must stay distinguishable.
+    import unittest.mock as _mock                  # noqa: PLC0415
+    import notify as _notify                       # noqa: PLC0415
+
+    class _P:
+        def __init__(self, rc): self.returncode = rc
+
+    def _run_with(rc, out, tmp):
+        """run() against a fake reviewer that exits `rc` and prints `out`."""
+        with _mock.patch.object(sys.modules[__name__], "OUT", tmp), \
+             _mock.patch.object(sys.modules[__name__], "session_decisions",
+                                lambda *a, **k: [{"symbol": "MU", "action": "hold"}]), \
+             _mock.patch.object(_notify, "push", lambda *a, **k: None), \
+             _mock.patch.object(subprocess, "run",
+                                lambda *a, **k: (tmp.joinpath("live.log")
+                                                 .write_text(out), _P(rc))[1]):
+            return run(force=True)
+
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        # 1. never launched -> a FAILURE, not a stance. Nothing is journalled.
+        r = _run_with(127, "ionice: failed to execute codex: No such file or "
+                           "directory\n", tmp)
+        assert r["ok"] is False, r
+        assert r["returncode"] == 127, r
+        assert "never produced a verdict" in r["error"], r
+        assert "codex" in r["error"], "the cause must survive into the error"
+        assert "stance" not in r, f"a dead reviewer must not report a stance: {r}"
+        assert not (tmp / "latest.json").exists(), \
+            "a reviewer that never ran must not overwrite the last real verdict"
+
+        # 2. exited non-zero but DID speak -> the verdict stands. The opinion is
+        #    what matters; a reviewer may say its piece and still exit badly.
+        r = _run_with(1, "===VERDICT===\nSTANCE: SPLIT\nHEADLINE: Idle cash.\n"
+                         "===END===", tmp)
+        assert r["ok"] is True and r["stance"] == "SPLIT", r
+
+        # 3. exited CLEAN but rambled -> a real (useless) opinion. Still UNPARSED,
+        #    still recorded — that is the reviewer's failure, not the plumbing's.
+        r = _run_with(0, "I have thoughts but no block.", tmp)
+        assert r["ok"] is True and r["stance"] == "UNPARSED", r
+
     print("review_session: OK -- verdict parsed, malformed never guessed at, "
-          "decisions filtered to today, reasoning passed by path not inlined")
+          "decisions filtered to today, reasoning passed by path not inlined, "
+          "a reviewer that never launched is a failure and not a stance")
 
 
 if __name__ == "__main__":

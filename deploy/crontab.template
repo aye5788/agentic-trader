@@ -15,7 +15,16 @@
 
 # Cron runs with a bare PATH; give it node/npm (claude), python, git, coreutils.
 # `which claude` on the box will confirm the right dir if claude isn't found.
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+#
+# ⚠️ /root/.local/bin IS LOAD-BEARING — that is where `codex`, the independent
+# reviewer, lives. It was missing here until 2026-08-13, so every INTERACTIVE
+# test of the reviewer passed (a login shell has that dir) and the first and only
+# CRON run failed with "ionice: failed to execute codex: No such file or
+# directory". `claude` survived the same gap purely by accident of living in
+# /usr/bin. Anything installed per-user (pipx/uv/npm --prefix ~/.local) needs
+# this dir; verify a new dependency with `env -i PATH=<this> command -v <bin>`,
+# NOT with `which` in your own shell — your shell is not what cron gets.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
 # Auth: Claude uses the interactive login stored in /root/.claude.json (from
 # `claude` + `/mcp`). No CLAUDE_CODE_OAUTH_TOKEN needed — do NOT set a bogus one.
 HOME=/root

@@ -9,6 +9,72 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-13 — the independent reviewer had never once run under cron
+
+Checked before the open. The book, the services and the scheduled jobs were
+fine (health `11/11`, the two stale-service flags from 08-12 healed once
+`agentic-monitor` and `agentic-dashboard` were restarted). **The reviewer was
+not.** Its one and only cron run — after the 08-12 close session — produced a
+59-byte artifact reading:
+
+```
+ionice: failed to execute codex: No such file or directory
+```
+
+**`codex` was never on cron's PATH.** It installs to `/root/.local/bin`, which
+`crontab.template` omitted. Every interactive test passed, because a login shell
+has that dir — the two real verdicts in the journal (08-12 `AFFIRM`, then the
+corrected `SPLIT`) were both hand-run. `claude` survived the identical gap by
+the accident of living in `/usr/bin`. Fixed by appending `/root/.local/bin` to
+PATH in the live crontab **and** the template. Verify a dependency the way cron
+sees it, never with `which` in your own shell:
+
+```
+env -i PATH=<the crontab PATH> command -v codex
+```
+
+**The failure class, which is the part worth keeping.** The missing binary was
+a one-line environment bug. What made it *invisible* is that
+`review_session.py` never read `proc.returncode`, so two different events were
+recorded identically:
+
+- the reviewer **ran** and its prose lacked the block → `UNPARSED`, a real (if
+  useless) opinion, worth journalling and scoring against;
+- the reviewer **never launched** → there is no opinion at all.
+
+Collapsed into one, the second wrote a `codex_review` event, overwrote
+`latest.json`, and handed `score_reviews.py` a day's work marked *reviewed*.
+The 08-12 scorecard duly reports **8 decisions examined by a reviewer that never
+saw them** — a subsystem reporting clean while wholly dead, the same shape as
+the capital-flow ETF nulls (08-28) and the signal panel that had never run
+(07-24). `run_session.sh` runs the review behind `|| true` so it can never fail
+a trading run, which is right, and is exactly why nothing else could notice.
+
+Now: a non-zero exit with no verdict block is a **failure, not a stance** — it
+journals nothing, leaves the last real verdict standing, and pushes the operator
+once. A reviewer that exits badly having *said its piece* is still honoured;
+that is the reviewer's opinion and the exit code is not. Pinned by three
+selftest cases (never-launched / spoke-then-failed / clean-but-rambled).
+
+**Blast radius: none to the book.** No order, stop or position was touched — the
+reviewer cannot trade. `session.last_review()` accepts only
+`AFFIRM|DISSENT|SPLIT`, so the garbage verdict resolved to `None` and no
+corrupted review reached this morning's brief. The cost was one lost verdict on
+the 08-12 close (8 decisions, unrecoverable — the reviewer reads *today's*
+journal) and a scorecard row that has to be read as unreviewed.
+
+**Also: the subsystem was undocumented.** Five commits shipped the reviewer live
+and neither `CLAUDE.md` nor `docs/` mentioned `review_session.py`,
+`score_reviews.py`, `prompts/review.md` or the `codex` dependency — so the file
+that is auto-loaded as operating context for every agent working here described
+a system without its reviewer in it. Added to the repo layout and setup notes.
+
+Standing gap, unchanged: nothing checks that a review actually happened.
+`src/health.py` asks "did each job leave evidence it ran", and a review is now
+the obvious next artifact for it to watch — deliberately not added today rather
+than layering a second guard over a root cause already fixed.
+
+
 ## 2026-08-12 — the agent sessions go live, and six defects found by review
 
 **The inversion landed.** `scripts/session.py` runs on cron — `open` 10:35,
