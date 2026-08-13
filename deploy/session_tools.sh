@@ -61,7 +61,30 @@ SESSION_TOOL_ARGS=(
   # STRAIGHT to the broker with no kill-switch, halt-entries, order-cap or
   # shadow-mode check. The lockdown looked complete and the gate did not bind.
   --settings "${_session_tools_root}/deploy/loop_settings.json"
+  # ⚠️ THE MCP SURFACE IS DECLARED, NOT INHERITED — AND THIS IS A CONTEXT
+  # BUDGET, NOT A GUARDRAIL. A headless `claude -p` otherwise loads the
+  # USER-level MCP config (/root/.claude.json) and every claude.ai account
+  # connector on top of this repo's .mcp.json. On 2026-08-13 the 10:35 open
+  # session died with "Autocompact is thrashing" having loaded claude.ai
+  # Airtable, Cryptoquant docs, Hugging Face, Interactive Brokers and Langfuse:
+  # ~54KB of tool definitions and instruction blocks it could never call, on top
+  # of a 29.6KB brief and a 36KB research_log. Three compacts in three turns and
+  # the CLI killed the session. Nothing was mis-traded -- the allowlist below
+  # never contained another broker -- but a connected server costs context
+  # whether or not its tools are permitted, and that cost grew every time a
+  # connector was added to the account.
+  #
+  # --strict-mcp-config makes --mcp-config the ONLY source. Verified 2026-08-13
+  # under strict mode: agentic-trader up, robinhood-trading OAuth still resolves
+  # (it lives in the CLI credential store, not the config file), the moomoo-fed
+  # `quote` path still returns live snapshot data, and zero connector
+  # instructions reach the transcript.
+  --strict-mcp-config
+  --mcp-config "${_session_tools_root}/deploy/session_mcp.json"
   --tools ""
   --permission-mode dontAsk
+  # ⛔ --allowedTools IS VARIADIC AND MUST STAY LAST. It swallows every
+  # following argument as a tool name -- that is how the brief once became a
+  # 47th "tool" and no session could start at all.
   --allowedTools "${_AGENTIC_TOOLS[@]}" "${_RH_TOOLS[@]}"
 )

@@ -604,6 +604,26 @@ def _selftest() -> None:
     assert "--permission-mode" in argv and argv[argv.index("--permission-mode") + 1] == "dontAsk"
     assert argv[-1] != "--allowedTools", "allowlist must not be empty"
 
+    # ⛔ THE MCP SURFACE MUST BE DECLARED, NOT INHERITED. Without
+    # --strict-mcp-config a headless run also loads /root/.claude.json and every
+    # claude.ai account connector; on 2026-08-13 that killed the open session
+    # with "Autocompact is thrashing" (~54KB of tool definitions it could never
+    # call). A connected server costs context whether or not it is allowlisted.
+    assert "--strict-mcp-config" in argv, (
+        "the session would inherit the user's MCP config and every claude.ai "
+        "connector — see deploy/session_tools.sh and OPSLOG 2026-08-13")
+    _cfg = Path(argv[argv.index("--mcp-config") + 1])
+    assert _cfg.is_file(), f"--mcp-config points at nothing: {_cfg}"
+    # ...and it must declare EXACTLY the two servers the session uses. Adding a
+    # third is a real decision about the context budget, so it has to be made here.
+    _declared = set(json.loads(_cfg.read_text())["mcpServers"])
+    assert _declared == {"agentic-trader", "robinhood-trading"}, (
+        f"unexpected MCP surface {sorted(_declared)} — every connected server "
+        f"costs context in every session; add one only deliberately")
+    # --allowedTools is variadic: anything after it is eaten as a tool name.
+    assert all(t.startswith("mcp__") for t in argv[argv.index("--allowedTools") + 1:]), (
+        "a flag was placed after --allowedTools and will be swallowed as a tool")
+
     # ⏱ THE SESSION + ITS REVIEW MUST FINISH BEFORE THE NEXT ARMED JOB.
     # close starts 15:15; risk_review (armed, places real trades) starts 15:45.
     # Two headless model runs overlapping on this ~2GB box forced a reboot on

@@ -121,6 +121,21 @@ SPECS = {
     "monitor":       ("Intraday monitor",        4,  "research_store/monitor/state.json"),
     "ledger_backup": ("Ledger backup",           3,  "logs/backup.log"),
     "signal_panel":  ("moomoo signal panel",    10,  "signal_panel journal event"),
+    # ⚠️ THE PRIMARY TRADING EVENT, and it was the LAST thing here to be watched
+    # — added 2026-08-13, the day the review that JUDGES it got a check while the
+    # session itself had none. Live since 2026-08-12: open 10:35, close 15:15 ET.
+    #
+    # The artifact is the LOG, not the journal, and that is deliberate. This
+    # answers only "did cron fire the session", which is the gap nothing else
+    # covers. A session that fires and DIES is already caught by a different
+    # mechanism: session.py exits non-zero on a failed session and
+    # run_session.sh's ERR trap pages the phone immediately — so failure is
+    # loud, and only silence was invisible. Watching agent_decision events
+    # instead would conflate the two and would alarm on a session that
+    # legitimately recorded nothing.
+    # 4d for the weekday-only reason above: Friday 15:15 -> Monday 08:00 is
+    # ~2.7d of legitimate dead air, 3.7d across a holiday Monday.
+    "session":       ("Agent session (open/close)", 4, "logs/session.log"),
     # 4d for the same weekday-only reason as monitor/fast_loop above: the last
     # review of the week lands ~15:30 ET Friday, so Monday 08:00 is ~2.7d of
     # legitimate dead air (3.7d when Monday is a holiday).
@@ -232,6 +247,28 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
     # Deployed-code drift. Not a scheduled job -- a different question about the
     # same box: is the process running what is on disk? Absent probe -> nothing
     # appended rather than a fabricated pass.
+    # Decided to trade, nothing executed. A CONTENT check, not liveness — it has
+    # no SPECS entry because "stale after N days" means nothing here; the journal
+    # is always present, and the question is what is IN it.
+    #
+    # ⛔ COUNT ONLY, NEVER SYMBOL NAMES. Check.detail is forwarded verbatim to the
+    # shared ops ntfy topic and to a PUBLIC GitHub issue (--open-issue), under the
+    # "job names/ages only, never positions" contract that _eval_unprotected
+    # documents. The symbols are in the journal for whoever opens it.
+    fills = probes.get("unrecorded_fills")
+    if fills is not None:
+        fday, missing = fills
+        if missing:
+            n = len(missing)
+            out.append(Check("unrecorded_fills", "Unrecorded fills", None, "unrecorded",
+                             f"{n} decided trade{'s' if n != 1 else ''} on {fday} "
+                             f"reached no `execution` event — the letter, the ledger "
+                             f"reconciler and realized P&L will all miss them; check "
+                             f"research_store/journal.jsonl"))
+        else:
+            out.append(Check("unrecorded_fills", "Unrecorded fills", None, "ok",
+                             f"every decided trade on {fday} has an execution recorded"))
+
     svcs = probes.get("deployed_code")
     if svcs:
         try:
@@ -391,6 +428,43 @@ def _last_actions_run(workflow: str = "adaptive-tune") -> dt.datetime | None:
         return None
 
 
+def _unrecorded_fills_probe(root: pathlib.Path, today: str | None = None):
+    """-> (day, [symbols]) for the most recent SETTLED trading day, or None.
+
+    ⚠️ NEVER TODAY. A session records its decision when it decides and its fills
+    a few tool-calls later, so a check run between the two reports a gap that is
+    about to close on its own. Only a day that is fully over can be judged.
+    (health_check.py runs 08:00 ET, before the 10:35 session, so in practice this
+    is always yesterday or earlier — but the guard is here, not in the schedule.)
+
+    Returns None when no settled day has any decision on it: a system that has
+    not traded yet has nothing missing, and must not read as a pass OR a fail.
+    """
+    today = today or dt.datetime.now(dt.timezone.utc).date().isoformat()
+    jp = root / "research_store" / "journal.jsonl"
+    rows, days = [], set()
+    try:
+        for line in jp.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            rows.append(d)
+            if d.get("event") == "agent_decision":
+                day = str(d.get("ts", ""))[:10]
+                if day and day < today:
+                    days.add(day)
+    except OSError:
+        return None
+    if not days:
+        return None
+    newest = max(days)
+    return (newest, unrecorded_fills(rows, newest))
+
+
 def _unprotected_probe(root: pathlib.Path):
     """Read market_monitor's unprotected.json -> (ts, unprotected, suspect) or
     None. Thin I/O only — all judgement lives in _eval_unprotected."""
@@ -433,10 +507,12 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "monitor":       _mtime(root / "research_store" / "monitor" / "state.json"),
         "ledger_backup": _mtime(root / "logs" / "backup.log"),
         "signal_panel":  _newest_journal_event(root, "signal_panel"),
+        "session":       _mtime(root / "logs" / "session.log"),
         "review":        _newest_journal_event(root, "codex_review"),
         "newsletter":    _newest_in_dir(root / "research_store" / "newsletters", "*.sent"),
         "adaptive_tune": _last_actions_run() if use_network else SKIPPED,
         "unprotected_positions": _unprotected_probe(root),
+        "unrecorded_fills": _unrecorded_fills_probe(root),
         # Is each long-running service running the code on disk? Scheduling
         # liveness (everything above) cannot see this: a stale process keeps
         # writing fresh artifacts, so every other check reads green while the
@@ -484,6 +560,62 @@ def _selftest() -> None:
     # other days are not this day's problem
     assert unrecorded_fills(j, "2026-08-11") == []
     assert unrecorded_fills([], "2026-08-12") == []
+
+    # ---- unrecorded fills, now actually WIRED --------------------------------
+    # It was pure, selftested and called by nothing until 2026-08-13: a control
+    # that is present and does nothing, which is this repo's recurring defect.
+    r = {c.key: c for c in evaluate(now, {"unrecorded_fills": ("2026-08-12", ["TER"])})}
+    assert r["unrecorded_fills"].status == "unrecorded", r["unrecorded_fills"]
+    assert "1 decided trade " in r["unrecorded_fills"].detail, r["unrecorded_fills"].detail
+    # ⛔ COUNT ONLY. detail goes verbatim to a PUBLIC GitHub issue and the shared
+    # ops topic -- the same contract _eval_unprotected keeps.
+    assert "TER" not in r["unrecorded_fills"].detail, r["unrecorded_fills"].detail
+    r = {c.key: c for c in evaluate(now, {"unrecorded_fills": ("2026-08-12", ["TER", "MU"])})}
+    assert "2 decided trades " in r["unrecorded_fills"].detail, r["unrecorded_fills"].detail
+    for sym in ("TER", "MU"):
+        assert sym not in r["unrecorded_fills"].detail, r["unrecorded_fills"].detail
+    # a complete record is a clean pass
+    r = {c.key: c for c in evaluate(now, {"unrecorded_fills": ("2026-08-12", [])})}
+    assert r["unrecorded_fills"].status == "ok", r["unrecorded_fills"]
+    # absent probe -> nothing appended, never a fabricated pass
+    assert "unrecorded_fills" not in {c.key for c in evaluate(now, {})}
+
+    # the probe must never judge TODAY -- a decision and its fill are minutes
+    # apart, so a same-day check reports a gap that is about to close itself
+    import tempfile                                # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as _d:
+        _root = pathlib.Path(_d)
+        (_root / "research_store").mkdir()
+        (_root / "research_store" / "journal.jsonl").write_text("\n".join(
+            json.dumps(e) for e in [
+                {"event": "agent_decision", "ts": "2026-08-12T14:38:00Z",
+                 "symbol": "AMAT", "action": "exit"},
+                {"event": "execution", "ts": "2026-08-12T14:40:00Z",
+                 "fills": [{"symbol": "AMAT"}]},
+                {"event": "agent_decision", "ts": "2026-08-13T14:38:00Z",
+                 "symbol": "TER", "action": "trim"},      # today: fill not in yet
+            ]) + "\n")
+        got = _unrecorded_fills_probe(_root, today="2026-08-13")
+        assert got == ("2026-08-12", []), got     # yesterday judged, today ignored
+        # ...and a system that has never traded on a settled day says nothing
+        (_root / "research_store" / "journal.jsonl").write_text(
+            json.dumps({"event": "agent_decision", "ts": "2026-08-13T14:38:00Z",
+                        "symbol": "TER", "action": "trim"}) + "\n")
+        assert _unrecorded_fills_probe(_root, today="2026-08-13") is None
+
+    # ---- the session is the PRIMARY trading event and must be watched -------
+    r = {c.key: c for c in evaluate(now, {"session": now - day})}
+    assert r["session"].status == "ok", r["session"]
+    # a Friday-close session read on Monday morning is NOT stale
+    r = {c.key: c for c in evaluate(now, {"session": now - 3 * day})}
+    assert r["session"].status == "ok", r["session"]
+    # cron stopped firing it -> stale. This is the gap nothing else covered: a
+    # session that RUNS and fails already pages via run_session.sh's ERR trap,
+    # so only silence was invisible.
+    r = {c.key: c for c in evaluate(now, {"session": now - 5 * day})}
+    assert r["session"].status == "stale", r["session"]
+    r = {c.key: c for c in evaluate(now, {})}
+    assert r["session"].status == "never", r["session"]
 
     # ---- the independent review is a scheduled job like any other -----------
     # 2026-08-13: it had never once run under cron and nothing noticed, because

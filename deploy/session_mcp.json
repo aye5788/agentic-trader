@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "THE SESSION'S MCP SURFACE — DECLARED, NEVER INHERITED.",
+    "Used with `claude --strict-mcp-config --mcp-config deploy/session_mcp.json`,",
+    "which ignores user/global MCP config entirely.",
+    "",
+    "WHY THIS FILE EXISTS (2026-08-13): a headless `claude -p` inherits the",
+    "USER-level MCP config (/root/.claude.json) and every claude.ai account",
+    "connector. On 2026-08-13 the 10:35 open session died with 'Autocompact is",
+    "thrashing' after loading claude.ai Airtable, Cryptoquant docs, Hugging Face,",
+    "Interactive Brokers and Langfuse alongside the two servers it actually uses.",
+    "Their tool definitions and instruction blocks cost ~54KB of context in that",
+    "one run, on top of a 29.6KB brief and a 36KB research_log, and the session",
+    "compacted three times in three turns before the CLI killed it.",
+    "",
+    "The tool ALLOWLIST was never the hole -- deploy/session_tools.sh grants only",
+    "agentic-trader (discovered) + 10 named Robinhood tools, so no other broker",
+    "was ever callable. This is a context budget, not a guardrail: connected",
+    "servers cost context whether or not their tools may be called.",
+    "",
+    "⛔ NO SECRETS HERE, AND NONE MAY BE ADDED. Robinhood is a remote HTTP MCP",
+    "whose OAuth lives in the CLI's own credential store, not in this file. If a",
+    "server ever needs a key, it goes in .env and is referenced by the launcher --",
+    "this file is committed."
+  ],
+  "mcpServers": {
+    "agentic-trader": {
+      "command": "/opt/agentic-trader/.venv/bin/python",
+      "args": ["/opt/agentic-trader/src/agent_env/server.py"]
+    },
+    "robinhood-trading": {
+      "type": "http",
+      "url": "https://agent.robinhood.com/mcp/trading"
+    }
+  }
+}

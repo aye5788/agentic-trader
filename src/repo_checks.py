@@ -245,6 +245,9 @@ CRON_SUBSTRINGS = {
     # comment out the session lines and the reviewer stops too, which is exactly
     # what this check should then report.
     "review":        "run_session.sh",
+    # Same cron line as the review, for the opposite reason: the review has no
+    # line of its own, whereas the session IS the line. Both go dark together.
+    "session":       "run_session.sh",
 }
 
 # health.SPECS keys that are legitimately NOT cron lines:
