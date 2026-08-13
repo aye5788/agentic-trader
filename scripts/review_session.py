@@ -429,16 +429,32 @@ trailing"""
     # These three cases must stay distinguishable.
     import unittest.mock as _mock                  # noqa: PLC0415
     import notify as _notify                       # noqa: PLC0415
+    from research_store import store as _store      # noqa: PLC0415
+
+    _live_j = REPO / "research_store" / "journal.jsonl"
+    _live_before = _live_j.stat().st_size if _live_j.exists() else 0
 
     class _P:
         def __init__(self, rc): self.returncode = rc
 
+    _wrote = []
+
     def _run_with(rc, out, tmp):
-        """run() against a fake reviewer that exits `rc` and prints `out`."""
+        """run() against a fake reviewer that exits `rc` and prints `out`.
+
+        ⛔ append_journal IS PATCHED, and that is not optional. run() journals on
+        every path that reaches a verdict, so an unpatched selftest writes FAKE
+        codex_review events into the LIVE ledger — which is a backed-up,
+        append-only record that score_reviews.py then reads as real reviews.
+        Done exactly that on 2026-08-13: four bogus events, removed by hand.
+        Patch every writer run() can reach, not just the ones the case under
+        test is aiming at.
+        """
         with _mock.patch.object(sys.modules[__name__], "OUT", tmp), \
              _mock.patch.object(sys.modules[__name__], "session_decisions",
                                 lambda *a, **k: [{"symbol": "MU", "action": "hold"}]), \
              _mock.patch.object(_notify, "push", lambda *a, **k: None), \
+             _mock.patch.object(_store, "append_journal", _wrote.append), \
              _mock.patch.object(subprocess, "run",
                                 lambda *a, **k: (tmp.joinpath("live.log")
                                                  .write_text(out), _P(rc))[1]):
@@ -456,17 +472,33 @@ trailing"""
         assert "stance" not in r, f"a dead reviewer must not report a stance: {r}"
         assert not (tmp / "latest.json").exists(), \
             "a reviewer that never ran must not overwrite the last real verdict"
+        # THE LEDGER IS THE POINT. A dead reviewer that still journals is how a
+        # scorecard comes to report decisions "reviewed" by something that never
+        # saw them -- the 2026-08-12 defect this whole guard exists for.
+        assert _wrote == [], f"a reviewer that never ran journalled anyway: {_wrote}"
 
         # 2. exited non-zero but DID speak -> the verdict stands. The opinion is
         #    what matters; a reviewer may say its piece and still exit badly.
         r = _run_with(1, "===VERDICT===\nSTANCE: SPLIT\nHEADLINE: Idle cash.\n"
                          "===END===", tmp)
         assert r["ok"] is True and r["stance"] == "SPLIT", r
+        assert len(_wrote) == 1 and _wrote[0]["stance"] == "SPLIT", _wrote
 
         # 3. exited CLEAN but rambled -> a real (useless) opinion. Still UNPARSED,
         #    still recorded — that is the reviewer's failure, not the plumbing's.
         r = _run_with(0, "I have thoughts but no block.", tmp)
         assert r["ok"] is True and r["stance"] == "UNPARSED", r
+        assert len(_wrote) == 2, _wrote
+
+    # ⛔ AND THE LIVE LEDGER MUST BE BYTE-IDENTICAL. The asserts above only prove
+    # the patched writer was called as expected; this proves nothing slipped past
+    # it. A selftest that mutates the record it is testing against is worse than
+    # no selftest.
+    _live = REPO / "research_store" / "journal.jsonl"
+    if _live.exists():
+        assert _live.stat().st_size == _live_before, (
+            f"THE SELFTEST WROTE TO THE LIVE JOURNAL: {_live_before} -> "
+            f"{_live.stat().st_size} bytes. Patch every writer run() reaches.")
 
     print("review_session: OK -- verdict parsed, malformed never guessed at, "
           "decisions filtered to today, reasoning passed by path not inlined, "
