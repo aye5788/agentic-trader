@@ -60,7 +60,11 @@ rc=$?
 # already happened; a reviewer that errors is a missing opinion, not a problem
 # with the book.
 # ---------------------------------------------------------------------------
-.venv/bin/python scripts/review_session.py || true
+# Started as a UNIT, not as a script: the resource limits, the PATH that holds
+# `codex`, the run-time bound and the no-overlap guarantee are all declared in
+# /etc/systemd/system/agentic-review.service. `--wait` keeps this sequential, so
+# the review still never runs beside a session.
+systemctl start --wait agentic-review.service || true
 
 # Score BOTH parties against the panel. Pure pandas, no model, ~1s — and it is
 # what stops the reviewer being decoration: a verdict nobody prices is a second

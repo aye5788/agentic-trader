@@ -52,15 +52,25 @@ sys.path.insert(0, str(REPO / "src"))
 
 PROMPT = REPO / "prompts" / "review.md"
 OUT = REPO / "research_store" / "reviews"
-# ⏱ THE ARITHMETIC HAS TO CLOSE, not just look reasonable.
-#   close session starts 15:15, worst case 900s -> ends 15:30
-#   + this review, worst case 600s              -> ends 15:40
-#   risk_review starts                             15:45  (5 min of margin)
-# Anything longer and the review is still running when an ARMED de-risk pass
-# starts, which is two headless model runs at once on a ~2GB box -- the
-# combination that forced a reboot on 2026-08-12. If you lengthen this, shorten
-# TIMEOUT_S["close"] in scripts/session.py by the same amount.
-TIMEOUT_S = 600
+# ⏱ MEASURED, n=1 -- and it was nearly binding.
+#
+#   2026-08-13 close review: 8m18s (498s) to review FIVE decisions.
+#   Against the old 600s limit that is 83% of budget consumed, on a LIGHT day.
+#   A busier session would have hit the wall and the review would have failed.
+#
+# The old 600s existed for an arithmetic that no longer applies: close 15:15
+# + 900s session -> 15:30, + 600s review -> 15:40, before risk_review at 15:45.
+# ⛔ That job was RETIRED 2026-08-13 (deploy/crontab.template) and nothing armed
+# runs after this any more, so the constraint that set 600s is gone.
+#
+# 1200s is ~2.4x the single observed run -- headroom, NOT a distribution. One
+# sample says nothing about the tail. Deliberately generous: the failure this
+# repo keeps repeating is a tight guessed limit that silently kills the job
+# (the reviewer's 700M memory cap did exactly that, every run, for a day).
+# Tighten from RECORDED durations once several have accumulated, never from a
+# guess. Remaining downstream bound: log_equity at 16:15, which 15:15 + 900s
+# + 1200s = 15:50 clears comfortably.
+TIMEOUT_S = 1200
 
 # Codex gates third-party MCP tool calls behind an approval its headless mode
 # auto-cancels, so the reviewer reaches the book through agent_view.py instead —
@@ -106,14 +116,21 @@ TIMEOUT_S = 600
 # 1200M+300M on a 1963M box leaves ~500M for the monitor, OpenD, dashboard and
 # cloudflared, and the review runs strictly AFTER session.py has exited, so it
 # never overlaps another model run.
-_LIMITS = ["systemd-run", "--scope", "--quiet",
-           "--property=MemoryMax=1200M", "--property=MemorySwapMax=300M",
-           "--property=CPUWeight=20", "--property=TasksMax=200",
-           "nice", "-n", "19", "ionice", "-c", "3"]
-
-CODEX = _LIMITS + ["codex", "exec", "--sandbox", "read-only",
-                   "-c", 'approval_policy="never"',
-                   "-c", 'model_reasoning_effort="high"']
+# ⛔ THE RESOURCE LIMITS ARE NOT HERE ANY MORE. They live in
+# /etc/systemd/system/agentic-review.service, which is how this job is started
+# (deploy/run_session.sh runs `systemctl start --wait agentic-review.service`).
+#
+# This file used to assemble a `systemd-run --scope --property=MemoryMax=...`
+# command line out of Python strings. That was the service manager,
+# reimplemented in a script: invisible to `systemctl show`, untestable without
+# running it, and it put a tuned kill-limit on the critical path of every review.
+# A guessed 700M in that list OOM-killed every review the system ever ran.
+#
+# Anything that needs to bound this job — memory, CPU share, IO priority, run
+# time, no-overlap — belongs in the unit file, not here.
+CODEX = ["codex", "exec", "--sandbox", "read-only",
+         "-c", 'approval_policy="never"',
+         "-c", 'model_reasoning_effort="high"']
 
 _BLOCK = re.compile(r"===VERDICT===(.*?)===END===", re.S)
 _STANCES = ("AFFIRM", "DISSENT", "SPLIT")
@@ -469,21 +486,31 @@ trailing"""
     # ⛔ AND IT MUST BE CAPPED. Unbounded, this took the droplet down on
     # 2026-08-12 during market hours, with the live stop watcher on the same
     # box. The kernel kills the reviewer; it must never be able to kill the box.
-    assert CODEX[0] == "systemd-run", CODEX[:3]
-    assert any("MemoryMax" in a for a in CODEX), CODEX
-    assert any("CPUWeight" in a for a in CODEX), CODEX
-    assert "nice" in CODEX, CODEX
-    # ...but the cap must also be BIG ENOUGH TO FINISH. 700M killed every single
-    # review (CONSTRAINT_MEMCG, both RAM and swap ceilings pinned, 31,715 failed
-    # charges). A cap that always kills is indistinguishable from no reviewer.
-    # Floor, not a target -- raise deliberately, never shrink below this by
-    # accident. The box is ~1963M, so keep headroom for the stop watcher too.
-    _mem = [a for a in CODEX if a.startswith("--property=MemoryMax=")][0]
-    _mb = int(_mem.split("=")[-1].rstrip("M"))
-    assert 1000 <= _mb <= 1500, (
-        f"MemoryMax={_mb}M. Below ~1000M the reviewer is OOM-killed mid-run "
-        f"(measured 2026-08-13); above ~1500M it crowds the monitor on a 1963M "
-        f"box. Change this deliberately or not at all.")
+    # ⛔ THE LIMITS MUST NOT COME BACK INTO THIS FILE. They belong to the unit.
+    assert CODEX[0] == "codex", CODEX[:3]
+    assert not any("systemd-run" in a or "MemoryMax" in a for a in CODEX), (
+        "resource limits are being assembled in Python again — they belong in "
+        "/etc/systemd/system/agentic-review.service, where `systemctl show` can "
+        "display them and no guessed number sits in a script")
+
+    # ...and the unit must actually carry them, so a deploy that forgets the
+    # unit fails HERE and not at 15:25 on a live box.
+    _unit = Path("/etc/systemd/system/agentic-review.service")
+    if _unit.exists():
+        _u = _unit.read_text()
+        for _need in ("MemoryHigh=", "MemoryMax=", "RuntimeMaxSec=",
+                      "MemoryAccounting=yes", "/root/.local/bin"):
+            assert _need in _u, f"agentic-review.service is missing {_need!r}"
+        # MemoryHigh THROTTLES, MemoryMax KILLS. High must sit below Max or the
+        # throttle never engages and this is a bare kill-limit again — the
+        # 2026-08-13 failure, where a guessed 700M killed every run there was.
+        _hi = int(_u.split("MemoryHigh=")[1].split("M")[0])
+        _mx = int(_u.split("MemoryMax=")[1].split("M")[0])
+        assert _hi < _mx, f"MemoryHigh={_hi}M must sit below MemoryMax={_mx}M"
+        assert _mx >= 1200, (
+            f"MemoryMax={_mx}M — the reviewer provably needs >900M (it exhausted "
+            f"700M RAM + 200M swap and was still allocating). Tighten this from a "
+            f"recorded peak, never from a guess.")
 
     # busy_now() must refuse rather than compete
     assert busy_now.__doc__ and "lowest-priority" in busy_now.__doc__

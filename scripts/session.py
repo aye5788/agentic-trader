@@ -624,19 +624,23 @@ def _selftest() -> None:
     assert all(t.startswith("mcp__") for t in argv[argv.index("--allowedTools") + 1:]), (
         "a flag was placed after --allowedTools and will be swallowed as a tool")
 
-    # ⏱ THE SESSION + ITS REVIEW MUST FINISH BEFORE THE NEXT ARMED JOB.
-    # close starts 15:15; risk_review (armed, places real trades) starts 15:45.
-    # Two headless model runs overlapping on this ~2GB box forced a reboot on
-    # 2026-08-12, so the budget is asserted rather than left to whoever edits
-    # these numbers next.
+    # ⏱ THE SESSION + ITS REVIEW MUST STILL FIT THE AFTERNOON.
+    # This used to assert against risk_review at 15:45 — that overlay was
+    # RETIRED 2026-08-13, so the 30-minute ceiling it justified is gone with it.
+    # What remains: close starts 15:15, and log_equity runs at 16:15 and wants a
+    # settled book. 15:15 + 900s session + 1200s review = 15:50 clears it.
+    # The budget stays asserted rather than left to whoever edits these next,
+    # because two headless model runs overlapping on this ~2GB box forced a
+    # reboot on 2026-08-12 — the review being SEQUENTIAL is what prevents that,
+    # and a budget that overran would be the way it stopped being sequential.
     import importlib.util as _il
     _sp = _il.spec_from_file_location("_rev", REPO / "scripts" / "review_session.py")
     _rev = _il.module_from_spec(_sp)
     _sp.loader.exec_module(_rev)
     _budget = TIMEOUT_S["close"] + _rev.TIMEOUT_S
-    assert _budget <= 30 * 60, (
+    assert _budget <= 60 * 60, (
         f"close ({TIMEOUT_S['close']}s) + review ({_rev.TIMEOUT_S}s) = {_budget}s "
-        f"exceeds the 15:15->15:45 window before risk_review")
+        f"exceeds the 15:15->16:15 window before log_equity")
 
     # ---- the verdict is DISCONNECTED from the agent, and the renderer is kept
     #      alive underneath it -----------------------------------------------
