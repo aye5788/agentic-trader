@@ -210,10 +210,25 @@ def busy_now() -> str | None:
     """Is this a bad moment to spend 700MB and a CPU? -> reason, or None.
 
     The reviewer is the lowest-priority process on the box. It must not run
-    while a trading session holds the lock (two model runs at once is what took
-    the droplet down), and it must not run during regular trading hours, when
-    the stop watcher needs the machine. Nothing here is time-critical: the
-    session being reviewed is already over.
+    while a trading session holds the lock — two model runs at once is what took
+    the droplet down on 2026-08-12 — and it must not push a ~2GB machine that is
+    already short of memory into swap while the stop watcher is live.
+
+    ⛔ THERE IS DELIBERATELY NO REGULAR-TRADING-HOURS GATE, and this docstring
+    used to claim one it never had. Do not "restore" it: BOTH reviews run inside
+    RTH by construction, so a time window would mean no reviews at all.
+
+        open  10:35 ET + up to 1800s session -> review starts <= 11:05
+        close 15:15 ET + up to  900s session -> review starts <= 15:30
+
+    RTH is 09:30-16:00. What actually protects the box is not a clock but the
+    ordering (this runs only after session.py has returned and released the
+    lock), the kernel-enforced MemoryMax the reviewer runs under, CPUWeight and
+    nice/ionice behind everything else, and the memory floor below. A stale
+    aspiration in a docstring is how a control that does nothing gets added, or
+    a working one silently switched off — this repo's recurring defect.
+
+    Nothing here is time-critical: the session being reviewed is already over.
     """
     import fcntl                                    # noqa: PLC0415
     lock = REPO / "research_store" / "session.lock"
@@ -437,6 +452,18 @@ trailing"""
 
     # busy_now() must refuse rather than compete
     assert busy_now.__doc__ and "lowest-priority" in busy_now.__doc__
+    # ...and it must NOT grow a clock. Both reviews run inside RTH by
+    # construction (open <= 11:05, close <= 15:30 ET), so a trading-hours gate
+    # would silently mean no reviews at all. Pinned against a future tidy-up
+    # that reads the old aspiration and "restores" it. If you genuinely intend
+    # to add one, you have to delete this line, which means reading why.
+    assert "NO REGULAR-TRADING-HOURS GATE" in busy_now.__doc__
+    import inspect                                  # noqa: PLC0415
+    _body = inspect.getsource(busy_now).split('"""')[2]
+    for clocky in ("datetime", "time.localtime", "strftime", "hour"):
+        assert clocky not in _body, (
+            f"busy_now() grew a clock ({clocky!r}). Both reviews run inside RTH; "
+            f"a time gate disables the reviewer entirely — read the docstring.")
 
     # ⛔ "THE REVIEWER NEVER RAN" IS NOT A VERDICT. Exit status went unread
     # until 2026-08-13, so a reviewer that never launched (codex off cron's

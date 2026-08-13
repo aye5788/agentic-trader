@@ -115,6 +115,20 @@ record. All 8 existing decisions predate the `reviewed` field and now read
 `0/8 carry a verdict` — an honest gap where there used to be a false
 attribution. Scoring starts clean from the next review.
 
+**Also, from the same read-through: a control that was documented and never
+existed.** `busy_now()` claimed it "must not run during regular trading hours,
+when the stop watcher needs the machine". It never checked the time — only the
+session lock and free memory. And it must not: both reviews run inside RTH by
+construction (open 10:35 + up to 1800s → review by 11:05; close 15:15 + 900s →
+by 15:30, against an RTH of 09:30–16:00), so a trading-hours gate would mean no
+reviews at all. The box is protected by the ordering, the kernel MemoryMax, the
+nice/ionice deprioritisation and the 800MB floor — not by a clock. Docstring
+corrected to say so, and a selftest now fails if anything clock-shaped appears
+in that function, because the stale aspiration was an open invitation to
+"restore" a check that would have silently switched the reviewer off. That is
+the same defect class as the two above: a control that is present and does
+nothing, and a job that stops running without saying so.
+
 
 ## 2026-08-13 — the independent reviewer had never once run under cron
 
