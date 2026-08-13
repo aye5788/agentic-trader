@@ -66,6 +66,56 @@ anonymity guard and the mode filter are all kept live and selftested with the
 flag forced on, so nothing rots meanwhile.
 
 
+## 2026-08-13 — a verdict was scored against decisions it never examined
+
+Found while reading the review subsystem end to end, and fixed the same day
+because disconnecting the agent (above) makes `scorecard.json` the *only*
+instrument for judging reviewer against agent.
+
+`score_reviews.py` joined a verdict to a decision **by calendar date**:
+
+```python
+stance_by_day[str(e["ts"])[:10]] = e["stance"]      # last write wins
+```
+
+There are **two sessions every weekday**. So the close verdict overwrote the
+open one, and then every decision that day was scored against whichever came
+last. On 2026-08-12 three verdicts collapsed to one:
+
+```
+15:29 AFFIRM    (the parser bug, reading our own echoed template)
+15:31 SPLIT     (the correction — the reviewer's real verdict)
+19:24 UNPARSED  (the close review, which never ran)
+                -> stance_by_day["2026-08-12"] = UNPARSED
+```
+
+The real SPLIT was discarded, and four morning decisions it *had* examined were
+attributed to a verdict produced by a reviewer that never launched. The number
+this file exists to produce was quietly wrong.
+
+**The failure class: a join key coarser than the thing it joins.** A date cannot
+address a session when there are two a day. The fix is not a finer timestamp
+heuristic — it is to stop inferring. The reviewer is the only party that knows
+its own scope, and it already writes that scope to disk, so it now records it:
+`codex_review` carries `reviewed`, the list of decision timestamps it actually
+read. Two rules resolve overlaps, both selftested:
+
+- **Same scope → latest wins.** A re-run covering exactly what an earlier run
+  covered is a *correction*, not a second opinion — which is precisely the
+  15:29 → 15:31 sequence above.
+- **Different scope → earliest wins.** The close review re-reads the whole day,
+  so the morning's decisions appear in its list too; but the open review is the
+  one whose verdict was formed about that work, and scoring a decision under
+  both would count it twice.
+
+A decision no review claims is **not guessed at**. It is reported as uncovered,
+in the JSON and on the console beside the hit rate, because a reviewer hit rate
+read without its denominator is how a number from three decisions becomes a
+record. All 8 existing decisions predate the `reviewed` field and now read
+`0/8 carry a verdict` — an honest gap where there used to be a false
+attribution. Scoring starts clean from the next review.
+
+
 ## 2026-08-13 — the independent reviewer had never once run under cron
 
 Checked before the open. The book, the services and the scheduled jobs were

@@ -315,6 +315,13 @@ def run(dry: bool = False, force: bool = False) -> dict:
             "event": "codex_review",
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "reviewer": "codex", "reviewed_decisions": len(decisions),
+            # ⛔ WHICH decisions, not just how many. score_reviews.py used to
+            # join a verdict to a decision BY DATE, and there are two sessions a
+            # day -- so the close verdict overwrote the open one and every
+            # decision that day was scored against whichever came last. The
+            # reviewer is the only party that knows its own scope; it is written
+            # down here rather than guessed at downstream (OPSLOG 2026-08-13).
+            "reviewed": [d.get("ts") for d in decisions if d.get("ts")],
             **{k: v for k, v in verdict.items() if k != "error"},
         })
     except Exception:               # noqa: BLE001

@@ -138,12 +138,54 @@ def _load(path: Path) -> list:
     return rows
 
 
+def stance_by_decision(rows: list) -> dict:
+    """decision-ts -> the stance of the review that judged it. Pure.
+
+    ⛔ NOT BY DATE. Joining on the calendar day was wrong from the start: there
+    are TWO sessions every weekday, so `stance_by_day[day] = stance` let the
+    close verdict overwrite the open one, and then EVERY decision that day was
+    scored against the survivor. Measured on 2026-08-12: three verdicts
+    (AFFIRM -> corrected to SPLIT -> UNPARSED) collapsed to UNPARSED, the real
+    SPLIT was discarded, and four decisions it never examined were attributed to
+    it. That silently corrupts the one number this file exists to produce.
+
+    Reviews now record WHICH decisions they saw (`reviewed`), so the join is a
+    fact rather than an inference. Two rules resolve the overlaps:
+
+    1. SAME SCOPE -> the LATEST wins. A re-run covering exactly the decisions an
+       earlier run covered is a CORRECTION, not a second opinion. This is how the
+       2026-08-12 AFFIRM (a parser bug reading our own echoed template) is
+       superseded by the SPLIT that replaced it.
+    2. DIFFERENT SCOPE -> the EARLIEST wins. The close review re-reads the whole
+       day, so the morning's decisions appear in its list too; but the open
+       review is the one whose verdict was formed about that session's work, and
+       scoring a decision under both would count it twice.
+
+    A decision no review lists is absent from the result, and the caller reports
+    it as unscoreable rather than guessing -- including every review written
+    before `reviewed` existed. An honest gap beats an invented attribution.
+    """
+    reviews = [e for e in rows if e.get("event") == "codex_review" and e.get("reviewed")]
+
+    # rule 1: collapse identical scopes to the latest by ts
+    latest_of_scope = {}
+    for e in reviews:
+        scope = frozenset(e["reviewed"])
+        prev = latest_of_scope.get(scope)
+        if prev is None or str(e.get("ts", "")) >= str(prev.get("ts", "")):
+            latest_of_scope[scope] = e
+
+    # rule 2: earliest surviving review that lists a given decision
+    out = {}
+    for e in sorted(latest_of_scope.values(), key=lambda r: str(r.get("ts", ""))):
+        for dts in e["reviewed"]:
+            out.setdefault(dts, e.get("stance"))
+    return out
+
+
 def build(rows: list, closes: pd.DataFrame, horizon: int) -> dict:
     """The scorecard. Pure: no I/O, so it can be tested without a live panel."""
-    stance_by_day = {}
-    for e in rows:
-        if e.get("event") == "codex_review":
-            stance_by_day[str(e.get("ts", ""))[:10]] = e.get("stance")
+    stance_of = stance_by_decision(rows)
 
     tally = {"agent_right": 0, "agent_wrong": 0, "tie": 0, "unscoreable": 0}
     rev = {"reviewer_right": 0, "reviewer_wrong": 0, "unscoreable": 0}
@@ -155,6 +197,7 @@ def build(rows: list, closes: pd.DataFrame, horizon: int) -> dict:
             continue
         sym, act = e.get("symbol"), e.get("action")
         day = str(e.get("ts", ""))[:10]
+        stance = stance_of.get(e.get("ts"))
 
         d = direction(act)
         bias["reduce" if d == "reduce" else "increase" if d == "increase" else "other"] += 1
@@ -164,13 +207,13 @@ def build(rows: list, closes: pd.DataFrame, horizon: int) -> dict:
         outcome = score_decision(act, ret)
         tally[outcome] += 1
 
-        r = score_reviewer(stance_by_day.get(day), outcome)
+        r = score_reviewer(stance, outcome)
         rev[r] += 1
 
         detail.append({"day": day, "symbol": sym, "action": act,
                        "forward_return": None if ret is None else round(ret, 4),
                        "outcome": outcome, "reviewer": r,
-                       "stance": stance_by_day.get(day)})
+                       "stance": stance})
 
     # ---- HEAD TO HEAD: only where they actually DISAGREED -----------------
     # The overall hit rates are dominated by the cases both parties called the
@@ -192,8 +235,21 @@ def build(rows: list, closes: pd.DataFrame, horizon: int) -> dict:
     scored = tally["agent_right"] + tally["agent_wrong"]
     rscored = rev["reviewer_right"] + rev["reviewer_wrong"]
     total_dir = bias["reduce"] + bias["increase"]
+    # HOW MUCH OF THE BOOK A REVIEW ACTUALLY COVERS. A decision no review claims
+    # is not a reviewer failure and not a scoring failure -- but reading the
+    # reviewer's hit rate without knowing what it was computed over is how a
+    # number from three decisions gets treated as a record. Reviews written
+    # before `reviewed` existed land here, as does any session whose review died.
+    unjoined = sum(1 for d in detail if d["stance"] is None)
     return {
         "horizon_sessions": horizon,
+        "review_coverage": {
+            "decisions": len(detail),
+            "with_a_verdict": len(detail) - unjoined,
+            "no_verdict_attributed": unjoined,
+            "note": "decisions no review claims -- pre-`reviewed` history, or a "
+                    "session whose review never ran. Never guessed at by date.",
+        },
         "agent": {**tally,
                   "scored": scored,
                   "hit_rate": round(tally["agent_right"] / scored, 3) if scored else None},
@@ -236,6 +292,13 @@ def main() -> None:
           + (f"  hit {ag['hit_rate']:.0%}" if ag["hit_rate"] is not None else ""))
     print(f"  reviewer : {rv['reviewer_right']} right / {rv['reviewer_wrong']} wrong"
           + (f"  hit {rv['hit_rate']:.0%}" if rv["hit_rate"] is not None else ""))
+    # A reviewer hit rate read without its coverage is a number from an unknown
+    # denominator. Print the gap next to it, never only in the JSON.
+    cov = card["review_coverage"]
+    if cov["no_verdict_attributed"]:
+        print(f"  coverage : {cov['with_a_verdict']}/{cov['decisions']} decisions "
+              f"carry a verdict — {cov['no_verdict_attributed']} claimed by no "
+              f"review (pre-`reviewed` history, or a review that never ran)")
     hh = card["head_to_head"]
     print(f"  contested: agent {hh['agent_won']} / reviewer {hh['reviewer_won']}"
           f"  ({hh['undecided']} undecided)  <- the column that matters")
@@ -292,7 +355,8 @@ def _selftest() -> None:
          "symbol": "MU", "action": "trim"},
         {"event": "agent_decision", "ts": "2026-08-03T14:00:00+00:00",
          "symbol": "PORTFOLIO", "action": "derisk_concentration"},
-        {"event": "codex_review", "ts": "2026-08-03T15:00:00+00:00", "stance": "AFFIRM"},
+        {"event": "codex_review", "ts": "2026-08-03T15:00:00+00:00", "stance": "AFFIRM",
+         "reviewed": ["2026-08-03T14:00:00+00:00"]},
     ]
     card = build(rows, closes, 5)
     assert card["agent"]["agent_wrong"] == 1, card["agent"]
@@ -309,26 +373,78 @@ def _selftest() -> None:
     rows2 = [
         {"event": "agent_decision", "ts": "2026-08-03T14:00:00+00:00",
          "symbol": "MU", "action": "trim"},                    # name then ROSE
-        {"event": "codex_review", "ts": "2026-08-03T15:00:00+00:00", "stance": "DISSENT"},
+        {"event": "codex_review", "ts": "2026-08-03T15:00:00+00:00", "stance": "DISSENT",
+         "reviewed": ["2026-08-03T14:00:00+00:00"]},
     ]
     c2 = build(rows2, closes, 5)
     assert c2["head_to_head"]["reviewer_won"] == 1, c2["head_to_head"]
     assert c2["head_to_head"]["agent_won"] == 0, c2["head_to_head"]
 
     rows3 = [dict(rows2[0], action="hold"),                    # held, name ROSE
-             {"event": "codex_review", "ts": "2026-08-03T15:00:00+00:00", "stance": "DISSENT"}]
+             {"event": "codex_review", "ts": "2026-08-03T15:00:00+00:00", "stance": "DISSENT",
+              "reviewed": ["2026-08-03T14:00:00+00:00"]}]
     c3 = build(rows3, closes, 5)
     assert c3["head_to_head"]["agent_won"] == 1, c3["head_to_head"]
 
     # an AFFIRM is not a contest and must not appear in head-to-head at all
     rows4 = [rows2[0], {"event": "codex_review",
-                        "ts": "2026-08-03T15:00:00+00:00", "stance": "AFFIRM"}]
+                        "ts": "2026-08-03T15:00:00+00:00", "stance": "AFFIRM",
+                        "reviewed": ["2026-08-03T14:00:00+00:00"]}]
     c4 = build(rows4, closes, 5)
     assert c4["head_to_head"]["decided"] == 0, c4["head_to_head"]
 
+    # ---- THE JOIN: a verdict belongs to the decisions it actually examined ---
+    # ⛔ The old code keyed stance BY DATE, and there are two sessions a day.
+    OPEN_D, CLOSE_D = "2026-08-03T14:00:00+00:00", "2026-08-03T19:22:00+00:00"
+    two_sessions = [
+        {"event": "agent_decision", "ts": OPEN_D, "symbol": "MU", "action": "trim"},
+        {"event": "agent_decision", "ts": CLOSE_D, "symbol": "MU", "action": "hold"},
+        # the OPEN review -- saw only the morning's work
+        {"event": "codex_review", "ts": "2026-08-03T15:00:00+00:00",
+         "stance": "DISSENT", "reviewed": [OPEN_D]},
+        # the CLOSE review -- re-reads the WHOLE day, so it lists the morning too
+        {"event": "codex_review", "ts": "2026-08-03T19:24:00+00:00",
+         "stance": "AFFIRM", "reviewed": [OPEN_D, CLOSE_D]},
+    ]
+    s = stance_by_decision(two_sessions)
+    # rule 2, DIFFERENT SCOPE -> EARLIEST wins: the morning keeps the verdict
+    # formed about it, and is NOT overwritten by the close review that re-saw it
+    assert s[OPEN_D] == "DISSENT", s
+    assert s[CLOSE_D] == "AFFIRM", s
+    # and the whole point: the two sessions no longer collapse onto one stance
+    assert s[OPEN_D] != s[CLOSE_D], s
+
+    # rule 1, SAME SCOPE -> LATEST wins. A re-run over exactly the same decisions
+    # is a CORRECTION. This is the real 2026-08-12 sequence: an AFFIRM produced
+    # by the parser reading our own echoed template, replaced 95s later by the
+    # SPLIT the reviewer actually wrote.
+    corrected = [
+        {"event": "agent_decision", "ts": OPEN_D, "symbol": "MU", "action": "trim"},
+        {"event": "codex_review", "ts": "2026-08-03T15:29:54+00:00",
+         "stance": "AFFIRM", "reviewed": [OPEN_D]},
+        {"event": "codex_review", "ts": "2026-08-03T15:31:29+00:00",
+         "stance": "SPLIT", "reviewed": [OPEN_D]},
+    ]
+    assert stance_by_decision(corrected)[OPEN_D] == "SPLIT", stance_by_decision(corrected)
+
+    # a review that claims NOTHING attributes nothing -- history written before
+    # `reviewed` existed is reported as uncovered, never guessed at by date
+    legacy = [{"event": "agent_decision", "ts": OPEN_D, "symbol": "MU", "action": "trim"},
+              {"event": "codex_review", "ts": "2026-08-03T15:00:00+00:00",
+               "stance": "DISSENT"}]                       # no `reviewed` key
+    assert stance_by_decision(legacy) == {}, stance_by_decision(legacy)
+    cl = build(legacy, closes, 5)
+    assert cl["review_coverage"]["no_verdict_attributed"] == 1, cl["review_coverage"]
+    assert cl["review_coverage"]["with_a_verdict"] == 0, cl["review_coverage"]
+    assert cl["reviewer"]["unscoreable"] == 1, cl["reviewer"]
+    # ...and coverage is reported when it IS joined, so a hit rate is never read
+    # without knowing what it was computed over
+    assert build(two_sessions, closes, 5)["review_coverage"]["with_a_verdict"] == 2
+
     print("score_reviews: OK -- both parties scored off the PANEL, noise is a "
-          "tie not skill, unscoreable is counted not hidden, and head-to-head "
-          "counts only contested calls")
+          "tie not skill, unscoreable is counted not hidden, head-to-head counts "
+          "only contested calls, and a verdict is joined to the decisions it "
+          "actually examined rather than to everything sharing its date")
 
 
 if __name__ == "__main__":
