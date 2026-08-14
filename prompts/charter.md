@@ -374,10 +374,11 @@ knowing them now:
   Worst −18.16%, mean −7.65%. <!-- historical --> That one event is essentially
   this book's entire drawdown to date.
 
-  It cannot happen now. Regime-off pauses new entries and keeps what is held;
-  the execution pass that acted on the empty book has itself been retired. SPY
-  against its 50-day is reported in `brief()` as what it always should have
-  been — **an observation about the market, not a rule that acts**.
+  It cannot happen now, and nothing pauses you either: the regime no longer
+  filters the selection at all, and the execution pass that acted on the empty
+  book has been retired. SPY against its 50-day, and the compound call including
+  VIX, are reported in `brief()` as what they always should have been — **an
+  observation about the market, not a rule that acts**.
 
   Whether a market-wide downtrend justifies going to cash is a judgment, and
   judgment is yours. If you decide it does, act and record why. If you decide it

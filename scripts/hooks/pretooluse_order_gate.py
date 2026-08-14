@@ -229,6 +229,34 @@ def decide(payload: dict, cfg: dict, valued: dict, shadow: bool,
             f"({cfg['governance'].get('halt_entries_file', gov.HALT_ENTRIES_DEFAULT)}"
             f" present) — no new risk; BUY of {sym or '?'} refused. Exits stay armed.")
 
+    # ---- automatic drawdown halt (READ-ONLY) ------------------------------
+    # ⛔ THIS WAS SILENTLY LOST. The drawdown entries-halt was enforced by one
+    # caller -- scripts/fast_loop.py calling gates() before placing -- and that
+    # script was deleted 2026-08-14 with the procedural executor. gates() then
+    # survived only inside check_order(), a tool the agent may skip, so an
+    # automatic halt became advisory without anyone choosing that. Caught by the
+    # independent reviewer reviewing the deletion.
+    #
+    # drawdown_breach() is the WRITE-FREE half of drawdown_halt(): same
+    # threshold, same fail-closed behaviour on a non-finite value, but it reads
+    # the stored peak instead of advancing it. That is what lets this run here
+    # at all -- see this module's docstring on why gates() must not.
+    av_probe = _to_float((valued or {}).get("account_value"))
+    breached, dd = gov.drawdown_breach(
+        av_probe if av_probe is not None else float("nan"), cfg)
+    if breached:
+        # .get, not [..]: this branch is also reached by a NON-FINITE account
+        # value, which fails closed regardless of whether a limit is configured
+        # -- and a KeyError here would crash a hook that fails closed, i.e.
+        # refuse every order on the box.
+        limit = cfg.get("governance", {}).get("max_drawdown")
+        cap = f"{float(limit):.0%}" if limit is not None else "configured"
+        shown = "unreadable" if not math.isfinite(dd) else f"{dd:.1%}"
+        return _deny(
+            f"DRAWDOWN HALT — account is {shown} against its peak, past the "
+            f"{cap} limit; BUY of {sym or '?'} refused. Exits stay armed "
+            "(this is an entries halt, never a reason to strand a position).")
+
     # ---- an active rule-out refuses the rebuy -----------------------------
     # The fast loop also drops these from the plan (apply_rule_outs), but the
     # loop is not the only path to place_equity_order: a session can call the
@@ -550,6 +578,34 @@ def _selftest() -> None:
             assert decide(buy, OFF, V, shadow=False)["permissionDecision"] == "deny"
             assert decide(sell, OFF, V, shadow=False)["permissionDecision"] == "allow", \
                 "live_approved must never strand an exit"
+
+            # --- the AUTOMATIC DRAWDOWN HALT, restored to the critical path ---
+            # It was enforced only by fast_loop.py calling gates(); that script
+            # was deleted with the procedural executor and the halt became
+            # advisory (check_order is skippable). Buys only, exits never.
+            gov.STATE.parent.mkdir(parents=True, exist_ok=True)
+            gov.STATE.write_text(json.dumps({"peak_value": 100.0}))
+            DD = {**CFG, "governance": {**CFG["governance"], "max_drawdown": 0.25}}
+            deep = {"account_value": 70.0}      # -30% against a peak of 100
+            r = decide(buy, DD, deep, shadow=False)
+            assert r["permissionDecision"] == "deny", r
+            assert "DRAWDOWN HALT" in r["permissionDecisionReason"], r
+            assert decide(sell, DD, deep, shadow=False)["permissionDecision"] == "allow", \
+                "a drawdown halt must never strand an exit"
+            assert decide(qty_sell, DD, deep, shadow=False)["permissionDecision"] == "allow"
+            # inside the limit -> ordinary behaviour
+            assert decide(buy, DD, {"account_value": 90.0},
+                          shadow=False)["permissionDecision"] == "allow"
+            # ...and it must not have ADVANCED the peak by being consulted --
+            # that ratcheting is precisely why gates() is barred from this hook
+            assert json.loads(gov.STATE.read_text())["peak_value"] == 100.0, \
+                "the gate wrote state; drawdown_breach must be read-only"
+            # a corrupted account value fails CLOSED for buys, open for exits
+            r = decide(buy, DD, {"account_value": float("nan")}, shadow=False)
+            assert r["permissionDecision"] == "deny", r
+            assert decide(sell, DD, {"account_value": float("nan")},
+                          shadow=False)["permissionDecision"] == "allow"
+            gov.STATE.unlink(missing_ok=True)
 
             # --- an active RULE-OUT refuses the rebuy, and never an exit ------
             # The failure: a session exited AMAT to be flat into earnings and

@@ -141,15 +141,24 @@ after the gate stopped existing in one form and was removed in the other.**
     fired once, 2026-07-27 — nine single names closed in one tick, mean -7.65%.
     Both backtests had modelled the keep-held behaviour since July, so the live
     code was the outlier, not the docs' intent.
-  - **Whether a regime call justifies EXITING is yours to judge.** The loop
-    declines to add; it does not decide to sell. You can see the positions, the
-    marks and the reason, and a rule keyed on one index cannot.
-- Agent qualitative overlay is OFF-only (it may veto or downsize, never
-  green-light). Its first live surface exists since 2026-07-09: **post-take-profit
-  re-entry** — a target-hit name's otherwise-automatic rebuy goes to the fast-loop
-  agent's judgment (full / half / skip), beneath a deterministic 4% knife-guard no
-  judgment can override (`[reentry]` config, prompts/fast_loop.md step 7b).
-  The regime gate itself remains fully deterministic.
+  - **What a regime call means is yours to judge — entering as well as
+    exiting.** As of 2026-08-14 the loop does not decline to add either: it
+    ranks, records the regime as a fact, and proposes. You can see the
+    positions, the marks and the reason, and a rule keyed on one index cannot.
+- **⚠️ THE MECHANICAL ENTRY GUARDS ARE GONE, 2026-08-14.** `no_chase` (never
+  buy above the thesis entry zone) and the `[reentry]` 4% knife-guard were both
+  enforced inside `scripts/fast_loop.py`, and that script was deleted with the
+  procedural executor. Their config keys still exist and are now READ BY NOTHING
+  — kept as the documented defaults for a judgement the session makes, not as
+  gates. `brief()` and `terrain()` carry the entry zone and the excursion data
+  those rules were derived from.
+  This is a real change in behaviour and it is stated rather than buried: the
+  `no_chase` ceiling would have blocked LITE at +5.0% over its zone on
+  2026-07-23, which then exited −18.1%. What replaces it is the session
+  looking at the same number and deciding.
+  What remains ENFORCED at the order gate, unbypassably: the kill switch,
+  live_approved, HALT_ENTRIES, the automatic drawdown halt, the per-order cap,
+  the universe whitelist, and an active `rule_out`.
 
 ## 8. Execution — the fast-loop procedure
 

@@ -134,6 +134,47 @@ def drawdown_halt(account_value: float, cfg) -> tuple[bool, float]:
     return dd < -abs(cfg["governance"]["max_drawdown"]), dd
 
 
+def drawdown_breach(account_value: float, cfg) -> tuple[bool, float]:
+    """(breached?, drawdown) against the STORED peak. READS ONLY — never writes.
+
+    ⛔ WHY THIS EXISTS. The automatic drawdown entries-halt was enforced by
+    exactly one caller: scripts/fast_loop.py invoking gates() before it placed.
+    That script was deleted on 2026-08-14 when the procedural executor was
+    retired, and the halt went with it -- gates() survives only in
+    check_order(), which is a tool the agent MAY call and can skip. The
+    unbypassable PreToolUse hook deliberately does not call gates(), because
+    gates() -> drawdown_halt() -> update_peak() WRITES, and a hook that writes
+    state on every order would ratchet a live gate as a side effect of being
+    consulted.
+
+    So the halt became advisory without anyone deciding it should. Found by the
+    independent reviewer reviewing that deletion.
+
+    This is the read-only half: same comparison, same threshold, same
+    fail-closed behaviour on a non-finite value -- but it takes the peak as it
+    is on disk instead of advancing it. The hook can call this on the critical
+    path; the peak keeps being maintained by whoever calls gates() (check_order,
+    and the session runner at session start).
+
+    A peak that is stale can only ever UNDERSTATE the drawdown, never overstate
+    it, so this cannot invent a halt that gates() would not also raise.
+
+    ⚠️ A MISSING [governance] max_drawdown MEANS "NO LIMIT CONFIGURED", not
+    zero. This runs on the critical path of every buy, so a hard KeyError here
+    would crash the hook -- and the hook FAILS CLOSED, so an unconfigured limit
+    would refuse every order on the box. Absent key -> no automatic halt, which
+    is exactly the behaviour before this check existed.
+    """
+    limit = cfg.get("governance", {}).get("max_drawdown")
+    if not math.isfinite(account_value):
+        return True, float("nan")          # same fail-closed rule as drawdown_halt
+    peak = float(_load_state().get("peak_value", 0.0)) or float(account_value)
+    dd = 0.0 if peak <= 0 else (float(account_value) / peak - 1.0)
+    if limit is None:
+        return False, dd
+    return dd < -abs(float(limit)), dd
+
+
 def whitelist(cfg) -> set[str]:
     def col(path):
         return {ln.split(",")[0].strip()

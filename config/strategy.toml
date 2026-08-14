@@ -33,7 +33,12 @@ target_r_mults = [2.2, 4.0]             # targets as multiples of risk (R): tier
                                         #   (a fixed +5% target is unreachable at 2:1 for a
                                         #   5%/day mover — it would reject the whole book).
 ma_exit_days  = 21                      # exit if close < 21-day MA, even pre-target
-no_chase      = true                    # only enter within the thesis entry_zone
+no_chase      = true                    # ⚠️ READ BY NOTHING since 2026-08-14 — the
+                                        #   enforcing code lived in fast_loop.py,
+                                        #   deleted with the procedural executor.
+                                        #   Kept as the documented default for a
+                                        #   JUDGEMENT the session makes; brief()
+                                        #   and terrain() carry the entry zone.
 chase_tol_sigma = 0.5                   # how far ABOVE entry_zone[1] still counts as
                                         #   "not chasing", in daily sigmas. Asymmetric:
                                         #   a price BELOW the zone is a better fill and
@@ -102,12 +107,18 @@ hold_top = 4             # concurrent ETF holdings (tune with the single-name bo
 # NOTE: capital split between this sleeve and the single-name book is a separate
 # open axis (portfolio construction) — not set here yet.
 
-# --- Regime floor (mechanical ON switch; agent overlay deferred to v2) -------
+# --- Regime: AN OBSERVATION, NOT A GATE (changed 2026-08-14) -----------------
+# These define what is COMPUTED and recorded on the product, and reported by
+# brief(). They gate nothing. The regime filtered the selection twice -- first
+# by emptying it (which sold eleven positions in one minute, 2026-07-27) and
+# then by refusing new entries -- and both were removed: what a regime call
+# means for this book is the session's judgement.
 [regime]
 index          = "$SPX"
-trend_ma_days  = 50      # no NEW entries unless index > its 50-day MA
-vix_ceiling    = 28.0    # no NEW entries if VIX above this
-agent_overlay  = false   # v1 = deterministic-only; qualitative veto in v2
+trend_ma_days  = 50      # the trend line reported: index vs its 50-day MA
+vix_ceiling    = 28.0    # the VIX level reported against
+agent_overlay  = false   # legacy key; the agent's judgement is no longer an
+                         #   "overlay" on a gate — there is no gate to overlay
 
 # --- Intraday exit monitor — the always-on stop-loss / take-profit watcher ----
 # Part 1 (scripts/market_monitor.py) polls moomoo quotes during market hours and
@@ -151,7 +162,9 @@ alert_only     = false    # true = detect+journal breaches but place NO sells
 # switch). One rule stays pure code: the knife guard below.
 [reentry]
 enabled         = true    # false = revert to blind mechanical rebuy
-knife_guard_pct = 0.04    # HARD block, no discretion: no rebuy if price fell
+knife_guard_pct = 0.04    # ⚠️ NO LONGER A HARD BLOCK — enforced in fast_loop.py,
+                          #   deleted 2026-08-14. Now a documented default for the
+                          #   session's judgement. Was: no rebuy if price fell
                           #   more than this below the take-profit exit fill
 review_days     = 5       # judgment window; after this the name rebuys normally
 allow_half      = true    # the downsize option in the agent's menu
