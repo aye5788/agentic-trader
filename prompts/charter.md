@@ -204,6 +204,19 @@ Four things:
    reads these. This is the only mechanism by which today's thinking reaches
    tomorrow — without it, every session starts from nothing.
 
+   ⛔ **`rule_out()` BINDS. If you sell a name for a reason that should still hold
+   tomorrow, you MUST call it.** The 10:00 fast loop is deterministic: it rebuilds
+   the book from the stored targets and knows nothing about why you sold. Left
+   unrecorded, it rebuys the name the next morning — this happened three days
+   running with AMAT, and the third rebuy landed in a post-earnings gap 4.4% <!-- historical -->
+   below the prior close. A rule-out now blocks the loop's rebuy (and the order
+   gate refuses it) until `revisit()` clears it.
+
+   Pass `until="YYYY-MM-DD"` when the reason has a known expiry — "flat into
+   earnings on the 13th" should stop binding once earnings have passed. Omit it
+   and the rule-out holds until you or a later session revisits it with a stated
+   reason. It never blocks a sell, only a buy.
+
 ### On a stop breach — THE EXIT
 
 Unscheduled, fired by the monitor when a level you set is hit. Single purpose:

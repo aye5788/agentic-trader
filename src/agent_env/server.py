@@ -1079,13 +1079,25 @@ def research_log(limit: int = 25) -> str:
 
 
 @mcp.tool()
-def rule_out(symbol: str, reason: str) -> str:
-    """Record that you considered this name and rejected it, and why.
+def rule_out(symbol: str, reason: str, until: str = "") -> str:
+    """Record that you decided against this name, and why. ⛔ THIS BLOCKS BUYS.
 
-    Not a ban and not a fact about the name — a note to your future self so the
-    next session does not repeat the work. Use `revisit` when it changes.
+    Not a fact about the name — your own decision. But it BINDS: the 10:00 fast
+    loop drops the name from its order plan and the order gate refuses the buy,
+    until `revisit` clears it. That is the point. The loop is deterministic and
+    knows nothing about why you sold; unrecorded, it rebuys the name the next
+    morning — which is exactly what happened to AMAT three days running.
+
+    It never blocks a sell, a trim or an exit. Buys only.
+
+    If you sell a name for a reason that should still hold tomorrow, call this.
+
+    `until`: ISO date (YYYY-MM-DD) for a reason with a known expiry — "flat into
+    earnings on the 13th" should stop binding afterwards. Leave it empty and the
+    rule-out holds until revisited.
     """
-    return json.dumps(memory.rule_out(REPO / "research_store", symbol, reason),
+    return json.dumps(memory.rule_out(REPO / "research_store", symbol, reason,
+                                      until=(until.strip() or None)),
                       indent=2, default=str)
 
 

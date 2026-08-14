@@ -145,7 +145,8 @@ def _notional(tool_input: dict) -> tuple[float | None, str]:
     return None, "unsizeable"
 
 
-def decide(payload: dict, cfg: dict, valued: dict, shadow: bool) -> dict:
+def decide(payload: dict, cfg: dict, valued: dict, shadow: bool,
+           ruled: dict | None = None) -> dict:
     """The verdict for one hook payload. Pure: reads no clock, writes nothing.
 
     Order of the gates, and why:
@@ -168,9 +169,12 @@ def decide(payload: dict, cfg: dict, valued: dict, shadow: bool) -> dict:
                                        open position of its only protection.
                                        Everything below this line is BUY-only,
                                        deliberately — including `live_approved`.
-      6. live_approved / HALT_ENTRIES / max_order_pct / whitelist
-                                    -> the ordinary entry gates, via write-free
-                                       src/governance functions only.
+      6. live_approved / HALT_ENTRIES -> the ordinary entry halts.
+      7. active RULE-OUT            -> deny. A session decided against this name
+                                       and recorded it; that decision binds the
+                                       buy side until revisit() clears it. Passed
+                                       in as `ruled` so decide() stays pure.
+      8. max_order_pct / whitelist  -> via write-free src/governance functions.
 
     `valued` is src/marks.load() (or {}). A missing/garbage account value
     becomes NaN, which governance.vet_plan already fails CLOSED on for buys
@@ -224,6 +228,21 @@ def decide(payload: dict, cfg: dict, valued: dict, shadow: bool) -> dict:
             "HALT-ENTRIES active "
             f"({cfg['governance'].get('halt_entries_file', gov.HALT_ENTRIES_DEFAULT)}"
             f" present) — no new risk; BUY of {sym or '?'} refused. Exits stay armed.")
+
+    # ---- an active rule-out refuses the rebuy -----------------------------
+    # The fast loop also drops these from the plan (apply_rule_outs), but the
+    # loop is not the only path to place_equity_order: a session can call the
+    # MCP tool directly. This is the chokepoint that does not depend on which
+    # code path proposed the order, which is the whole reason the hook exists.
+    ro = (ruled or {}).get(sym)
+    if ro is not None:
+        until = f", until {ro['until']}" if ro.get("until") else ""
+        return _deny(
+            f"BUY {sym or '?'} refused: a session RULED THIS OUT on "
+            f"{str(ro.get('ts', ''))[:10]}{until} — "
+            f"{ro.get('reason', '(no reason recorded)')}. That decision binds the "
+            "buy side until a session calls revisit() with a stated reason. "
+            "(Exits are unaffected: a rule-out never blocks a sell.)")
 
     amount, how = _notional(ti)
     if amount is None:
@@ -371,6 +390,27 @@ def announce_if_unusual(payload: dict, decision: dict, cfg: dict, valued: dict) 
 # --------------------------------------------------------------------------- #
 # driver
 # --------------------------------------------------------------------------- #
+RULED_OUT_FILE = REPO / "research_store" / "memory" / "ruled_out.jsonl"
+
+
+def _load_ruled() -> dict:
+    """Active rule-outs for the gate. Small JSONL — inside the latency budget.
+
+    ABSENT FILE -> {}. Nothing has ever been ruled out; that is a true statement
+    about the world, not a swallowed error, and denying every buy because a file
+    the agent has not written yet does not exist would be an outage.
+
+    PRESENT BUT UNREADABLE -> RAISES, and driver() turns that into a deny. This
+    asymmetry is deliberate. The failure being fixed here is a guard that existed
+    on paper and bound nothing; "the record is there but I could not read it, so
+    I bought anyway" is that same failure wearing a different hat.
+    """
+    if not RULED_OUT_FILE.exists():
+        return {}
+    from agent_env import memory                  # noqa: PLC0415 — off decide()'s path
+    return memory.binding_rule_outs(REPO / "research_store")
+
+
 def _emit(d: dict) -> None:
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
@@ -395,7 +435,7 @@ def driver(raw: str) -> int:
         import marks             # noqa: PLC0415
         cfg = strategy.load()
         valued = marks.load() or {}
-        d = decide(payload, cfg, valued, SHADOW_FILE.exists())
+        d = decide(payload, cfg, valued, SHADOW_FILE.exists(), _load_ruled())
         _emit(d)                          # the verdict goes out FIRST, always
         announce_if_unusual(payload, d, cfg, valued)
     except Exception as e:       # noqa: BLE001 — deliberate catch-all, see docstring
@@ -510,6 +550,43 @@ def _selftest() -> None:
             assert decide(buy, OFF, V, shadow=False)["permissionDecision"] == "deny"
             assert decide(sell, OFF, V, shadow=False)["permissionDecision"] == "allow", \
                 "live_approved must never strand an exit"
+
+            # --- an active RULE-OUT refuses the rebuy, and never an exit ------
+            # The failure: a session exited AMAT to be flat into earnings and
+            # recorded it; the loop rebought it the next morning three days
+            # running because nothing read the record. The loop now drops it from
+            # the plan, and this gate refuses it no matter WHO proposes the order.
+            RO = {"AMAT": {"ts": "2026-08-12T20:10:00+00:00",
+                           "reason": "flat into earnings", "until": "2026-08-15"}}
+            ro_buy = {"tool_name": ORDER_TOOL,
+                      "tool_input": {"symbol": "AMAT", "side": "buy", "amount": 5.28}}
+            r = decide(ro_buy, CFG, V, shadow=False, ruled=RO)
+            assert r["permissionDecision"] == "deny", r
+            assert "RULED THIS OUT" in r["permissionDecisionReason"], r
+            assert "flat into earnings" in r["permissionDecisionReason"], r
+            assert "2026-08-15" in r["permissionDecisionReason"], r
+            # ⚠️ A RULE-OUT MUST NEVER STRAND AN EXIT
+            ro_sell = {**ro_buy, "tool_input": {"symbol": "AMAT", "side": "sell",
+                                                "amount": 5.28}}
+            assert decide(ro_sell, CFG, V, shadow=False, ruled=RO)["permissionDecision"] \
+                == "allow", "a rule-out must never block a sell"
+            ro_qty_sell = {**ro_buy, "tool_input": {"symbol": "AMAT", "side": "sell",
+                                                    "type": "market", "quantity": "0.0103"}}
+            assert decide(ro_qty_sell, CFG, V, shadow=False, ruled=RO)["permissionDecision"] \
+                == "allow", "a full exit of a ruled-out name must pass"
+            # an unrelated name is untouched
+            assert decide(buy, CFG, V, shadow=False, ruled=RO)["permissionDecision"] == "allow"
+            # a degenerate record still blocks — `is not None`, not truthiness
+            assert decide(ro_buy, CFG, V, shadow=False,
+                          ruled={"AMAT": {}})["permissionDecision"] == "deny"
+            # no rule-outs at all -> exactly the old behaviour
+            assert decide(ro_buy, CFG, V, shadow=False, ruled={})["permissionDecision"] == "allow"
+            assert decide(ro_buy, CFG, V, shadow=False)["permissionDecision"] == "allow"
+            # the kill switch still outranks it, and still refuses the exit
+            (gov.REPO / "research_store" / "HALT").touch()
+            assert "KILL-SWITCH" in decide(ro_buy, CFG, V, shadow=False,
+                                           ruled=RO)["permissionDecisionReason"]
+            (gov.REPO / "research_store" / "HALT").unlink()
 
             # --- whitelist is BUY-ONLY (mirrors governance.vet_plan) ----------
             WL = {**CFG, "governance": {**CFG["governance"], "require_whitelist": True},

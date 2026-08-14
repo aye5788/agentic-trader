@@ -114,6 +114,12 @@ REGISTRY = {
                               "journal exit_signal (reason=target1|target2)"),
     "risk_review_order": Control("risk_review_order", "Risk-review orders placed", 30,
                                  "journal risk_review orders_intended"),
+    # Registered because this one already failed silently once in the other
+    # direction: rule_out() was written, recorded faithfully, and bound nothing
+    # for its whole life. A control nobody measures is a control that is dead
+    # without anybody noticing — which is the entire point of this file.
+    "rule_out_block": Control("rule_out_block", "Rule-out blocked a rebuy", 60,
+                              "fast_loop order_plan blocked (reason=ruled out)"),
 }
 
 

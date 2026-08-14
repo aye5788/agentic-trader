@@ -18,7 +18,28 @@ Three notes on why this is files and not a database:
 
 ⚠️ These records are the agent's OWN reasoning, not facts about the market. A
 rule-out means "I decided against this, for this reason, on this date" — never
-"this is untradeable". Nothing here gates an order.
+"this is untradeable".
+
+⛔ A RULE-OUT BINDS THE BUY SIDE. This used to read "nothing here gates an
+order", and that sentence was the defect. A session would exit AMAT to be flat
+into earnings, record the rule-out, and the deterministic fast loop — which
+never opened this file — would rebuy it the next morning. That happened three
+times (2026-08-12, 08-13, 08-14); the third bought straight into a post-earnings
+gap 4.4% below the prior close. A decision the machine records but cannot act on
+is not memory, it is a diary.
+
+So: `binding_rule_outs()` is read by scripts/fast_loop.py (drops the buy from the
+plan) and by scripts/hooks/pretooluse_order_gate.py (refuses it at placement, the
+unbypassable gate). Both chokepoints, because the loop is not the only thing that
+can place an order.
+
+It binds BUYS ONLY. A rule-out can never block a sell, an exit, or a trim — same
+rule as the kill-switch split and the cooldown: stops here are software-only, so
+anything that blocks an exit strips a position of its only protection.
+
+`revisit()` clears it. `until` time-boxes it for a reason with a known expiry
+(earnings, a lockup, a pending filing); omit `until` and it holds until a session
+explicitly revisits, which is what "I decided against this" should mean.
 """
 from __future__ import annotations
 
@@ -56,8 +77,18 @@ def _append(path: Path, rec: dict) -> None:
         fh.write(json.dumps(rec, sort_keys=True) + "\n")
 
 
-def rule_out(root: Path, symbol: str, reason: str, now=None) -> dict:
-    """Record that this name was considered and rejected, with the reason."""
+def rule_out(root: Path, symbol: str, reason: str, now=None,
+             until: str | None = None) -> dict:
+    """Record that this name was considered and rejected, with the reason.
+
+    ⛔ THIS BLOCKS BUYS until revisited (or until `until` passes). See the module
+    docstring: the fast loop and the order gate both read it. It cannot block a
+    sell or an exit.
+
+    `until` is an ISO date (YYYY-MM-DD) for a reason with a known expiry —
+    "flat into earnings on the 13th" should not exclude the name forever.
+    Omit it and the rule-out holds until a session calls revisit().
+    """
     symbol = str(symbol).strip().upper()
     reason = str(reason).strip()
     if not symbol:
@@ -67,6 +98,14 @@ def rule_out(root: Path, symbol: str, reason: str, now=None) -> dict:
                          "indistinguishable from an oversight next session"}
     rec = {"ts": _now_iso(now), "symbol": symbol, "reason": reason,
            "status": "ruled_out"}
+    if until is not None:
+        until = str(until).strip()
+        try:
+            datetime.strptime(until, "%Y-%m-%d")
+        except ValueError:
+            return {"error": f"until must be an ISO date (YYYY-MM-DD), got {until!r} "
+                             "— an unparseable expiry would silently never expire"}
+        rec["until"] = until
     _append(root / MEM_DIRNAME / RULED_OUT, rec)
     return {"recorded": rec}
 
@@ -94,6 +133,39 @@ def ruled_out(root: Path) -> dict:
     return {"ruled_out": active,
             "revisited": sorted(s for s, r in latest.items()
                                 if r.get("status") == "revisited")}
+
+
+def binding_rule_outs(root: Path, today: str | None = None) -> dict:
+    """{symbol: record} for rule-outs that BLOCK A BUY right now.
+
+    This is the function the fast loop and the order gate call. It is deliberately
+    separate from ruled_out(): that one is a reading surface for the agent (it
+    reports revisited names too), this one is a gate input and returns only what
+    is currently binding.
+
+    - latest entry per symbol wins (append-only file, revisit supersedes)
+    - status must be "ruled_out" — a revisited name binds nothing
+    - an `until` in the past has expired and binds nothing
+
+    A missing file returns {} — that is "nothing was ruled out", which is the
+    truth, not a swallowed error. A torn line is skipped by _read() rather than
+    blinding the rest of the file.
+    """
+    today = today or datetime.now(timezone.utc).date().isoformat()
+    latest: dict = {}
+    for rec in _read(root / MEM_DIRNAME / RULED_OUT):
+        sym = rec.get("symbol")
+        if sym:
+            latest[sym] = rec
+    out = {}
+    for sym, rec in latest.items():
+        if rec.get("status") != "ruled_out":
+            continue
+        until = rec.get("until")
+        if until and str(until) < today:
+            continue
+        out[sym] = rec
+    return out
 
 
 def open_question(root: Path, question: str, now=None) -> dict:
@@ -244,6 +316,35 @@ def _selftest() -> None:
         assert r["revisited"] == ["AAA"], r
         raw = (root / MEM_DIRNAME / RULED_OUT).read_text().splitlines()
         assert len(raw) == 3, "append-only: the original must still be on disk"
+
+        # ⛔ THE BINDING HALF — this is what the fast loop and the order gate read.
+        # The defect this replaces: rule_out() recorded AMAT and the loop rebought
+        # it the next morning three days running, because nothing read the file.
+        b = binding_rule_outs(root, today="2026-08-14")
+        assert set(b) == {"BBB"}, b               # AAA was revisited -> not binding
+        assert b["BBB"]["reason"] == "no liquidity"
+
+        # an `until` time-boxes it: binding up to and including the date, then not
+        rule_out(root, "AMAT", "flat into earnings 08-13", until="2026-08-15")
+        assert "AMAT" in binding_rule_outs(root, today="2026-08-14")
+        assert "AMAT" in binding_rule_outs(root, today="2026-08-15"), "inclusive"
+        assert "AMAT" not in binding_rule_outs(root, today="2026-08-16"), "expired"
+        # ...and no `until` binds indefinitely, until revisited
+        assert "BBB" in binding_rule_outs(root, today="2099-01-01")
+        rule_out(root, "CCC", "thesis broken")
+        assert "CCC" in binding_rule_outs(root, today="2099-01-01")
+        revisit(root, "CCC", "thesis re-formed")
+        assert "CCC" not in binding_rule_outs(root, today="2026-08-14")
+
+        # an unparseable expiry is REFUSED, never stored — a bad date that silently
+        # never expires would be a permanent, invisible block on the name
+        assert "error" in rule_out(root, "ZZZ", "why", until="next tuesday")
+        assert "error" in rule_out(root, "ZZZ", "why", until="2026-13-45")
+        assert "ZZZ" not in binding_rule_outs(root, today="2026-08-14")
+
+        # a missing file is "nothing ruled out", not an error
+        with tempfile.TemporaryDirectory() as d3:
+            assert binding_rule_outs(Path(d3)) == {}
 
         # questions open then close
         open_question(root, "is the sleeve carrying its weight?")

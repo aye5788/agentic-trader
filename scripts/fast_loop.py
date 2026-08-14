@@ -188,6 +188,55 @@ def apply_cooldown(orders: list[dict], cooled: set) -> tuple[list[dict], list[di
     return kept, blocked
 
 
+def load_rule_outs(root: Path | None = None, today: str | None = None) -> dict:
+    """Names a session explicitly decided against -> {symbol: record}.
+
+    ⛔ THE GAP THIS CLOSES. The loop had two buy-blocking guards and a
+    discretionary exit tripped NEITHER: apply_reentry fires only on a
+    take-profit (reentry_review.json) and apply_cooldown only on a stop
+    (cooldown.json). A session deciding "sell AMAT, be flat into earnings"
+    wrote to neither, so the next morning AMAT was a plain `open` with nothing
+    in front of it. It recurred 2026-08-12, 08-13 and 08-14; the third bought
+    into a post-earnings gap 4.4% below the prior close.
+
+    `rule_out()` already existed in src/agent_env/memory.py and already recorded
+    exactly the right fact — its docstring simply declared that nothing gated an
+    order on it. This reads it. Absent/unreadable -> {} (no rule-outs recorded is
+    a true statement, not a swallowed error; torn lines are skipped per-line).
+    """
+    root = root or (REPO / "research_store")
+    try:
+        sys.path.insert(0, str(REPO / "src"))
+        from agent_env import memory                      # noqa: PLC0415
+        return memory.binding_rule_outs(root, today=today)
+    except Exception:
+        return {}
+
+
+def apply_rule_outs(orders: list[dict], ruled: dict) -> tuple[list[dict], list[dict]]:
+    """Block BUYs of names under an active rule-out. Returns (kept, blocked).
+
+    BUY-ONLY, like every other guard here: a rule-out must never block a sell, an
+    exit or a trim. Stops on this box are software-only, so a guard that can
+    refuse a sell removes an open position's only protection. Pure; selftested.
+    """
+    kept, blocked = [], []
+    for o in orders:
+        r = ruled.get(o["symbol"]) if o["side"] == "buy" else None
+        # `is not None`, NOT truthiness: an empty/degenerate record {} is still a
+        # rule-out that was recorded, and a falsy check would let the buy through
+        # — failing open on exactly the malformed input a guard exists to catch.
+        if r is not None:
+            until = f", until {r['until']}" if r.get("until") else ""
+            blocked.append({**o, "blocked":
+                            f"ruled out by a session on {str(r.get('ts', ''))[:10]}"
+                            f"{until}: {r.get('reason', '(no reason recorded)')} "
+                            f"— revisit() to clear it"})
+        else:
+            kept.append(o)
+    return kept, blocked
+
+
 def load_reviews(path: Path = REENTRY) -> dict:
     """Active re-entry flags, pruning expired ones on the way through."""
     try:
@@ -275,6 +324,45 @@ def _selftest() -> None:
         assert load_cooldown(p, today="2026-07-17") == {"XLK"}   # OLD expired -> excluded
         assert load_cooldown(p, today="2026-07-25") == set()     # all expired
         assert load_cooldown(Path(d) / "missing.json") == set()  # absent -> fail open
+    # --- rule-outs BIND: a session's exit decision blocks the loop's rebuy ----
+    # The regression this locks down: a session exited AMAT to be flat into
+    # earnings and recorded it; the loop rebought it the next morning, three days
+    # running, because no guard read the record. BUY-ONLY, like every other guard.
+    ruled = {"AMAT": {"ts": "2026-08-12T20:10:00+00:00",
+                      "reason": "flat into earnings", "until": "2026-08-15"}}
+    orders = [{"symbol": "AMAT", "side": "buy", "amount": 5.28},
+              {"symbol": "MU", "side": "buy", "amount": 5.0},
+              {"symbol": "AMAT", "side": "sell", "amount": 5.28}]
+    kept, blk = apply_rule_outs(orders, ruled)
+    assert [(o["symbol"], o["side"]) for o in kept] == [("MU", "buy"), ("AMAT", "sell")], kept
+    assert len(blk) == 1 and blk[0]["symbol"] == "AMAT" and blk[0]["side"] == "buy"
+    assert "flat into earnings" in blk[0]["blocked"] and "2026-08-15" in blk[0]["blocked"]
+    # ⚠️ A RULE-OUT MUST NEVER BLOCK AN EXIT — same rule as cooldown/kill-switch:
+    # stops here are software-only, so blocking a sell strips a position's only
+    # protection. A full exit of a ruled-out name has to pass.
+    exit_only = [{"symbol": "AMAT", "side": "sell", "amount": 5.28, "quantity": 0.0103}]
+    kept, blk = apply_rule_outs(exit_only, ruled)
+    assert len(kept) == 1 and not blk, "a rule-out must never strand an exit"
+    kept, blk = apply_rule_outs(orders, {})           # nothing ruled out -> all pass
+    assert not blk and len(kept) == 3
+    # a record with no reason still blocks and still says so, rather than crashing
+    kept, blk = apply_rule_outs([{"symbol": "X", "side": "buy", "amount": 1.0}],
+                                {"X": {}})
+    assert len(blk) == 1 and "no reason recorded" in blk[0]["blocked"]
+    # end-to-end through the real memory module: record -> binding -> blocked
+    with tempfile.TemporaryDirectory() as d:
+        sys.path.insert(0, str(REPO / "src"))
+        from agent_env import memory as _mem
+        root = Path(d)
+        _mem.rule_out(root, "AMAT", "flat into earnings", until="2026-08-15")
+        live = load_rule_outs(root, today="2026-08-14")
+        assert "AMAT" in live, live
+        _, blk = apply_rule_outs([{"symbol": "AMAT", "side": "buy", "amount": 5.28}], live)
+        assert len(blk) == 1, "the recorded decision must reach the plan"
+        # and it stops binding once revisited
+        _mem.revisit(root, "AMAT", "earnings passed, thesis intact")
+        assert load_rule_outs(root, today="2026-08-14") == {}
+
     # --- no-chase guard (the rule that was documented but never wired) --------
     Z = {"LITE": {"high": 833.85, "sigma": 0.0569},   # 0.5s ceiling ~ 857.6
          "MU":   {"high": 964.28, "sigma": 0.0487},   # 0.5s ceiling ~ 987.8
@@ -300,6 +388,7 @@ def _selftest() -> None:
     _, blk = apply_chase_guard([b("LITE")], Z, {"LITE": 875.34}, tol_sigma=1.0)
     assert not blk, "1.0s must admit the 07-23 LITE fill"
     print("selftest OK: exits, opens, rebalances, band-skip, reentry routing, cooldown block, "
+          "rule-out block (buy-only, exits always pass), "
           "no-chase (asymmetric, fail-open)")
 
 
@@ -380,6 +469,18 @@ def main() -> None:
             print(f"cooldown: blocking rebuy of "
                   f"{', '.join(sorted(o['symbol'] for o in cblocked))}")
         blocked += cblocked
+
+    # ---- rule-outs: a session's decision binds the deterministic loop --------
+    # Without this the loop rebuys a name a session deliberately exited, because
+    # nothing connected the two. Three occurrences; the third bought into a
+    # post-earnings gap. See load_rule_outs().
+    ruled = load_rule_outs()
+    if ruled:
+        approved, roblocked = apply_rule_outs(approved, ruled)
+        if roblocked:
+            print(f"rule_out: blocking buy of "
+                  f"{', '.join(sorted(o['symbol'] for o in roblocked))}")
+        blocked += roblocked
 
     # ---- no-chase: never open a name that has run past its entry zone --------
     tm = cfg.get("trade_management", {})
