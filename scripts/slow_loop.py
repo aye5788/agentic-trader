@@ -200,6 +200,71 @@ def rotation_due(cfg: dict, today=None) -> bool:
     return True
 
 
+def held_positions(path: Path | None = None) -> set[str] | None:
+    """Symbols the AGENT actually holds at the broker. -> set, or None if unreadable.
+
+    None is distinct from the empty set: empty means "we hold nothing", None
+    means "the snapshot could not be read" and the caller must fall back rather
+    than conclude anything.
+    """
+    path = path or (REPO / "research_store" / "rh" / "positions.json")
+    try:
+        import json                                   # noqa: PLC0415
+        pos = json.loads(path.read_text()).get("positions") or {}
+        return {str(k).upper() for k, v in pos.items()
+                if float((v or {}).get("qty") or 0) > 0}
+    except Exception:                                 # noqa: BLE001
+        return None
+
+
+def protective_theses(owned: set, covered: set, scored, closes, asof, tm,
+                      start_rank: int) -> list:
+    """Geometry for names the AGENT HOLDS that the ranking did not select.
+
+    ⛔ THE BOOK IS WHATEVER THE AGENT HOLDS. This loop ranks candidates and
+    supplies default levels; it does not decide the book. But the monitor's
+    base stop comes from a thesis (apply_overrides overlays the agent's
+    stricter-only set_levels ON TOP of it), and until now a thesis existed only
+    for names THIS LOOP selected. A name the agent bought on its own judgement
+    -- exactly what it is supposed to do -- got no thesis, therefore no base
+    stop, and the monitor could only report it "unprotected".
+
+    So these carry FULL GEOMETRY and target_weight 0.0: the loop is not
+    prescribing the position, it is making sure the position the agent took is
+    watched. verdict="hold" says the same thing -- this is not a buy
+    recommendation, it is protection for something already owned.
+
+    A held name with no price history (outside the panel entirely) still cannot
+    be given geometry; it stays unprotected and the monitor still says so.
+    """
+    out = []
+    rank = start_rank
+    for sym in sorted(owned - covered):
+        if sym not in scored.index or sym not in closes.columns:
+            continue                       # no signal/price -> cannot size a stop
+        row = scored.loc[sym]
+        try:
+            price = float(closes.loc[asof, sym])
+            g = geometry(price, row["sigma"], tm["stop_atr_mult"], tm["target_r_mults"])
+        except Exception:                  # noqa: BLE001 — one name, never the run
+            continue
+        out.append(Thesis(
+            symbol=sym, rank=rank, verdict="hold",
+            thesis=f"HELD, not in the ranked selection (rank {int(row['rank'])}). "
+                   f"Geometry supplied so the monitor has a base stop; the loop "
+                   f"is not prescribing this position.",
+            entry_zone=g["entry_zone"], stop=g["stop"], targets=g["targets"],
+            target_weight=0.0,
+            confidence=round(float(row["score"]), 3),
+            signals={"score": round(float(row["score"]), 4),
+                     "sigma": round(float(row["sigma"]), 5),
+                     "rank": int(row["rank"]), "source": "protective"},
+            as_of=str(asof.date()),
+            review_by=f"{(asof + pd.Timedelta(days=7)).date()} (weekly rebalance)"))
+        rank += 1
+    return out
+
+
 def select_book(book_scored, etf_scored, held_book: set, held_etf: set,
                 P: dict, *, regime: bool, rotate: bool) -> tuple[list, list]:
     """Choose the book and sleeve. -> (book_sel, etf_sel).
@@ -329,8 +394,33 @@ def _selftest() -> None:
     assert rt.regime == payload, rt.regime
     assert rt.regime["vix"] == 31.0, "the VIX half must survive the round trip too"
 
+    # ---- the AGENT's book gets geometry, not just this loop's picks --------
+    # The monitor's base stop comes from a thesis; a name the agent bought that
+    # the ranking never selected had none, so it could only be reported
+    # "unprotected". These carry full geometry at weight 0 — protection for a
+    # position already taken, not a recommendation to take one.
+    sc = pd.DataFrame({"score": [1.0, 0.5], "rank": [30, 40],
+                       "sigma": [0.02, 0.03]}, index=["HELD", "NOPRICE"])
+    cl = pd.DataFrame({"HELD": [100.0]}, index=[idx[0]])
+    TMx = {"stop_atr_mult": 2.5, "target_r_mults": [2.2, 4.0]}
+
+    got = protective_theses({"HELD"}, set(), sc, cl, idx[0], TMx, 200)
+    assert len(got) == 1 and got[0].symbol == "HELD", got
+    assert got[0].target_weight == 0.0, "the loop must not prescribe a held position"
+    assert got[0].verdict == "hold", got[0].verdict
+    assert got[0].stop and got[0].stop < 100.0, "a protective thesis needs a real stop"
+    assert got[0].targets and got[0].targets[0] > 100.0, got[0].targets
+    # already in the product -> not duplicated
+    assert protective_theses({"HELD"}, {"HELD"}, sc, cl, idx[0], TMx, 200) == []
+    # held but no price/signal -> skipped, never a thesis with a fabricated stop
+    assert protective_theses({"NOPRICE"}, set(), sc, cl, idx[0], TMx, 200) == []
+    assert protective_theses({"UNKNOWN"}, set(), sc, cl, idx[0], TMx, 200) == []
+    # an unreadable snapshot is "unknown", never "holds nothing"
+    assert held_positions(Path("/nonexistent/positions.json")) is None
+
     print("selftest OK: the regime cannot move the selection (proved by running "
-          "it both ways), regime-off is never empty, and the fact round-trips")
+          "it both ways), regime-off is never empty, the fact round-trips, and "
+          "held-but-unselected names get a base stop at weight 0")
 
     # ---- the rebalance knob must actually BIND ----------------------------
     from datetime import date as _d
@@ -451,6 +541,26 @@ def main() -> None:
     etf_held, etf_drop = build_theses(etf_sel, etf_scored, closes, asof, per_etf, TM, 100)
 
     theses = book_held + etf_held
+
+    # ---- protect what the AGENT holds, not only what this loop picked -------
+    # The base stop the monitor enforces comes from a thesis. Until now one
+    # existed only for names this loop SELECTED, so a position the agent opened
+    # on its own judgement had no stop to enforce and could only be reported
+    # "unprotected". The book is whatever the agent holds; this loop's job is to
+    # rank candidates and supply default levels for all of it.
+    owned = held_positions()
+    if owned is None:
+        print("  ⚠️ positions snapshot unreadable — no protective geometry added "
+              "for held names outside the selection")
+    else:
+        covered = {t.symbol for t in theses}
+        extra = protective_theses(owned, covered, book_scored, closes, asof, TM, 200)
+        extra += protective_theses(owned, covered | {t.symbol for t in extra},
+                                   etf_scored, closes, asof, TM, 300)
+        if extra:
+            print(f"  protective geometry (held, unselected, weight 0): "
+                  f"{', '.join(t.symbol for t in extra)}")
+        theses += extra
 
     # ---- stamp real earnings dates onto the book ----------------------------
     # The book is the ONLY place this can live: risk_review runs at 12:00/15:45
