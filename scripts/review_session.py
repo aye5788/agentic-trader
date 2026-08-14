@@ -293,17 +293,33 @@ def busy_now() -> str | None:
     return None
 
 
-def run(dry: bool = False, force: bool = False) -> dict:
+def run(dry: bool = False, force: bool = False, day: str | None = None,
+        replay: bool = False) -> dict:
+    """Review a session. `day`/`replay` exist to TEST this path, not to use it.
+
+    ⛔ REPLAY IS READ-ONLY AGAINST THE LEDGER. A replay re-reviews an earlier
+    day so the full prompt -> codex -> verdict chain can be exercised on demand
+    (there is otherwise no way to test it except waiting for a live session, and
+    "we'll see tomorrow" is how the reviewer stayed broken for a day). It must
+    therefore never look like a real review: it does NOT journal a codex_review
+    event and does NOT overwrite latest.json, because a replayed verdict is not
+    a new opinion about the book and score_reviews must not price it as one.
+    Its artifacts go to reviews/replay/ instead.
+    """
     if not force:
         busy = busy_now()
         if busy:
             return {"ok": True, "skipped": busy}
-    day = datetime.now(timezone.utc).date().isoformat()
+    day = day or datetime.now(timezone.utc).date().isoformat()
     journal = REPO / "research_store" / "journal.jsonl"
     decisions = session_decisions(journal, day)
     if not decisions:
-        return {"ok": True, "skipped": "no agent decisions today — nothing to review"}
+        return {"ok": True,
+                "skipped": f"no agent decisions on {day} — nothing to review"}
 
+    global OUT
+    if replay:
+        OUT = REPO / "research_store" / "reviews" / "replay"
     OUT.mkdir(parents=True, exist_ok=True)
     dpath = OUT / f"{day}-decisions.json"
     dpath.write_text(json.dumps(decisions, indent=2))
@@ -362,11 +378,21 @@ def run(dry: bool = False, force: bool = False) -> dict:
         return {"ok": False, "error": err, "returncode": proc.returncode}
 
     (OUT / f"{day}-review.txt").write_text(text)
-    (OUT / "latest.json").write_text(json.dumps(
-        {"day": day, "reviewed_decisions": len(decisions), **verdict}, indent=2))
+    # ⛔ A REPLAY IS NOT THE LATEST VERDICT. latest.json is what the operator and
+    # (when reconnected) the brief read as "the current opinion about the book".
+    # A re-review of an old day is a test artifact, not a new opinion.
+    if not replay:
+        (OUT / "latest.json").write_text(json.dumps(
+            {"day": day, "reviewed_decisions": len(decisions), **verdict}, indent=2))
 
+    # ⛔ A REPLAY NEVER TOUCHES THE LEDGER. score_reviews.py joins codex_review
+    # events to the decisions they examined; a replayed verdict would be scored
+    # as a second, later opinion on a day already judged — and under the
+    # same-scope-latest-wins rule it would SUPERSEDE the real one.
     try:
         from research_store import store          # noqa: PLC0415
+        if replay:
+            raise RuntimeError("replay: ledger deliberately untouched")
         store.append_journal({
             "event": "codex_review",
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -385,7 +411,7 @@ def run(dry: bool = False, force: bool = False) -> dict:
 
     # The operator hears about a DISSENT, not an affirmation. An alert that
     # fires when nothing is wrong is one that gets ignored when something is.
-    if verdict.get("stance") in ("DISSENT", "SPLIT"):
+    if verdict.get("stance") in ("DISSENT", "SPLIT") and not replay:
         try:
             import notify                          # noqa: PLC0415
             notify.push(f"Reviewer {verdict['stance']}: today's session",
@@ -637,10 +663,15 @@ if __name__ == "__main__":
     ap.add_argument("--dry", action="store_true")
     ap.add_argument("--force", action="store_true",
                     help="run even if the box is busy (you are watching it)")
+    ap.add_argument("--day", help="review this UTC date instead of today (test)")
+    ap.add_argument("--replay", action="store_true",
+                    help="TEST MODE: re-review an earlier day without journalling "
+                         "a codex_review, overwriting latest.json, or pushing. "
+                         "Artifacts go to research_store/reviews/replay/.")
     a = ap.parse_args()
     if a.selftest:
         _selftest()
         raise SystemExit(0)
-    r = run(dry=a.dry, force=a.force)
+    r = run(dry=a.dry, force=a.force, day=a.day, replay=a.replay)
     print(json.dumps(r, indent=2))
     raise SystemExit(0 if r.get("ok") else 1)

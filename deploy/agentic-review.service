@@ -25,9 +25,9 @@ Environment=HOME=/root
 # every single run and the failure was invisible for a day. High is the working
 # control; Max is a catastrophe backstop, set well above anything observed.
 MemoryAccounting=yes
-MemoryHigh=900M
-MemoryMax=1400M
-MemorySwapMax=300M
+MemoryHigh=1300M
+MemoryMax=1600M
+MemorySwapMax=512M
 CPUAccounting=yes
 CPUWeight=20
 IOWeight=20
