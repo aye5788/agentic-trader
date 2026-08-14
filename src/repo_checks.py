@@ -22,6 +22,7 @@ plain .venv, not just system python3.10).
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import shlex
@@ -1286,14 +1287,29 @@ def check_units_match_installed(root: pathlib.Path,
     run after the copy. Both would show as "in sync" here while behaving
     differently — `systemctl show <unit>` is the only authority on live values.
 
-    Skipped entirely when /etc/systemd/system is unreadable (CI, containers),
-    because absence of the directory is not evidence of drift.
+    ⛔ ONLY RUNS ON A DEPLOYMENT HOST, and getting that wrong cost real noise.
+    The first version skipped only when /etc/systemd/system was missing — but
+    that directory exists on ANY Linux box, including a GitHub Actions runner,
+    where none of our units are installed and none ever should be. It therefore
+    reported all three units "not installed" in CI, failed the validate
+    workflow, filed a bug+auto-fix issue, and that issue triggered the agent
+    workflow. A drift check that cannot tell a deployment host from a build
+    runner does not detect drift; it manufactures alerts.
+
+    The host test is the units themselves: if NONE of the repo's units are
+    installed, this is not a box that runs them, so there is nothing to compare
+    and the check is silent. If SOME are installed, this IS such a box, and a
+    missing or differing unit is then a real finding — which is exactly the case
+    worth catching (a unit added to the repo and never copied over).
     """
     out: list[str] = []
     installed_dir = installed_dir or pathlib.Path("/etc/systemd/system")
-    if not installed_dir.is_dir():
+    if not installed_dir.is_dir() or os.environ.get("CI"):
         return out
-    for src in sorted((root / "deploy").glob("*.service")):
+    units = sorted((root / "deploy").glob("*.service"))
+    if not any((installed_dir / u.name).exists() for u in units):
+        return out                      # not a deployment host — nothing to say
+    for src in units:
         live = installed_dir / src.name
         if not live.exists():
             out.append(f"deploy/{src.name} is not installed at {live} — the repo "
@@ -1496,13 +1512,23 @@ HOME=/root
         inst.mkdir()
         _write(root, "deploy/agentic-x.service", "[Service]\nMemoryMax=1200M\n")
 
-        # never installed -> reported, not silently passed
-        bad = check_units_match_installed(root, inst)
-        assert len(bad) == 1 and "not installed" in bad[0], bad
+        # ⛔ NOT A DEPLOYMENT HOST -> SILENT. A dir with none of our units is a
+        # build runner, not a box that runs them. Getting this wrong on
+        # 2026-08-13 failed CI, filed a bug+auto-fix issue, and triggered the
+        # agent workflow off it — alerts manufactured, not drift detected.
+        assert check_units_match_installed(root, inst) == [], \
+            "reported drift on a host where no unit is installed (this is CI)"
 
         # installed and identical -> clean
         (inst / "agentic-x.service").write_text("[Service]\nMemoryMax=1200M\n")
         assert check_units_match_installed(root, inst) == []
+
+        # a SECOND unit added to the repo and never copied, on a host that DOES
+        # run units -> a real finding, which is the case worth catching
+        _write(root, "deploy/agentic-y.service", "[Service]\n")
+        bad = check_units_match_installed(root, inst)
+        assert len(bad) == 1 and "not installed" in bad[0], bad
+        (root / "deploy" / "agentic-y.service").unlink()
 
         # edited in the repo, never copied -> the failure this exists for
         _write(root, "deploy/agentic-x.service", "[Service]\nMemoryMax=1400M\n")

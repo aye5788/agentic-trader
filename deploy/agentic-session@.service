@@ -1,0 +1,46 @@
+[Unit]
+Description=agentic-trader agent session (%i)
+Documentation=file:/opt/agentic-trader/docs/OPSLOG.md
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/agentic-trader
+# %i is the instance name: agentic-session@open, agentic-session@close.
+ExecStart=/opt/agentic-trader/deploy/run_session.sh %i
+
+# Service PATH is not a login PATH. /root/.local/bin holds `codex`, which the
+# review at the end of run_session.sh needs — its absence silently killed every
+# scheduled review until 2026-08-13 (OPSLOG).
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
+Environment=HOME=/root
+
+# --- RUNTIME BOUND ----------------------------------------------------------
+# run_session.sh is session.py (which has its own per-mode timeout: open 1800s,
+# close 900s) followed by the review (1200s) and the scorer. Worst case for the
+# OPEN slot is 1800 + 1200 + slack, so this outer bound must sit above that or
+# it would cut an orderly timeout short and turn it into an abrupt kill.
+#   open  worst case: 1800 + 1200 = 50min   -> this: 60min
+# The session's own timeouts stay the primary control; this only catches a
+# wedge in the wrapper itself.
+RuntimeMaxSec=3600
+TimeoutStartSec=3600
+
+# --- MEMORY: CATASTROPHE BACKSTOP, NOT A BUDGET -----------------------------
+# ⚠️ Nothing has ever measured what a session peaks at. This is deliberately
+# generous: MemoryHigh throttles (makes it slow, never kills) and MemoryMax sits
+# far above any plausible single model run. A session PLACES ORDERS — killing
+# one mid-flight is materially worse than letting it swap, so the throttle is
+# the working control and the kill line is only there to stop the box dying, as
+# it did on 2026-08-12.
+# ⛔ Do NOT tighten these from a guess. A guessed 700M cap OOM-killed every
+# review this system ever ran, silently, for a day.
+MemoryAccounting=yes
+MemoryHigh=1000M
+MemoryMax=1500M
+MemorySwapMax=400M
+CPUAccounting=yes
+
+# systemd will not start a second agentic-session@open while one is running.
+# session.py's own flock still guards open-vs-close (different instances), which
+# is a case systemd's per-unit rule does not cover.
