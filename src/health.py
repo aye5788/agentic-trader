@@ -107,16 +107,23 @@ class Check:
 # key -> (human label, stale after N days, what proves it ran)
 SPECS = {
     "slow_loop":     ("Slow loop (rebalance)",   3,  "research_store/current.json"),
-    # These two track their OUTPUT, not their log — see the 2026-07-30 note in the
-    # module docstring. fast_loop.py rewrites order_plan.json on EVERY run by
-    # design (it must never leave a stale plan for the placement agent), and
+    # These track their OUTPUT, not their log — see the 2026-07-30 note in the
+    # module docstring.
     # (The risk-review overlay was watched here the same way until it was retired
     # 2026-08-13 and folded into the sessions — see deploy/crontab.template.)
-    "fast_loop":     ("Fast loop (execution)",   4,  "research_store/rh/order_plan.json"),
-    # 4d, not 2d: this artifact only advances during RTH, so Friday's close ->
-    # Monday's 08:00 check is ~2.7d of legitimate dead air (3.7d when Monday is
-    # a market holiday). 2d alarmed every Monday. Matches the other weekday-only
-    # jobs above. Cost: a monitor that dies mid-week is caught ~4d later.
+    #
+    # ⛔ `fast_loop` WAS WATCHED HERE AND IS GONE, retired 2026-08-14 for the same
+    # reason as the overlay: the sessions do its work with judgment. It was the
+    # last procedural order-placer, it ran at 10:00 and the open session reasons
+    # at 10:35, so it moved first every day and the session spent its run undoing
+    # it — it re-opened AMAT twice after a session had deliberately exited, the
+    # second time into a post-earnings gap. Deleting the entry (rather than
+    # leaving it to age out) is the point: a liveness check for a job that is
+    # supposed to be dead pages about the absence of a thing we removed.
+    # 4d below, not 2d: these artifacts only advance during RTH, so Friday's close
+    # -> Monday's 08:00 check is ~2.7d of legitimate dead air (3.7d when Monday is
+    # a market holiday). 2d alarmed every Monday. Cost: a monitor that dies
+    # mid-week is caught ~4d later.
     "monitor":       ("Intraday monitor",        4,  "research_store/monitor/state.json"),
     "ledger_backup": ("Ledger backup",           3,  "logs/backup.log"),
     "signal_panel":  ("moomoo signal panel",    10,  "signal_panel journal event"),
@@ -498,9 +505,11 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
     halted = HALTED if (root / KILL_SWITCH).exists() else None
     return {
         "slow_loop":     _mtime(root / "research_store" / "current.json"),
-        # (output, log): the pair is what makes a blocked run visible.
-        "fast_loop":     halted or (_mtime(root / "research_store" / "rh" / "order_plan.json"),
-                                    _mtime(root / "logs" / "fast.log")),
+        # (`fast_loop` was gathered here as an (output, log) PAIR until it was
+        # retired 2026-08-14. evaluate()'s paired branch is still live and still
+        # selftested against a synthetic spec, because it is the only thing that
+        # catches a job which runs, logs, and produces nothing — wire the next
+        # paired job to it rather than rediscovering the need.)
         "monitor":       _mtime(root / "research_store" / "monitor" / "state.json"),
         "ledger_backup": _mtime(root / "logs" / "backup.log"),
         "signal_panel":  _newest_journal_event(root, "signal_panel"),
@@ -665,68 +674,88 @@ def _selftest() -> None:
     # rows (that is how a retired check's flag gets dropped), so a branch that
     # silently skipped a key would clear its fire-once flag and re-alert a
     # condition that never healed. Cheap to assert, silent and confusing to hit.
-    for _label, _probes in (("empty", {}),
-                            ("skipped", {k: SKIPPED for k in SPECS}),
-                            ("halted", {k: HALTED for k in SPECS}),
-                            ("paired", {"fast_loop": (None, now)})):
-        assert {c.key for c in evaluate(now, _probes)} == set(SPECS), _label
+    # ⛔ These used `fast_loop` as their fixture until it was retired 2026-08-14.
+    # It was the only PAIRED (output, log) job, so its removal would have deleted
+    # the only coverage of evaluate()'s blocked-run branch — the branch that
+    # catches a job which runs, logs, and produces nothing. Rather than lose it,
+    # the paired assertions now run against a synthetic spec injected for the
+    # duration. When a real paired job appears, point these back at it.
+    PAIRED = "_paired_probe"
+    SPECS[PAIRED] = ("Synthetic paired job (test only)", 4,
+                     "research_store/rh/order_plan.json")
+    try:
+        for _label, _probes in (("empty", {}),
+                                ("skipped", {k: SKIPPED for k in SPECS}),
+                                ("halted", {k: HALTED for k in SPECS}),
+                                ("paired", {PAIRED: (None, now)})):
+            assert {c.key for c in evaluate(now, _probes)} == set(SPECS), _label
 
-    # a deliberately halted job is "unknown" too: not healthy, but never alerting.
-    # Throwing the kill-switch is an operator decision, not a fault to nag about.
-    r = {c.key: c for c in evaluate(now, {"fast_loop": HALTED})}
-    for k in ("fast_loop",):
-        assert r[k].status == "unknown", r[k]
-        assert not r[k].alertable, "a thrown kill-switch must not alert daily"
-        assert not r[k].healthy, "halted is not a clean bill of health"
-        assert "kill-switch" in r[k].detail, r[k]
+        # a deliberately halted job is "unknown" too: not healthy, but never
+        # alerting. Throwing the kill-switch is an operator decision, not a fault.
+        r = {c.key: c for c in evaluate(now, {PAIRED: HALTED})}
+        assert r[PAIRED].status == "unknown", r[PAIRED]
+        assert not r[PAIRED].alertable, "a thrown kill-switch must not alert daily"
+        assert not r[PAIRED].healthy, "halted is not a clean bill of health"
+        assert "kill-switch" in r[PAIRED].detail, r[PAIRED]
 
-    # REGRESSION (2026-07-30): the fast loop and risk review ran, wrote their logs,
-    # and halted on a permission prompt for two sessions while this file reported
-    # 7/8 healthy. Both were keyed to LOG mtime, and a blocked run still logs. They
-    # are now keyed to the artifact each job exists to produce, so a fresh log with
-    # a stale output must read STALE. Pin the sources so a future edit cannot
-    # quietly point them back at a log.
-    assert SPECS["fast_loop"][2] == "research_store/rh/order_plan.json", SPECS["fast_loop"]
-    assert not any(s[2].startswith("logs/") for k, s in SPECS.items()
-                   if k in ("fast_loop",)), \
-        "a log proves the job started, not that it did its work"
-    outage = {"fast_loop": now - 3 * day}   # logs were fresh
-    r = {c.key: c for c in evaluate(now, outage)}
-    assert all(r[k].status == "ok" for k in outage), "3d is inside the 4d window"
-    outage = {"fast_loop": now - 5 * day}
-    r = {c.key: c for c in evaluate(now, outage)}
-    for k in outage:
-        assert r[k].status == "stale" and r[k].alertable, r[k]
+        # REGRESSION (2026-07-30): the fast loop and risk review ran, wrote their
+        # logs, and halted on a permission prompt for two sessions while this file
+        # reported 7/8 healthy. Both were keyed to LOG mtime, and a blocked run
+        # still logs. Every spec is now keyed to the ARTIFACT the job exists to
+        # produce, so a fresh log with a stale output reads STALE. Pinned as an
+        # invariant over the whole table so a future edit cannot point any check
+        # back at a log — which is what made the original outage invisible.
+        assert not any(s[2].startswith("logs/") for k, s in SPECS.items()
+                       if k not in ("ledger_backup", "session")), \
+            "a log proves the job started, not that it did its work"
+        outage = {PAIRED: now - 3 * day}   # logs were fresh
+        r = {c.key: c for c in evaluate(now, outage)}
+        assert all(r[k].status == "ok" for k in outage), "3d is inside the 4d window"
+        outage = {PAIRED: now - 5 * day}
+        r = {c.key: c for c in evaluate(now, outage)}
+        for k in outage:
+            assert r[k].status == "stale" and r[k].alertable, r[k]
 
-    # ...but staleness alone was too slow: at the moment Aaron noticed by hand, the
-    # outage was 2.4d old and a 4d window still read "ok". The PAIR is what catches
-    # it after one bad run. Replay the real shape: log fresh, output two days back.
-    blocked = {"fast_loop": (now - 2 * day, now - dt.timedelta(hours=2))}
-    r = {c.key: c for c in evaluate(now, blocked)}
-    for k in blocked:
-        assert r[k].status == "blocked", r[k]
-        assert r[k].alertable and not r[k].healthy, r[k]
-        assert "did not finish" in r[k].detail, r[k]
-    # and it must fire while the staleness window still reads clean — that gap is
-    # the entire point, so assert the old check would NOT have caught this.
-    assert {c.key: c for c in evaluate(now, {k: v[0] for k, v in blocked.items()})
-            }["fast_loop"].status == "ok", "2d output age alone stays inside 4d"
+        # ...but staleness alone was too slow: at the moment Aaron noticed by hand,
+        # the outage was 2.4d old and a 4d window still read "ok". The PAIR is what
+        # catches it after one bad run. Replay the real shape: log fresh, output
+        # two days back.
+        blocked = {PAIRED: (now - 2 * day, now - dt.timedelta(hours=2))}
+        r = {c.key: c for c in evaluate(now, blocked)}
+        for k in blocked:
+            assert r[k].status == "blocked", r[k]
+            assert r[k].alertable and not r[k].healthy, r[k]
+            assert "did not finish" in r[k].detail, r[k]
+        # and it must fire while the staleness window still reads clean — that gap
+        # is the entire point, so assert the old check would NOT have caught this.
+        assert {c.key: c for c in evaluate(now, {k: v[0] for k, v in blocked.items()})
+                }[PAIRED].status == "ok", "2d output age alone stays inside 4d"
 
-    # a healthy run writes both within seconds — that must never read as blocked
-    fine = {"fast_loop": (now - dt.timedelta(hours=3),
-                          now - dt.timedelta(hours=3) + dt.timedelta(minutes=4))}
-    assert {c.key: c for c in evaluate(now, fine)}["fast_loop"].status == "ok"
-    # nor may a long weekend: on a good Friday run both moved together, so the
-    # gap stays ~0 no matter how many days pass before the next run.
-    weekend = {"fast_loop": (now - 3 * day, now - 3 * day + dt.timedelta(minutes=2))}
-    assert {c.key: c for c in evaluate(now, weekend)}["fast_loop"].status == "ok", \
-        "both artifacts move together on a good run — weekends must stay quiet"
-    # a job that has run but NEVER produced its output is blocked, not "never"
-    r = {c.key: c for c in evaluate(now, {"fast_loop": (None, now - dt.timedelta(hours=1))})}
-    assert r["fast_loop"].status == "blocked" and "no research_store" in r["fast_loop"].detail, r["fast_loop"]
-    # a missing log degrades to plain staleness rather than crashing
-    r = {c.key: c for c in evaluate(now, {"fast_loop": (now - 5 * day, None)})}
-    assert r["fast_loop"].status == "stale", r["fast_loop"]
+        # a healthy run writes both within seconds — never read as blocked
+        fine = {PAIRED: (now - dt.timedelta(hours=3),
+                         now - dt.timedelta(hours=3) + dt.timedelta(minutes=4))}
+        assert {c.key: c for c in evaluate(now, fine)}[PAIRED].status == "ok"
+        # nor may a long weekend: on a good Friday run both moved together, so the
+        # gap stays ~0 no matter how many days pass before the next run.
+        weekend = {PAIRED: (now - 3 * day, now - 3 * day + dt.timedelta(minutes=2))}
+        assert {c.key: c for c in evaluate(now, weekend)}[PAIRED].status == "ok", \
+            "both artifacts move together on a good run — weekends must stay quiet"
+        # a job that has run but NEVER produced its output is blocked, not "never"
+        r = {c.key: c for c in evaluate(now, {PAIRED: (None, now - dt.timedelta(hours=1))})}
+        assert r[PAIRED].status == "blocked" and "no research_store" in r[PAIRED].detail, r[PAIRED]
+        # a missing log degrades to plain staleness rather than crashing
+        r = {c.key: c for c in evaluate(now, {PAIRED: (now - 5 * day, None)})}
+        assert r[PAIRED].status == "stale", r[PAIRED]
+    finally:
+        SPECS.pop(PAIRED, None)
+
+    # the retired job must be gone from BOTH tables — a spec without a gather
+    # entry reads "never ran" forever, and a gather entry without a spec is
+    # silently dropped by evaluate(). This is the assertion that would have
+    # caught the risk-review overlay's half-removal.
+    assert "fast_loop" not in SPECS, "fast_loop was retired 2026-08-14"
+    assert "fast_loop" not in gather(REPO, use_network=False), \
+        "gather() still probes a retired job"
 
     # boundary: exactly at the limit is still ok, a hair past is stale
     mon_max = SPECS["monitor"][1]

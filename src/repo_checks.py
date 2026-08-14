@@ -235,10 +235,9 @@ def check_cron_paths(root: pathlib.Path) -> list[str]:
 # neither, so a newly-added scheduled job can't fall through the gap silently.
 CRON_SUBSTRINGS = {
     "slow_loop":     "run_slow_loop.sh",
-    "fast_loop":     "run_fast_loop.sh",
-    # "risk_review" removed 2026-08-13 — the overlay was retired into the
-    # sessions and its health.SPECS key went with it, so a mapping here would
-    # point at a job that no longer exists.
+    # "fast_loop" removed 2026-08-14 and "risk_review" 2026-08-13 — both were
+    # retired into the sessions and their health.SPECS keys went with them, so a
+    # mapping here would point at a job that no longer exists.
     "ledger_backup": "backup_ledger.sh",
     "signal_panel":  "collect_signals.py",
     "newsletter":    "run_newsletter.sh",
@@ -269,8 +268,10 @@ NOT_CRON = {"monitor", "adaptive_tune", "unprotected_positions"}
 # `review` maps to the session timers deliberately: the review has no schedule of
 # its own — deploy/run_session.sh runs it after the session, so it is armed
 # exactly when the sessions are, and goes dark with them.
+# "fast_loop" was here until 2026-08-14. Retiring it is what this map is FOR:
+# the timer was disabled on the box and this check failed within the minute,
+# which is the drift-detection working. The mapping goes when the job goes.
 TIMER_UNITS = {
-    "fast_loop": ("agentic-fastloop.timer",),
     "session":   ("agentic-session@open.timer", "agentic-session@close.timer"),
     "review":    ("agentic-session@open.timer", "agentic-session@close.timer"),
 }
@@ -1606,16 +1607,23 @@ HOME=/root
     # "is it armed?" moves from the crontab to the .timer file plus its enable
     # symlink. Both failure modes are distinct and both are real: the 2026-07-20
     # and 2026-07-24 incidents were schedules that existed and armed nothing.
+    # The single-timer fixture was `fast_loop` until it was retired 2026-08-14.
+    # Every remaining key maps to TWO timers, so a synthetic one-timer key is
+    # injected rather than losing the single-timer branch.
     with tempfile.TemporaryDirectory() as td:
         root = pathlib.Path(td) / "repo"
         _write(root, "deploy/keep.txt", "x")          # deploy/ exists, no timers
-        bad = _timer_armed(root, "fast_loop", "Fast loop")
-        assert len(bad) == 1 and "does not exist" in bad[0], bad
-        # defined in the repo -> no "does not exist" complaint. (Whether it is
-        # ENABLED is only asserted on a deployment host, which a tmpdir is not.)
-        _write(root, "deploy/agentic-fastloop.timer", "[Timer]\n")
-        assert all("does not exist" not in f for f in
-                   _timer_armed(root, "fast_loop", "Fast loop"))
+        TIMER_UNITS["_probe"] = ("agentic-probe.timer",)
+        try:
+            bad = _timer_armed(root, "_probe", "Probe")
+            assert len(bad) == 1 and "does not exist" in bad[0], bad
+            # defined in the repo -> no "does not exist" complaint. (Whether it is
+            # ENABLED is only asserted on a deployment host, which a tmpdir is not.)
+            _write(root, "deploy/agentic-probe.timer", "[Timer]\n")
+            assert all("does not exist" not in f for f in
+                       _timer_armed(root, "_probe", "Probe"))
+        finally:
+            TIMER_UNITS.pop("_probe", None)
         # every timer in the map must be defined, not just the first
         bad = _timer_armed(root, "session", "Session")
         assert len(bad) == 2, bad          # open + close both missing
