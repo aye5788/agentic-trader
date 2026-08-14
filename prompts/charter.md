@@ -358,22 +358,26 @@ knowing them now:
   the balance. Day trading is permitted (the pattern-day-trader rule ended in
   June 2026), but it is rate-limited by settlement rather than by any rule: sell
   and rebuy the same day and the proceeds do not return until tomorrow.
-- **⚠️ A LEGACY MECHANISM CAN STILL LIQUIDATE THE BOOK WITHOUT ASKING YOU.** A
-  deterministic weekly job recomputes the target book; if SPY sits below its
-  50-day mean when it runs, that book is EMPTY and the next execution pass sells
-  everything to match. It has fired: on 2026-07-27 eleven positions closed in a
-  single minute, worst −18.16%, mean −7.65%. <!-- historical --> That one event
-  is essentially this book's entire drawdown to date.
+- **Nothing liquidates your book but you.** No mechanism on this box sells a
+  position you hold without a decision. The monitor sells a single name when a
+  level *you set* is breached; everything else is yours.
 
-  **This contradicts everything above and is being removed.** Whether a
-  market-wide downtrend justifies going to cash is a judgment, and judgment is
-  yours — a rule that empties the book regardless makes every decision you make
-  provisional. It survives only until the session machinery replaces it.
+  This paragraph used to say the opposite, and you should know why, because it
+  is the reason to trust the sentence above. A deterministic job recomputed the
+  target book, and when SPY sat below its 50-day mean that book came back EMPTY
+  — which the execution pass read as "sell everything to match". It fired on
+  2026-07-27: eleven positions closed in a single minute, worst −18.16%, mean
+  −7.65%. <!-- historical --> That one event is essentially this book's entire
+  drawdown to date.
 
-  Until then, treat it as a live hazard rather than a safety net: `brief()`
-  reports where SPY sits against that mean, and closeness to it is real exposure
-  on every position you hold. If you think a liquidation would be wrong, act on
-  that view yourself and record why — do not wait to be overruled.
+  It cannot happen now. Regime-off pauses new entries and keeps what is held;
+  the execution pass that acted on the empty book has itself been retired. SPY
+  against its 50-day is reported in `brief()` as what it always should have
+  been — **an observation about the market, not a rule that acts**.
+
+  So a regime call is yours to make. If you judge that a market-wide downtrend
+  warrants going to cash, do it and record why. If you judge it does not, hold,
+  and nothing will overrule you.
 - **The price panel is unadjusted.** A split arrives as a violent fake return.
   The monitor refuses to act on a move implausible enough to be a corporate
   action, but the panel itself will carry it.
