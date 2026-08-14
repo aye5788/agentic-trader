@@ -40,7 +40,13 @@ IOSchedulingClass=idle
 # and must stay ABOVE it or it would pre-empt the inner timeout and turn an
 # orderly "reviewer timed out" into an abrupt kill.
 #   observed run 2026-08-13: 8m18s   inner limit: 20m   this: 25m
-RuntimeMaxSec=1500
+# ⛔ TimeoutStartSec IS THE BOUND — NOT RuntimeMaxSec.
+# For Type=oneshot, systemd IGNORES RuntimeMaxSec ("RuntimeMaxSec= has no effect
+# in combination with Type=oneshot", `systemd-analyze verify`). It was set here
+# on 2026-08-14 and did nothing; caught before it ever ran. Worse, `systemctl
+# show` happily REPORTS RuntimeMaxUSec, so the inert setting looked enforced.
+# A directive that reads as a guard and enforces nothing is this repo's
+# recurring defect — so it is deleted rather than left beside the real one.
 TimeoutStartSec=1500
 
 # systemd refuses to start a unit that is already running, so this cannot

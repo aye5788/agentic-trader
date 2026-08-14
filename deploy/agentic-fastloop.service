@@ -20,11 +20,17 @@ Environment=HOME=/root
 # indefinitely holding ~500MB, and the only thing stopping it colliding with the
 # 10:35 session was the ASSUMPTION that a 10:00 job finishes by 10:04.
 #
-# RuntimeMaxSec is the fix for that: 10:00 + 20min bounds it at 10:20, so it
-# cannot still be running when the session starts. Observed runtime is ~4 min
+# The bound below is the fix: 10:00 + 20min ends it by 10:20, so it cannot still
+# be running when the 10:35 session starts. Observed runtime is ~4 min
 # (logs/fast.log), so 20 min is ~5x headroom — generous on purpose. The failure
 # this repo repeats is a tight guessed limit that kills a good run.
-RuntimeMaxSec=1200
+# ⛔ TimeoutStartSec IS THE BOUND — NOT RuntimeMaxSec.
+# For Type=oneshot, systemd IGNORES RuntimeMaxSec ("RuntimeMaxSec= has no effect
+# in combination with Type=oneshot", `systemd-analyze verify`). It was set here
+# on 2026-08-14 and did nothing; caught before it ever ran. Worse, `systemctl
+# show` happily REPORTS RuntimeMaxUSec, so the inert setting looked enforced.
+# A directive that reads as a guard and enforces nothing is this repo's
+# recurring defect — so it is deleted rather than left beside the real one.
 TimeoutStartSec=1200
 
 # Memory: a catastrophe backstop, NOT a tuned budget. Nothing has ever measured

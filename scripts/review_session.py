@@ -503,9 +503,25 @@ trailing"""
     _unit = REPO / "deploy" / "agentic-review.service"
     if _unit.exists():
         _u = _unit.read_text()
-        for _need in ("MemoryHigh=", "MemoryMax=", "RuntimeMaxSec=",
-                      "MemoryAccounting=yes", "/root/.local/bin"):
-            assert _need in _u, f"agentic-review.service is missing {_need!r}"
+        # ⛔ DIRECTIVES ONLY, NEVER SUBSTRING MATCHES. This first checked
+        # `"RuntimeMaxSec=" in text`, which passed on a COMMENT explaining that
+        # RuntimeMaxSec is inert — a test that was green because of prose
+        # describing the absence of the thing it was testing for. Parse the
+        # actual settings.
+        _set = dict(l.split("=", 1) for l in
+                    (x.strip() for x in _u.splitlines())
+                    if l and not l.startswith("#") and not l.startswith("[") and "=" in l)
+        for _need in ("MemoryHigh", "MemoryMax", "MemoryAccounting",
+                      "TimeoutStartSec", "Environment"):
+            assert _need in _set, f"agentic-review.service is missing {_need}="
+        assert "/root/.local/bin" in _u, "unit PATH lacks codex's directory"
+        # ⛔ TimeoutStartSec is the bound for Type=oneshot; RuntimeMaxSec is
+        # SILENTLY IGNORED there (`systemd-analyze verify`) while still being
+        # reported by `systemctl show`. It must not reappear as a directive
+        # pretending to guard something.
+        assert "RuntimeMaxSec" not in _set, (
+            "RuntimeMaxSec is inert for Type=oneshot — it enforces nothing here "
+            "and reads as a guard. TimeoutStartSec is the real bound.")
         # MemoryHigh THROTTLES, MemoryMax KILLS. High must sit below Max or the
         # throttle never engages and this is a bare kill-limit again — the
         # 2026-08-13 failure, where a guessed 700M killed every run there was.

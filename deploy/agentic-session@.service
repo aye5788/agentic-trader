@@ -23,7 +23,13 @@ Environment=HOME=/root
 #   open  worst case: 1800 + 1200 = 50min   -> this: 60min
 # The session's own timeouts stay the primary control; this only catches a
 # wedge in the wrapper itself.
-RuntimeMaxSec=3600
+# ⛔ TimeoutStartSec IS THE BOUND — NOT RuntimeMaxSec.
+# For Type=oneshot, systemd IGNORES RuntimeMaxSec ("RuntimeMaxSec= has no effect
+# in combination with Type=oneshot", `systemd-analyze verify`). It was set here
+# on 2026-08-14 and did nothing; caught before it ever ran. Worse, `systemctl
+# show` happily REPORTS RuntimeMaxUSec, so the inert setting looked enforced.
+# A directive that reads as a guard and enforces nothing is this repo's
+# recurring defect — so it is deleted rather than left beside the real one.
 TimeoutStartSec=3600
 
 # --- MEMORY: CATASTROPHE BACKSTOP, NOT A BUDGET -----------------------------

@@ -1,0 +1,24 @@
+[Unit]
+Description=agentic-trader CLOSE session schedule (15:15 ET, weekdays)
+Documentation=file:/opt/agentic-trader/docs/OPSLOG.md
+
+[Timer]
+# 15:15 is the last decision point that matters: there is no extended-hours
+# trading, so whatever is held at 16:00 goes through the overnight gap. It also
+# leaves the session its full 900s budget plus the review (1200s) before
+# log_equity at 16:15 — 15:15 + 900 + 1200 = 15:50.
+#
+# (This used to also have to land before the risk-review overlay at 15:45. That
+# overlay was RETIRED 2026-08-13; the constraint is gone, the time is not.)
+#
+# Local time; box is America/New_York, systemd 249 has no per-timer timezone.
+OnCalendar=Mon-Fri 15:15:00
+
+# ⛔ A missed session is SKIPPED, never replayed — a close session fired late in
+# the evening would act on a book it cannot trade and levels it cannot verify.
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+
+[Install]
+WantedBy=timers.target

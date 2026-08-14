@@ -262,6 +262,52 @@ CRON_SUBSTRINGS = {
 NOT_CRON = {"monitor", "adaptive_tune", "unprotected_positions"}
 
 
+# health.SPECS key -> the systemd timer(s) that arm it. Migrated off cron on
+# 2026-08-14 because these jobs had no resource limits and the fast loop had no
+# timeout at all. A key here is checked against timers, NOT against the crontab.
+#
+# `review` maps to the session timers deliberately: the review has no schedule of
+# its own — deploy/run_session.sh runs it after the session, so it is armed
+# exactly when the sessions are, and goes dark with them.
+TIMER_UNITS = {
+    "fast_loop": ("agentic-fastloop.timer",),
+    "session":   ("agentic-session@open.timer", "agentic-session@close.timer"),
+    "review":    ("agentic-session@open.timer", "agentic-session@close.timer"),
+}
+
+
+def _timer_armed(root: pathlib.Path, key: str, label: str) -> list[str]:
+    """Is this job's systemd timer both DEFINED in the repo and ENABLED on the box?
+
+    Two separate failures, because they fail differently:
+      * missing deploy/<name>.timer  -> the repo does not define the schedule at
+        all, so a rebuild from this tree would never arm it.
+      * defined but not enabled      -> the classic 2026-07-20 / 2026-07-24
+        failure in its systemd form: the schedule is written down and nothing
+        is running it. `systemctl list-timers` is the source of truth.
+
+    Filesystem-only, like the rest of this module: "enabled" is the presence of
+    the timers.target.wants symlink systemd creates on `systemctl enable`. No
+    subprocess, no network. Enable state is only checked ON a deployment host —
+    see check_units_match_installed for why that test exists.
+    """
+    out: list[str] = []
+    wants = pathlib.Path("/etc/systemd/system/timers.target.wants")
+    on_host = wants.parent.is_dir() and not os.environ.get("CI")
+    for unit in TIMER_UNITS[key]:
+        if not (root / "deploy" / unit).is_file():
+            out.append(f"health.SPECS key {key!r} ({label}) is armed by {unit} "
+                       f"but deploy/{unit} does not exist — a rebuild from this "
+                       f"repo would never schedule it")
+            continue
+        if on_host and not (wants / unit).exists():
+            out.append(f"health.SPECS key {key!r} ({label}): deploy/{unit} exists "
+                       f"but the timer is NOT ENABLED on this box — the schedule "
+                       f"is documented and nothing is running it "
+                       f"(`systemctl enable --now {unit}`)")
+    return out
+
+
 def check_scheduled_jobs_armed(root: pathlib.Path) -> list[str]:
     """Every health.SPECS key that names a cron-run job must have its arming
     substring present on a NON-COMMENT line of deploy/crontab.template.
@@ -305,6 +351,12 @@ def check_scheduled_jobs_armed(root: pathlib.Path) -> list[str]:
     failures: list[str] = []
     for key, (label, _max_age_days, _source) in health.SPECS.items():
         if key in NOT_CRON:
+            continue
+        # A job may be armed by a systemd TIMER instead of a cron line (migrated
+        # 2026-08-14). Then cron is the wrong place to look, and the arming
+        # evidence is the .timer file in deploy/ plus its enable symlink.
+        if key in TIMER_UNITS:
+            failures.extend(_timer_armed(root, key, label))
             continue
         expected = CRON_SUBSTRINGS.get(key)
         if expected is None:
@@ -1303,10 +1355,21 @@ def check_units_match_installed(root: pathlib.Path,
     worth catching (a unit added to the repo and never copied over).
     """
     out: list[str] = []
+    default_dir = installed_dir is None
     installed_dir = installed_dir or pathlib.Path("/etc/systemd/system")
     if not installed_dir.is_dir() or os.environ.get("CI"):
         return out
-    units = sorted((root / "deploy").glob("*.service"))
+    # ⛔ "Drift" only means something for the DEPLOYED tree. Scanning a synthetic
+    # or checked-out-elsewhere copy against this box's /etc compares two things
+    # that were never meant to match, and reported every fixture as drifted.
+    # (An explicit installed_dir means a caller is testing the logic — honour it.)
+    if default_dir and root.resolve() != REPO.resolve():
+        return out
+    # .timer as well as .service: a timer is the SCHEDULE, so drift there
+    # changes when a job fires — the 2026-08-14 migration put trading times
+    # into these files, and an uncopied edit would run yesterday's schedule.
+    units = sorted([*(root / "deploy").glob("*.service"),
+                    *(root / "deploy").glob("*.timer")])
     if not any((installed_dir / u.name).exists() for u in units):
         return out                      # not a deployment host — nothing to say
     for src in units:
@@ -1538,7 +1601,38 @@ HOME=/root
         # no installed dir at all (CI, container) -> skip, never a false alarm
         assert check_units_match_installed(root, pathlib.Path(td) / "nope") == []
 
+    # -------------------- _timer_armed ----------------------------------
+    # Jobs migrated off cron on 2026-08-14 are armed by systemd timers, so
+    # "is it armed?" moves from the crontab to the .timer file plus its enable
+    # symlink. Both failure modes are distinct and both are real: the 2026-07-20
+    # and 2026-07-24 incidents were schedules that existed and armed nothing.
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td) / "repo"
+        _write(root, "deploy/keep.txt", "x")          # deploy/ exists, no timers
+        bad = _timer_armed(root, "fast_loop", "Fast loop")
+        assert len(bad) == 1 and "does not exist" in bad[0], bad
+        # defined in the repo -> no "does not exist" complaint. (Whether it is
+        # ENABLED is only asserted on a deployment host, which a tmpdir is not.)
+        _write(root, "deploy/agentic-fastloop.timer", "[Timer]\n")
+        assert all("does not exist" not in f for f in
+                   _timer_armed(root, "fast_loop", "Fast loop"))
+        # every timer in the map must be defined, not just the first
+        bad = _timer_armed(root, "session", "Session")
+        assert len(bad) == 2, bad          # open + close both missing
+
+    # a key armed by a timer must NOT also be expected in the crontab, or the
+    # migration would report the job unarmed forever
+    for _k in TIMER_UNITS:
+        assert _k in health.SPECS, f"TIMER_UNITS key {_k!r} is not a health.SPECS key"
+
     # -------------------- check 2: check_scheduled_jobs_armed ----------
+    # Jobs migrated to systemd timers on 2026-08-14 are armed by .timer files,
+    # not cron lines, so every fixture below must provide them or those keys
+    # report "unarmed" for a reason that has nothing to do with the crontab.
+    def _arm_timers(root):
+        for _t in {u for units in TIMER_UNITS.values() for u in units}:
+            _write(root, f"deploy/{_t}", "[Timer]\nOnCalendar=Mon-Fri 10:00:00\n")
+
     clean_cron = """\
 0 20 * * 0   /opt/agentic-trader/deploy/run_slow_loop.sh >> logs/slow.log 2>&1
 15 20 * * 0  cd /opt/agentic-trader && /usr/bin/python3 scripts/collect_signals.py >> logs/signals.log 2>&1
@@ -1552,6 +1646,7 @@ HOME=/root
     with tempfile.TemporaryDirectory() as td:
         root = pathlib.Path(td)
         _write(root, "deploy/crontab.template", clean_cron)
+        _arm_timers(root)
         assert check_scheduled_jobs_armed(root) == [], check_scheduled_jobs_armed(root)
 
     with tempfile.TemporaryDirectory() as td:
@@ -1561,6 +1656,7 @@ HOME=/root
             l for l in clean_cron.splitlines() if "collect_signals.py" not in l
         )
         _write(root, "deploy/crontab.template", dirty_cron)
+        _arm_timers(root)
         bad = check_scheduled_jobs_armed(root)
         assert len(bad) == 1, bad
         assert "signal_panel" in bad[0], bad
@@ -1575,6 +1671,7 @@ HOME=/root
             for l in clean_cron.splitlines()
         )
         _write(root, "deploy/crontab.template", commented_cron)
+        _arm_timers(root)
         bad = check_scheduled_jobs_armed(root)
         assert len(bad) == 1, bad
         assert "signal_panel" in bad[0], bad
@@ -1589,6 +1686,7 @@ HOME=/root
             for l in clean_cron.splitlines()
         )
         _write(root, "deploy/crontab.template", prose_cron)
+        _arm_timers(root)
         bad = check_scheduled_jobs_armed(root)
         assert len(bad) == 1 and "signal_panel" in bad[0], bad
 
@@ -2309,6 +2407,11 @@ jobs:
         # that a repo with no lockdown is clean.
         _write(root, _SETTINGS_JSON,
                '{"permissions": {"deny": ' + json.dumps(list(_REQUIRED_DENIES)) + '}}')
+        # ...and the timer-armed jobs, for the same reason: since 2026-08-14 a
+        # clean tree defines its schedules in deploy/*.timer, so a fixture
+        # asserting "no findings" must supply them or it asserts that a repo
+        # which schedules nothing is clean.
+        _arm_timers(root)
         assert checks(root) == [], checks(root)
 
     with tempfile.TemporaryDirectory() as td:

@@ -45,9 +45,10 @@ HOME=/root
 # Nightly risk-exit recompute: Mon–Fri 18:00 (after close).
 0 18 * * 1-5 /opt/agentic-trader/deploy/run_slow_loop.sh >> /opt/agentic-trader/logs/slow.log 2>&1
 
-# --- FAST LOOP (headless Claude, places the approved plan) ---
-# Mon–Fri 10:00 (after the open). No-op unless [proof] live_approved=true.
-0 10 * * 1-5 /opt/agentic-trader/deploy/run_fast_loop.sh >> /opt/agentic-trader/logs/fast.log 2>&1
+# --- FAST LOOP --- MOVED TO A SYSTEMD TIMER 2026-08-14 ---
+# Now deploy/agentic-fastloop.timer -> agentic-fastloop.service (Mon-Fri 10:00).
+# ⛔ DO NOT RE-ADD A CRON LINE FOR IT. Both would fire and it PLACES ORDERS —
+# the same plan executed twice. `systemctl list-timers` is the source of truth.
 
 # --- DAILY EQUITY LOG (post-close, feeds mandate.drawdown()'s close-to-close series) ---
 # Mon–Fri 16:15 ET — deliberately its OWN entry, not folded into the fast loop
@@ -115,8 +116,18 @@ HOME=/root
 #          That overlay is retired, so the race is gone — but keep 15:15: it
 #          leaves the session its full 1200s budget before the close.)
 #          Do NOT "tidy" these onto the same minute.
-35 10 * * 1-5 /opt/agentic-trader/deploy/run_session.sh open >> /opt/agentic-trader/logs/session.log 2>&1
-15 15 * * 1-5 /opt/agentic-trader/deploy/run_session.sh close >> /opt/agentic-trader/logs/session.log 2>&1
+#
+# --- MOVED TO SYSTEMD TIMERS 2026-08-14 ---
+# deploy/agentic-session@open.timer   -> agentic-session@open.service   10:35
+# deploy/agentic-session@close.timer  -> agentic-session@close.service  15:15
+# ⛔ DO NOT RE-ADD CRON LINES. Both would fire, and a session PLACES ORDERS.
+#
+# Why they moved: these jobs had NO resource limits and the fast loop had NO
+# timeout at all — a wedged `claude -p` would sit indefinitely, and only the
+# ASSUMPTION that a 10:00 job ends by 10:04 kept it clear of the 10:35 session.
+# The units carry a real bound (TimeoutStartSec) and memory limits that throttle
+# before they kill, and systemd refuses to start a unit already running, which
+# replaces lock code we would otherwise maintain ourselves.
 
 
 # --- WEEKLY INVESTOR LETTER (headless Claude narrative, then email) ---

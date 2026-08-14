@@ -1,0 +1,26 @@
+[Unit]
+Description=agentic-trader OPEN session schedule (10:35 ET, weekdays)
+Documentation=file:/opt/agentic-trader/docs/OPSLOG.md
+
+[Timer]
+# 10:35, not 10:00-something: run_fast_loop.sh starts at 10:00 and finishes
+# ~10:04 (logs/fast.log). Starting inside that window puts two headless model
+# runs in research_store at once — the combination that forced a droplet reboot
+# on 2026-08-12. The gap is measurement, not preference.
+#
+# Local time; the box is America/New_York and systemd 249 has no per-timer
+# timezone field. Changing the droplet TZ moves every trading time with it.
+OnCalendar=Mon-Fri 10:35:00
+
+# ⛔ A missed session is SKIPPED, never replayed. Persistent=true would fire a
+# morning session on a boot at any later hour, handing the agent a stale brief
+# and a tape it never saw. See agentic-fastloop.timer for the same reasoning.
+Persistent=false
+AccuracySec=1s
+RandomizedDelaySec=0
+
+# Activates agentic-session@open.service — the instance name comes from this
+# unit's own name, so the timer and its service stay in lockstep.
+
+[Install]
+WantedBy=timers.target
