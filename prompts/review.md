@@ -26,17 +26,43 @@ and compare what it did against the view you already committed to.
 
 ## YOUR TOOLS — YOU MUST PULL YOUR OWN NUMBERS
 
-    /opt/agentic-trader/.venv/bin/python /opt/agentic-trader/scripts/agent_view.py --list
-    ... agent_view.py account
-    ... agent_view.py positions
-    ... agent_view.py universe
-    ... agent_view.py terrain symbol=MU
-    ... agent_view.py sectors symbols=MU,AMD
-    ... agent_view.py performance limit=20
-    ... agent_view.py mandate_status
+**ASK FOR EVERYTHING YOU NEED IN ONE CALL.** Use `--batch`:
+
+    VIEW=/opt/agentic-trader/scripts/agent_view.py
+    /opt/agentic-trader/.venv/bin/python $VIEW --batch '[
+      ["account", {}],
+      ["positions", {}],
+      ["mandate_status", {}],
+      ["performance", {"limit": 20}],
+      ["terrain", {"symbol": "MU"}],
+      ["terrain", {"symbol": "AMD"}],
+      ["sectors", {"symbols": "MU,AMD"}]
+    ]'
+
+You get back a JSON array; each entry carries `tool`, `args`, `ok`, and either
+`result` or `error`. **One bad call does not discard the others** — check the
+`ok` flag per entry, not the exit code.
+
+`... agent_view.py --list` shows every tool available to you. The single-call
+form (`agent_view.py terrain symbol=MU`) still works and is fine for a one-off
+follow-up.
+
+⚠️ **WHY BATCHING, AND IT IS NOT ABOUT TRUSTING YOU.** Every invocation of this
+script starts a fresh interpreter and imports pandas and numpy before it can
+answer: **~134 MB and ~2.3 s, measured**, even for the 13 of 19 tools that never
+touch a dataframe. A batch of six costs 158 MB once instead of 134 MB six times.
+
+On 2026-08-14 a review issued about 120 of these concurrently. The box has 1963
+MB. It fell to 44 MB free during market hours while a software-only stop watcher
+was the only protection on a live book, and that review had to be killed to save
+the machine — so the review was lost anyway. Batching is how you check MORE
+numbers, not fewer.
+
+If you do issue single calls, **keep it to at most 4 at once.**
 
 This is the SAME view the agent had — the same functions, not a summary written
-by the party under review.
+by the party under review. Batching changes how many processes ask; it does not
+change what you can see or what you are told.
 
 You MUST call these yourself. You MUST NOT accept any number quoted in the
 agent's reasoning without checking it against the book. The agent's arithmetic

@@ -10,6 +10,7 @@ Diagnostics go to stderr.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -1811,8 +1812,64 @@ def _selftest() -> None:
           "closed_trades -- read from a scratch journal, never the live one")
 
 
+# --------------------------------------------------------------------------- #
+# READ-ONLY MODE — the reviewer's surface
+#
+# The independent reviewer (Codex) must see exactly what the agent sees and be
+# unable to act on it: "a reviewer that can trade is a second trader". Until now
+# that was enforced by scripts/agent_view.py, a CLI shim that re-executes THIS
+# MODULE once per call -- ~40 MB of pandas per number checked. On 2026-08-14 a
+# review ran 120 of them at once and took the box to 44 MB free during RTH with
+# a live book and software-only stops.
+#
+# The agent gets one long-lived server and makes its calls in-process for free.
+# The reviewer was paying per call for the same numbers. This closes that gap:
+# the reviewer gets the SAME server, started with the write tools removed.
+#
+# ⛔ FAILS CLOSED. If the registry cannot be read or a write tool survives the
+# strip, this REFUSES TO START rather than serving a surface it cannot vouch
+# for. A silently-full surface handed to the reviewer is strictly worse than no
+# reviewer: it would be a second actor with write access to a live book.
+READ_ONLY_TOOLS = {
+    "ping", "brief", "account", "positions", "halt_status", "mandate_status",
+    "universe", "candidates", "terrain", "quote", "sectors", "leaders",
+    "macro", "macro_calendar", "earnings", "news", "depth",
+    "performance", "research_log", "check_order",
+}
+
+
+def _strip_to_read_only(server) -> list[str]:
+    """Remove every non-read-only tool. -> the surviving names, sorted.
+
+    Raises if the registry shape is unrecognised or anything outside the
+    allowlist survives. Both are start-time failures on purpose.
+    """
+    mgr = getattr(server, "_tool_manager", None)
+    reg = getattr(mgr, "_tools", None)
+    if not isinstance(reg, dict) or not reg:
+        raise RuntimeError(
+            "read-only mode cannot find the FastMCP tool registry "
+            f"(_tool_manager._tools = {type(reg).__name__}). The mcp library "
+            "shape changed; refusing to start rather than serving an "
+            "unverified surface to the reviewer.")
+    for name in [n for n in reg if n not in READ_ONLY_TOOLS]:
+        del reg[name]
+    survivors = sorted(reg)
+    leaked = [n for n in survivors if n not in READ_ONLY_TOOLS]
+    if leaked:
+        raise RuntimeError(f"read-only strip failed; still exposed: {leaked}")
+    if not survivors:
+        raise RuntimeError("read-only strip removed everything — no surface left")
+    return survivors
+
+
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         _selftest()
+    elif os.environ.get("AGENT_ENV_READONLY") == "1" or "--read-only" in sys.argv:
+        kept = _strip_to_read_only(mcp)
+        print(f"agentic-trader MCP: READ-ONLY surface, {len(kept)} tools: "
+              f"{', '.join(kept)}", file=sys.stderr)
+        mcp.run()
     else:
         mcp.run()

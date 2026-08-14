@@ -49,12 +49,80 @@ READ_ONLY = {
 }
 
 
+_SERVER = None
+
+
 def _server():
-    spec = importlib.util.spec_from_file_location(
-        "_review_server", REPO / "src" / "agent_env" / "server.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """Load server.py once per process, then reuse it.
+
+    ⚠️ THIS IMPORT IS THE WHOLE COST. It pulls pandas and numpy (directly, and
+    again via agent_env.screen -> momentum) plus the FastMCP/Pydantic stack:
+    ~134 MB peak RSS, measured on this box 2026-08-14, for every invocation --
+    even for the 13 of 19 tools that touch no dataframe at all.
+
+    That was survivable at one call. On 2026-08-14 a review issued 120 of them
+    concurrently and the box went from 1963 MB to 44 MB free during market
+    hours, with a software-only stop watcher as the sole protection on a live
+    book. The reviewer was killed to save the machine.
+
+    Caching here is what makes --batch worth having: N calls in one process pay
+    this once instead of N times.
+    """
+    global _SERVER
+    if _SERVER is None:
+        spec = importlib.util.spec_from_file_location(
+            "_review_server", REPO / "src" / "agent_env" / "server.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SERVER = mod
+    return _SERVER
+
+
+def _call(name: str, kwargs: dict) -> dict:
+    """Run one allowlisted tool. -> {"tool","args","ok",...}. Never raises.
+
+    A failure is returned as data rather than thrown, because in a batch one
+    bad symbol must not discard the other thirty answers.
+    """
+    rec = {"tool": name, "args": kwargs}
+    if name not in READ_ONLY:
+        return {**rec, "ok": False,
+                "error": f"{name!r} is not available to the reviewer",
+                "reason": ("either it does not exist or it WRITES state. The "
+                           "reviewer reads and judges; it does not act."),
+                "available": sorted(READ_ONLY)}
+    fn = getattr(_server(), name, None)
+    if fn is None:
+        return {**rec, "ok": False, "error": f"{name} not found on the server"}
+    fn = getattr(fn, "fn", fn)          # FastMCP wraps tools; .fn is the plain one
+    try:
+        return {**rec, "ok": True, "result": fn(**kwargs)}
+    except TypeError as e:
+        return {**rec, "ok": False, "error": f"bad arguments for {name}: {e}"}
+    except Exception as e:              # noqa: BLE001 — one bad call, not the batch
+        return {**rec, "ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def _parse_batch(raw: str) -> list[tuple[str, dict]]:
+    """Accept either shape, because both are natural to write:
+
+        [["account", {}], ["terrain", {"symbol": "MU"}]]
+        [{"tool": "account"}, {"tool": "terrain", "args": {"symbol": "MU"}}]
+    """
+    spec = json.loads(raw)
+    if not isinstance(spec, list):
+        raise ValueError("batch must be a JSON array of calls")
+    out = []
+    for item in spec:
+        if isinstance(item, str):
+            out.append((item, {}))
+        elif isinstance(item, list) and item:
+            out.append((item[0], item[1] if len(item) > 1 and item[1] else {}))
+        elif isinstance(item, dict) and item.get("tool"):
+            out.append((item["tool"], item.get("args") or {}))
+        else:
+            raise ValueError(f"unrecognised call in batch: {item!r}")
+    return out
 
 
 def main() -> None:
@@ -63,17 +131,30 @@ def main() -> None:
         print("read-only tools:\n  " + "\n  ".join(sorted(READ_ONLY)))
         print("\nusage: agent_view.py <tool> [arg=value ...]")
         print("example: agent_view.py terrain symbol=MU")
+        print("\nBATCH (STRONGLY PREFERRED — one process, one pandas import):")
+        print("  agent_view.py --batch '[[\"account\",{}],"
+              "[\"terrain\",{\"symbol\":\"MU\"}],[\"terrain\",{\"symbol\":\"NVDA\"}]]'")
+        print("  ... or pipe the same JSON on stdin: agent_view.py --batch -")
+        print("  Returns a JSON array; each entry carries tool/args/ok and "
+              "result-or-error.")
+        print("  A single call costs ~134 MB (it imports pandas). A batch of 30 "
+              "costs the same 134 MB once, not 30 times.")
         return
 
-    name = args[0]
-    if name not in READ_ONLY:
-        print(json.dumps({
-            "error": f"{name!r} is not available to the reviewer",
-            "reason": ("either it does not exist or it WRITES state. The "
-                       "reviewer reads and judges; it does not act."),
-            "available": sorted(READ_ONLY)}, indent=2))
-        raise SystemExit(2)
+    # ---- batch: many calls, ONE interpreter, ONE pandas import --------------
+    if args[0] == "--batch":
+        raw = args[1] if len(args) > 1 and args[1] != "-" else sys.stdin.read()
+        try:
+            calls = _parse_batch(raw)
+        except (ValueError, json.JSONDecodeError) as e:
+            print(json.dumps({"error": f"could not parse batch: {e}"}, indent=2))
+            raise SystemExit(2)
+        results = [_call(name, kwargs) for name, kwargs in calls]
+        print(json.dumps(results, indent=2, default=str))
+        # A batch is a success if it RAN; individual failures are in the data.
+        raise SystemExit(0)
 
+    name = args[0]
     kwargs = {}
     for a in args[1:]:
         if "=" not in a:
@@ -87,18 +168,14 @@ def main() -> None:
             except ValueError:
                 kwargs[k] = v
 
-    mod = _server()
-    fn = getattr(mod, name, None)
-    if fn is None:
-        print(json.dumps({"error": f"{name} not found on the server"}))
-        raise SystemExit(2)
-    # FastMCP wraps tools; the plain function hangs off .fn on wrapped ones
-    fn = getattr(fn, "fn", fn)
-    try:
-        print(fn(**kwargs))
-    except TypeError as e:
-        print(json.dumps({"error": f"bad arguments for {name}: {e}"}, indent=2))
-        raise SystemExit(2)
+    # Same path as --batch, so the two modes cannot drift into different answers.
+    rec = _call(name, kwargs)
+    if rec["ok"]:
+        print(rec["result"])
+        return
+    print(json.dumps({k: v for k, v in rec.items()
+                      if k not in ("ok", "tool", "args")}, indent=2))
+    raise SystemExit(2)
 
 
 if __name__ == "__main__":
