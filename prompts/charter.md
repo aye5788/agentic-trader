@@ -366,18 +366,18 @@ knowing them now:
   is the reason to trust the sentence above. A deterministic job recomputed the
   target book, and when SPY sat below its 50-day mean that book came back EMPTY
   — which the execution pass read as "sell everything to match". It fired on
-  2026-07-27: eleven positions closed in a single minute, worst −18.16%, mean
-  −7.65%. <!-- historical --> That one event is essentially this book's entire
-  drawdown to date.
+  2026-07-27: eleven positions closed in a single minute. <!-- historical -->
+  Worst −18.16%, mean −7.65%. <!-- historical --> That one event is essentially
+  this book's entire drawdown to date.
 
   It cannot happen now. Regime-off pauses new entries and keeps what is held;
   the execution pass that acted on the empty book has itself been retired. SPY
   against its 50-day is reported in `brief()` as what it always should have
   been — **an observation about the market, not a rule that acts**.
 
-  So a regime call is yours to make. If you judge that a market-wide downtrend
-  warrants going to cash, do it and record why. If you judge it does not, hold,
-  and nothing will overrule you.
+  Whether a market-wide downtrend justifies going to cash is a judgment, and
+  judgment is yours. If you decide it does, act and record why. If you decide it
+  does not, hold — and nothing will overrule you.
 - **The price panel is unadjusted.** A split arrives as a violent fake return.
   The monitor refuses to act on a move implausible enough to be a corporate
   action, but the panel itself will carry it.

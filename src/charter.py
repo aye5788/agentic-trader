@@ -392,12 +392,22 @@ def _selftest() -> None:
     # charter did not describe: 11 of 18 closes fired in ONE minute on 2026-07-27
     # when the regime gate flipped, mean -7.65%. An agent cannot reason about its
     # biggest risk if nobody tells it the risk exists.
-    assert "LIQUIDATE THE BOOK WITHOUT ASKING YOU" in out
+    #
+    # That mechanism was REMOVED (regime_filter, 2026-08-12; the execution pass
+    # that acted on the empty book, 2026-08-14), so this no longer pins the
+    # warning -- it pins the CORRECTION. These assertions used to require the
+    # text "LIQUIDATE THE BOOK WITHOUT ASKING YOU", which kept a false hazard
+    # in front of the agent and would have failed the moment anyone told it the
+    # truth. A test that pins a claim outlives the claim; when the system
+    # changes, the test has to move with it or it defends the stale version.
+    assert "Nothing liquidates your book but you" in out
     assert "2026-07-27" in out, "the evidence for the regime risk was dropped"
-    # ⚠️ It is named as a LEGACY CONTRADICTION being removed, never as settled
-    # authority. Describing it as immovable is how static governance gets written
-    # into the charter that exists to remove it.
-    assert "is being removed" in out
+    # ⚠️ The EVIDENCE stays even though the hazard is gone: "nothing liquidates
+    # your book but you" is a claim the agent should be able to check, and the
+    # reason it became true is what makes it checkable.
+    assert "eleven positions closed in a single minute" in out
+    assert "observation about the market, not a rule that acts" in out, \
+        "the regime must be framed as a fact, never as an authority"
     assert "judgment is\n  yours" in out or "judgment is yours" in out.replace("\n  ", " ")
 
     # the opening ORIENTS: role, capital, horizon, and what is off-limits
