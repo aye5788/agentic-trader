@@ -9,6 +9,83 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-14 — the loop moved before the session and reversed it; it is gone
+
+**The failure, in three days of the journal.** 08-12: a session exited AMAT to
+be flat into earnings. 08-13 10:02: the 10:00 fast loop rebought it @556.18.
+12:20: the session sold it back @554.81 and wrote *"THE POSITION WAS NOT MINE —
+the deterministic loop opened it at 10:01 today, reinstating the exact exposure
+the 08-12 session paid a spread to remove"*, plus a warning that it would recur.
+AMAT reported that night and gapped down. 08-14 10:02: the loop bought it
+**again**, 4.4% below the prior close, into the gap.
+
+LITE was queued by the loop on 08-10, 08-11 and 08-13 and stopped every time
+only by a lack of settled cash — *"never by a decision"*, in a `rule_out` a
+session wrote knowing the loop could not read it.
+
+**Root cause is ordering, not any missing rule.** The loop placed at 10:00; the
+open session reasoned at 10:35. The 10:35 slot existed *specifically* to clear
+the loop (OPSLOG 2026-08-12). So the procedural component got first move every
+day and the judgment layer spent its session undoing it.
+
+**What was done:**
+
+1. **`rule_out()` now binds** (`59c9626`). It recorded the right fact and gated
+   nothing — its own docstring said *"Nothing here gates an order"*. Now read by
+   the fast loop's plan and by the PreToolUse gate. Buys only; a rule-out can
+   never strand an exit.
+2. **The fast loop is retired** (`c765578`) — timer disabled, units, runner and
+   `prompts/fast_loop.md` deleted, `health`/`repo_checks` updated. `repo_checks`
+   caught the drift within a minute of the timer being disabled, which is the
+   check working.
+3. **The regime stopped gating the selection** (`3c1481c`). It is computed,
+   recorded and reported; what it means is the session's call.
+4. **`scripts/fast_loop.py` deleted**, and with it — unnoticed by me — `no_chase`,
+   the `[reentry]` knife-guard, the order-time cooldown check, and the
+   **automatic drawdown halt**, which it was the only caller of. The halt is
+   restored at the order gate via a write-free `governance.drawdown_breach()`
+   (`9c8628e`); the others are now the session's judgement and the config says
+   so instead of claiming enforcement.
+5. **The loop protects what the AGENT holds** (`386d277`), not only what it
+   picked. The monitor's base stop comes from a thesis, and one existed only for
+   selected names — so a position the agent opened on its own judgement had no
+   stop. Held-but-unselected names now get geometry at weight 0.
+
+**⚠️ The independent reviewer caught what the test suite did not.** Codex
+returned PROBLEMS, then OUTSTANDING, on work that was green on every selftest
+and `repo_checks`. It found the drawdown regression, that `brief()` never
+surfaced the recorded regime, that stale instructions could recreate the veto at
+the judgment layer, and that my selftest was **vacuous** — it scanned source text
+and its own assertion contained the string it searched for, so deleting the real
+field still passed. *"It proves syntax spellings, not behavior."* Replaced with a
+behavioural test that runs the selection both ways and requires equality.
+
+**The lesson that generalises: unit selftests of pure functions do not catch this
+class.** Every defect above was a control that read as present and did nothing,
+or a component that should not exist. The checks that worked were the ones
+comparing two independent sources of truth — `repo_checks` against systemd — and
+a different model reading the diff.
+
+
+## 2026-08-13 — the intraday risk-review overlay was retired into the sessions
+
+Written 2026-08-14, because it never got an entry. The change shipped as
+`a007e3f` and its rationale existed **only in that commit message** — so
+`CLAUDE.md` went on describing the overlay as live in four places, and a session
+the next day (this one) reported the system's state from it and was wrong. That
+is the same failure class as everything above: a decision recorded where the next
+reader does not look.
+
+The record that justified it: 40 runs → 3 orders intended, and **none at all**
+after the sessions went live, because the sessions do the same work with
+judgment. `market_monitor` watches every stop continuously through RTH, which
+dominates a twice-daily snapshot, and with no extended-hours trading the last
+decision that matters is the 15:15 close, not a 15:45 pass. Removing it also
+deleted a race: it was one of four unlocked writers to `monitor/overrides.json`.
+
+`deploy/run_risk_review.sh` remains on disk, unused and unscheduled.
+
+
 ## 2026-08-13 — the reviewer's memory cap was killing every run; it stays on the droplet
 
 The first review to survive the PATH fix was **SIGKILLed**, and the new

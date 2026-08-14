@@ -45,10 +45,10 @@ architecture in `docs/DESIGN.md` (Layer 1). Summary:
 | Source | Role | Notes |
 | ------ | ---- | ----- |
 | ~~**Schwab**~~ | **REMOVED 2026-07-29.** Was the primary market-data feed; its 7-day refresh token was the only recurring human chore in the system, and the signal consumed nothing from it but daily closes. All of it now comes from moomoo. Adapter, auth scripts, `SCHWAB_*` keys and `schwabdev` are deleted — do not reintroduce. | Migration + equivalence proof: `docs/OPSLOG.md` 2026-07-29. |
-| **moomoo** (`src/adapters/moomoo/`) | **THE market-data feed** since 2026-07-29 — daily OHLC panel (`prices.snapshot_ohlc`), intraday quotes for the stop watcher (`prices.live_quotes`), universe turnover/market-cap, capital-flow, short-interest, put/call+IV. Data-only via the local **OpenD** gateway. Still unwired: insider, earnings-price-move, institutional; see `docs/DATA_SOURCES.md`. | ⚠️ Runs under **system `/usr/bin/python3` (3.10)**, NOT `.venv` (3.12) — this now includes `fetch_prices`, `market_monitor`, `fast_loop` and `risk_review`. OpenD on `127.0.0.1:11111`, **shared with sibling repo `moomoo-vol-desk`**. ⛔ `request_history_kline` is capped at **100 distinct stocks account-wide** — use `get_market_snapshot` (unmetered, 400/call) for anything universe-wide. moomoo history is **shallow (~1–2 yr)** → forward-log, don't backtest; the deep panel on disk is Schwab-era and now **non-regenerable**, so `research_store/prices/backup/` matters. |
+| **moomoo** (`src/adapters/moomoo/`) | **THE market-data feed** since 2026-07-29 — daily OHLC panel (`prices.snapshot_ohlc`), intraday quotes for the stop watcher (`prices.live_quotes`), universe turnover/market-cap, capital-flow, short-interest, put/call+IV. Data-only via the local **OpenD** gateway. Still unwired: insider, earnings-price-move, institutional; see `docs/DATA_SOURCES.md`. | ⚠️ Runs under **system `/usr/bin/python3` (3.10)**, NOT `.venv` (3.12) — this now includes `fetch_prices` and `market_monitor`. (`fast_loop` was deleted and `risk_review` retired into the sessions, 2026-08-13/14.) OpenD on `127.0.0.1:11111`, **shared with sibling repo `moomoo-vol-desk`**. ⛔ `request_history_kline` is capped at **100 distinct stocks account-wide** — use `get_market_snapshot` (unmetered, 400/call) for anything universe-wide. moomoo history is **shallow (~1–2 yr)** → forward-log, don't backtest; the deep panel on disk is Schwab-era and now **non-regenerable**, so `research_store/prices/backup/` matters. |
 | **Finnhub** (`src/adapters/finnhub/`) | Analyst *recommendation trends*, earnings *surprises*, basic financials. **NOT retired** — but currently consumed only by `src/event_calendar/` (earnings spine), not the ranking signal. | Free tier. Price-target *level* + forward EPS estimates are **premium (403)**. |
 | **Alpaca** (`src/adapters/alpaca/`) | Symbol-tagged news; IEX close+$-vol for the survivorship-free **PIT pool** (only free feed serving DELISTED names). | Free tier. Price is **IEX-only (not NBBO)** → don't use for quotes. |
-| **FRED** (`src/adapters/fred/`) | Macro regime indicators: VIX (`VIXCLS`), 10y-2y curve (`T10Y2Y`), HY OAS (`BAMLH0A0HYM2`). **Deep history (decades).** Confirms — does not replace — the momentum regime gate. Also the VIX source for `slow_loop.fetch_vix` and `risk_review`. | Needs `FRED_API_KEY`. |
+| **FRED** (`src/adapters/fred/`) | Macro regime indicators: VIX (`VIXCLS`), 10y-2y curve (`T10Y2Y`), HY OAS (`BAMLH0A0HYM2`). **Deep history (decades).** Confirms — does not replace — the momentum regime gate. Also the VIX source for `slow_loop.fetch_vix`. | Needs `FRED_API_KEY`. |
 | **Robinhood** (MCP) | **Execution** + its own fundamentals/earnings | The only execution venue. Agentic account only. |
 
 ---
@@ -116,8 +116,9 @@ src/adapters/moomoo/    Data-only moomoo client via OpenD — RUNS UNDER SYSTEM
                         feed since 2026-07-29 (snapshot_ohlc = daily panel append,
                         unmetered; live_quotes = intraday marks; daily_panel =
                         backfill, capped at 100 distinct stocks account-wide).
-                        Consumers: fetch_prices, market_monitor, fast_loop
-                        (no_chase), risk_review — ALL now on system python3.
+                        Consumers: fetch_prices, market_monitor — both on system
+                        python3. (fast_loop deleted 2026-08-14; risk_review retired
+                        into the sessions 2026-08-13.)
                         research.py serves scripts/universe_refresh.py (snapshot_turnover,
                         screen_top_marketcap, candidate_pond — quarterly universe
                         maintenance; ⚠️ has NEVER once run, next window Oct 1-7)
@@ -132,7 +133,7 @@ src/adapters/moomoo/    Data-only moomoo client via OpenD — RUNS UNDER SYSTEM
                         clean. See docs/DATA_SOURCES.md + OPSLOG 2026-07-28.
 src/adapters/fred/      Macro regime indicators (VIX, 10y-2y, HY spread) — deep
                         history; confirms the momentum regime gate. ALSO the VIX
-                        source for slow_loop + risk_review. Needs FRED_API_KEY.
+                        source for slow_loop. Needs FRED_API_KEY.
 config/strategy.toml    CODIFIED STRATEGY — single source of truth: risk gates,
                         universe, signal, trade management, regime floor.
                         Tune the strategy HERE, not in code. `[risk]` = the store's
@@ -150,7 +151,7 @@ config/etf_universe.csv 18-ETF dual-momentum rotation sleeve (11 SPDR sectors +
 src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
 src/governance.py       Layer-5 guardrails: kill-switch file, drawdown halt,
                         per-order cap, universe whitelist, live_approved master
-                        switch. The last gate before a live order (fast loop).
+                        switch. The last gate before a live order (every session).
 scripts/hooks/pretooluse_order_gate.py
                         THE UNBYPASSABLE ORDER GATE — a Claude Code PreToolUse
                         hook on mcp__robinhood-trading__place_equity_order,
@@ -235,10 +236,18 @@ prompts/charter.md      THE SESSION CHARTER — rendered from config by
                         MCP tool list), never hand-copied. A literal threshold in
                         the template is a DEFECT; check_charter_no_literals
                         enforces it.
-prompts/fast_loop.md    The headless-Claude execution procedure (RH is MCP-only).
-                        Includes step 7b: post-take-profit re-entry judgment
-                        (full/half/skip — veto/downsize ONLY; [reentry] config,
-                        hard 4% knife-guard lives in fast_loop.py, not judgment).
+⛔ prompts/fast_loop.md and scripts/fast_loop.py are DELETED (2026-08-14).
+                        The procedural executor placed the stored book at 10:00,
+                        35 minutes BEFORE the open session reasoned — so it moved
+                        first every day and the session spent its run undoing it
+                        (it re-opened AMAT twice after a session had deliberately
+                        exited, the second time into a post-earnings gap).
+                        Execution is now the SESSIONS, with judgment. The guards
+                        that lived inside it — no_chase and the [reentry] 4%
+                        knife-guard — went with it and are NOT enforced anywhere;
+                        their config keys are documented defaults for the
+                        session's judgement. What IS enforced, unbypassably, is
+                        the PreToolUse order gate below.
 prompts/exit.md         Exit-executor procedure — market-sell the breached
                         positions the monitor flags, journal, reconcile the
                         snapshot + realized-P&L after selling.
@@ -257,13 +266,13 @@ dashboard/app.py        Flask monitor (127.0.0.1:8787), renders live from the
                         tunnel. dashboard/dashboard.html = the page template.
 scripts/log_equity.py   Appends a daily equity point (marked via src/marks.py) to
                         research_store/history/equity.jsonl — the dashboard curve.
-                        Run by run_fast_loop.sh each day.
+                        Run by deploy/run_session.sh each day.
 prompts/newsletter.md   Weekly investor letter ("The Claude Ledger") — headless
                         Claude narrates ONLY from letter_facts.py's facts.json
                         (never computes numbers), fills newsletter/template.html,
                         Sundays 21:00. scripts/send_newsletter.py delivers via
                         Resend HTTPS API (DO blocks ALL outbound SMTP ports).
-deploy/                 run_slow_loop.sh (Python), run_fast_loop.sh (Claude, with
+deploy/                 run_slow_loop.sh (Python), run_session.sh (Claude, with
                         ANTHROPIC_API_KEY guard), run_newsletter.sh,
                         crontab.template, alert.sh (ERR-trap → ntfy phone push on
                         any cron failure). See docs/DEPLOY.md.
@@ -319,8 +328,8 @@ scripts/fetch_prices.py APPENDS the current session's OHLC row to the cached pan
                         before 16:15 ET (a snapshot mid-RTH is a PARTIAL bar whose
                         close is just the last trade) and keeps it after — that
                         guard predates the feed switch and is unchanged.
-                        risk_review._gather_highs now reads highs.parquet + folds in
-                        today's session high from a live snapshot.
+                        (risk_review, retired 2026-08-13, read highs.parquet and
+                        folded in today's session high from a live snapshot.)
 scripts/backtest.py     Weekly walk-forward sim of the 70/30 book/sleeve vs SPY.
                         simulate() = parameterized core returning a metrics dict.
                         ⚠️ survivorship-biased (today's names over history) = upper
@@ -345,17 +354,16 @@ scripts/slow_loop.py    SLOW LOOP (deterministic brain, no LLM, no trading): mom
                         signal → top-10 book + top-4 sleeve → IBD trade geometry
                         (vol-scaled targets, R:R≥2) → write validated book to the
                         Research Store. Regime-off/nothing-eligible → cash is valid.
-scripts/fast_loop.py    FAST LOOP diff core: stored targets vs. RH holdings →
-                        dollar-notional buy/sell plan. Enforces the one-Agentic-
-                        account guardrail. NEVER places — placement is the agent's
-                        review_equity_order→place_equity_order MCP step, gated by
-                        the proof gate. --selftest covers the diff logic.
-                        apply_chase_guard() enforces [trade_management] no_chase:
-                        skips a BUY priced above entry_zone[1] by more than
-                        chase_tol_sigma × sigma. ASYMMETRIC (cheaper never blocks
-                        — the old doc wording would have refused better fills),
-                        vol-scaled, FAILS OPEN. Wired 2026-07-28 after being
-                        documented-but-dead since the start; see docs/OPSLOG.md.
+                        (scripts/fast_loop.py was the diff core — stored targets
+                        vs. holdings → a buy/sell plan. DELETED 2026-08-14 with
+                        the rest of the procedural executor. Its guards went too:
+                        apply_chase_guard (no_chase), the [reentry] knife-guard,
+                        the order-time cooldown check, and — found only by the
+                        independent reviewer — the AUTOMATIC DRAWDOWN HALT, which
+                        it was the sole caller of. The drawdown halt has been
+                        restored at the order gate via a write-free
+                        governance.drawdown_breach(); the others have not, and
+                        are now the session's judgement. See OPSLOG 2026-08-14.)
 src/adaptive.py         ADAPTIVE CORE — dial-agnostic Bayesian grid estimator
                         (smoothness prior + uncertainty-gated recommendation +
                         oos_gap). Pure. Reused by every adaptive dial.
