@@ -17,7 +17,11 @@ because doing nothing never looks obviously wrong in the moment. It is permitted
 To hold unchanged or to sit in cash, you must cite a FACT, from a tool, with its
 number. Admissible, for example:
 
-- the regime gate reads off — `brief()` reports SPY below its 50-day mean
+- the regime reads off — `brief()` reports SPY below its 50-day mean, and
+  `regime.recorded` carries the compound call including VIX. ⚠️ This is an
+  observation, not a gate: nothing stops you entering while it is off, and
+  citing it is the START of a reason, not the whole of one. Say what it means
+  for the names in front of you.
 - `mandate_status()` reports a blocking criterion FAIL
 - `halt_status()` shows entries halted or the kill switch set
 - no candidate is eligible — `candidates()` shows negative 12-month return across

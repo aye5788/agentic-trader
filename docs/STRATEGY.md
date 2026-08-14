@@ -105,17 +105,36 @@ excluded from the held set (it can still be computed, but never held).
   2:1 for a 5%/day mover and would reject the whole book.
 - **MA exit:** exit if daily close < the 21-day MA, even before a target.
 
-## 7. Regime gate & the off-switch
+## 7. Regime — an observation, not a gate
 
-- **Mechanical floor (ON switch):** new entries allowed only if **$SPX > its
-  50-day MA** (computed from the cached panel) and **VIX ≤ 28** (from FRED
-  `VIXCLS`, which is now the only VIX source).
-- **Off = no new entries. NOT a liquidation.** When the floor is risk-off, or
-  nothing passes the absolute gate: **add nothing new. Standing aside is a
-  valid, intended state.** Names already held are KEPT while they stay inside
-  the band, and are released by the ordinary exit discipline — not dumped
-  because SPY crossed a line. There is no hedge and no inverse ETF; unspent
-  weight is cash. (In the sleeve, the defensive ETFs may still rank in; that is
+⚠️ **CHANGED 2026-08-14. This section described a mechanical gate for months
+after the gate stopped existing in one form and was removed in the other.**
+
+- **What it is:** **$SPX > its 50-day MA** (from the cached panel) and **VIX ≤
+  28** (FRED `VIXCLS`). The slow loop computes it, records it on the product,
+  and `brief()` reports both the live SPY reading and the recorded compound
+  call.
+- **It does not gate anything.** It does not filter the selection, it does not
+  refuse entries, and it does not liquidate. What a regime call means for this
+  book is the session's judgement — the session can see the positions, the
+  marks and the reason; a rule about SPY cannot.
+- **Why it was removed.** The first form set the target book to EMPTY, which
+  the execution pass read as "sell everything": eleven positions closed in one
+  minute on 2026-07-27, worst −18.16%, essentially this book's entire drawdown.
+  The second form kept holdings but refused new entries. Both overrode an
+  accountable agent with a signal about an index. The deterministic executor
+  that consumed the product was retired the same day, so a selection is now a
+  proposal to a session rather than an order — filtering it would only hide
+  candidates from the party able to weigh them.
+- **⚠️ The backtests in §9 still model regime-gated entry.** Their numbers
+  assume entries were suppressed when the floor was off. Live behaviour no
+  longer matches that assumption, so treat those figures as evidence about the
+  SIGNAL, not as a forecast of the system as it now runs.
+- Standing aside remains a valid, intended state — as a decision, with a stated
+  reason, like any other. Names already held are released by the ordinary exit
+  discipline, not dumped because SPY crossed a line. There is no hedge and no
+  inverse ETF; unspent weight is cash. (In the sleeve, the defensive ETFs may
+  still rank in; that is
   allowed and is the same idea.)
   - ⚠️ This wording changed 2026-08-12. It previously read "hold nothing", and
     the code matched it: a regime flip sold the entire single-name book. It

@@ -1170,6 +1170,15 @@ def brief() -> str:
     panel = _panel()
     asof = panel.index[-1]
 
+    # THE REGIME IS REPORTED, NEVER ENFORCED. It used to gate the slow loop's
+    # selection -- first by emptying it (which sold eleven positions in one
+    # minute on 2026-07-27) and then by refusing new entries. Both are gone as
+    # of 2026-08-14, which is only correct if the FACT still reaches you.
+    #
+    # Two halves, and both are here on purpose: the live SPY reading computed
+    # from the panel right now, and the compound call the slow loop recorded --
+    # which includes VIX, the half that reporting only `spy_above_50dma` left
+    # you to reconstruct from macro() yourself.
     regime = None
     if "SPY" in panel.columns:
         try:
@@ -1179,6 +1188,15 @@ def brief() -> str:
             }
         except Exception:
             regime = None
+    recorded = (prod.regime if prod else None) or {}
+    if recorded:
+        regime = {**(regime or {}),
+                  "recorded": {**recorded, "as_of": prod.as_of},
+                  "note": "an observation about the market, not a rule that acts. "
+                          "`recorded` is the compound call (trend AND vix) as of "
+                          "the last book build; the spy_above_50dma line above is "
+                          "computed live. Nothing acts on either — what a regime "
+                          "call means for this book is your judgement."}
 
     held = state.holdings(v, prod.theses if prod else [], _overrides())
     top = screen.rank(panel, asof, _all_tickers()).head(10).round(4)

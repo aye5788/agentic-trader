@@ -11,7 +11,7 @@
 #     like a broken test when it was just the wrong interpreter. Conversely,
 #     system python3 has no tomllib, so anything reaching strategy.py (via
 #     src/mandate.py etc.) must NOT be run there.
-#   Some modules (scripts/fast_loop.py, scripts/universe_refresh.py) import
+#   Some modules (scripts/universe_refresh.py) import
 #   moomoo lazily inside a function body, not at module scope, so their
 #   --selftest never touches it and they run fine under .venv.
 #
@@ -33,7 +33,6 @@ fi
 
 # Scripts that expose a --selftest entrypoint and run under the project venv.
 VENV_SELFTESTS=(
-    "scripts/fast_loop.py"
     "scripts/universe_refresh.py"
     "src/concentration.py"
     "src/ti_signals.py"

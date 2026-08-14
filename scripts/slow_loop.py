@@ -1,7 +1,9 @@
 """SLOW LOOP — compute today's target book and write it to the Research Store.
 
-This is the deterministic brain (docs/STRATEGY.md, "run as code, do not eyeball").
-It does NOT trade. It produces the research product the fast loop later executes.
+This is the deterministic ranking (docs/STRATEGY.md, "run as code, do not
+eyeball"). It does NOT trade, and since 2026-08-14 nothing executes its output
+unsupervised: the procedural fast loop was retired. What it writes is a PROPOSAL
+a session reads and judges, not a book that gets filled.
 
   1. Load recent closes for the 150 names + 18 ETFs + SPY.
   2. Regime floor: SPY (proxy $SPX) > 50DMA  AND  VIX <= [regime].vix_ceiling
@@ -17,11 +19,15 @@ It does NOT trade. It produces the research product the fast loop later executes
 
     python scripts/slow_loop.py [--dry]   # --dry: print, don't write the store
 
-Regime-off -> NO NEW single-name entries; names already held are kept while
-they stay in the band (see regime_filter). Nothing-eligible -> an empty book
-is still a valid, intended state (cash).
+The regime (SPY>50DMA and VIX<=ceiling) is COMPUTED AND RECORDED on the
+product, and never enforced here: what a regime call means for the book is a
+judgment, and it belongs to the session that can see the positions. It gated
+this selection twice -- once by emptying it (which sold eleven positions in one
+minute on 2026-07-27) and once by refusing new entries -- and both are gone.
+Nothing-eligible -> an empty book is still a valid, intended state (cash).
 """
 import argparse
+import pathlib
 import sys
 from datetime import date
 from pathlib import Path
@@ -165,54 +171,6 @@ def residual_kwargs(cfg, closes, spy):
     return {}
 
 
-def owned_symbols(path: Path | None = None) -> set[str] | None:
-    """Symbols ACTUALLY held at the broker. -> set, or None if unreadable.
-
-    None means "unknown", and it is distinct from the empty set: an empty set is
-    "we own nothing", which under regime-off means sell everything. A missing or
-    torn snapshot must never be read as that.
-    """
-    path = path or (REPO / "research_store" / "rh" / "positions.json")
-    try:
-        import json                                   # noqa: PLC0415
-        pos = json.loads(path.read_text()).get("positions") or {}
-        return {str(k).upper() for k, v in pos.items()
-                if float((v or {}).get("qty") or 0) > 0}
-    except Exception:                                 # noqa: BLE001
-        return None
-
-
-def regime_filter(book_sel: list, held_book: set, owned: set | None) -> list:
-    """Regime-off selection: pause new entries, do NOT liquidate what is held.
-
-    The previous form was `book_sel = []`, whose comment already claimed "no new
-    single-name entries" -- but an empty selection is not "add nothing", it is
-    "hold nothing", and build_theses drops every name absent from it. So a
-    regime flip did not pause the book, it SOLD it, on a signal about SPY rather
-    than anything about the positions. That fired on 2026-07-27: nine single
-    names closed in one tick (the other two closes that timestamp were ETF
-    rotations this branch never touched).
-
-    ⚠️ INTERSECTED WITH ACTUAL OWNERSHIP, not just the previous product.
-    `held_book` is PRODUCT MEMBERSHIP -- a name can carry a target and never
-    have been bought (TER, 2026-07-24, skipped for pending settlement and still
-    in the product). Filtering on membership alone leaves such a name in the
-    selection, and the fast loop treats a target with no position as an OPENING
-    BUY -- so regime-off would open a brand-new position, which the old form
-    made impossible. Ownership is the anchor; membership alone is not.
-
-    `owned=None` means the ownership snapshot could not be read. That falls back
-    to membership rather than to the empty set: failing toward "keep what the
-    product says" risks re-opening one pending name, bounded by the order gate
-    and the concentration cap, while failing toward "own nothing" SELLS THE
-    WHOLE BOOK on an unreadable file. The reversible direction wins.
-    """
-    keep = [t for t in book_sel if t in held_book]
-    if owned is None:
-        return keep
-    return [t for t in keep if t in owned]
-
-
 def rotation_due(cfg: dict, today=None) -> bool:
     """Is a full re-rank + ROTATE due on this run? -> bool.
 
@@ -240,6 +198,37 @@ def rotation_due(cfg: dict, today=None) -> bool:
         return True
     print(f"  ⚠️ unrecognised [portfolio] rebalance={mode!r} — rotating")
     return True
+
+
+def select_book(book_scored, etf_scored, held_book: set, held_etf: set,
+                P: dict, *, regime: bool, rotate: bool) -> tuple[list, list]:
+    """Choose the book and sleeve. -> (book_sel, etf_sel).
+
+    ⛔ `regime` IS ACCEPTED AND DELIBERATELY UNUSED. It is a parameter so the
+    selftest can call this twice -- regime on, regime off, everything else
+    identical -- and assert the two selections are EQUAL. That is a behavioural
+    proof that the market regime cannot move the selection; the previous guard
+    scanned source text for banned spellings, which proved nothing and passed
+    while broken (found by the independent reviewer, 2026-08-14).
+
+    The regime has gated this selection twice. First as `book_sel = []`, which
+    did not pause the book but SOLD it -- eleven positions in one minute on
+    2026-07-27, essentially this book's entire drawdown. Then as regime_filter:
+    keep what is held, refuse anything new. Both were a rule about SPY
+    overruling an agent that can see the position, the marks and the reason.
+
+    Nothing executes this product unsupervised any more, so a selection is a
+    proposal to a session, not an order. Filtering here would only hide
+    candidates from the one party able to weigh them. The regime is recorded on
+    the product and reported by brief(); what it MEANS is the agent's call.
+    """
+    del regime                      # noqa: F841 — see docstring; never a filter
+    book_sel = mom.select(book_scored, held_book, P["book_hold"], P["book_band"])
+    etf_sel = mom.select(etf_scored, held_etf, P["sleeve_hold"], P["sleeve_hold"])
+    if not rotate:
+        book_sel = hold_selection(book_sel, book_scored, held_book)
+        etf_sel = hold_selection(etf_sel, etf_scored, held_etf)
+    return book_sel, etf_sel
 
 
 def hold_selection(sel: list, scored, held: set) -> list:
@@ -282,51 +271,66 @@ def _selftest() -> None:
 
     print("selftest OK: earnings stamping binds, fails open, and round-trips")
 
-    # ---- regime-off must PAUSE the book, never liquidate it ----------------
-    # ⚠️ THESE CALL regime_filter DIRECTLY. The first version of this test
-    # hand-wrote `[t for t in sel if t in held]` and asserted on its own copy --
-    # so it passed identically with the shipped line reverted to `book_sel = []`
-    # and pinned nothing at all. A test that re-implements the code under test
-    # is not a test. The branch was extracted into regime_filter for this reason.
-    sel = ["AAA", "BBB", "CCC", "DDD"]
-    held = {"CCC", "DDD"}
-    owned = {"CCC", "DDD"}
+    # ---- the regime is a FACT, not a gate ----------------------------------
+    # ⛔ THIS PINS AN ABSENCE, which is the only way to keep a removed rule from
+    # growing back. The regime has gated the selection twice: `book_sel = []`
+    # (which SOLD the book -- eleven positions in one minute, 2026-07-27) and
+    # then regime_filter (which kept holdings but refused new entries). Both
+    # were a rule about SPY overriding an agent that can see the position, the
+    # marks and the reason. Nothing executes this product unsupervised now, so a
+    # selection is a proposal to a session, not an order.
+    # ⛔ BEHAVIOURAL, NOT TEXTUAL. The first version of this guard scanned the
+    # source for banned spellings ("book_sel = []", "if not regime:"). The
+    # independent reviewer took it apart: the fact-survival assertion matched
+    # ITSELF, so deleting the real product field still passed; and
+    # `book_sel.clear()`, `book_sel[:] = []`, `if not (regime):` or any alias
+    # walked straight through. "It proves syntax spellings, not behavior."
+    #
+    # So: run the REAL selection twice with everything identical except the
+    # regime, and require the two results to be equal. There is no spelling
+    # that defeats that, because it is the property itself.
+    idx = pd.date_range("2026-01-01", periods=3, freq="D")
+    scored = pd.DataFrame(
+        {"score": [3.0, 2.0, 1.0, 0.5], "rank": [1, 2, 3, 4],
+         "eligible": [True, True, True, True]},
+        index=["AAA", "BBB", "CCC", "DDD"])
+    etfs = pd.DataFrame(
+        {"score": [2.0, 1.0], "rank": [1, 2], "eligible": [True, True]},
+        index=["XLK", "XLE"])
+    PP = {"book_hold": 2, "book_band": 3, "sleeve_hold": 1}
 
-    assert regime_filter(sel, held, owned) == ["CCC", "DDD"], "held names must survive"
-    assert regime_filter(sel, held, owned) != [], "regime-off must not empty the book"
-    assert "AAA" not in regime_filter(sel, held, owned), "no new entries"
+    for rotate in (True, False):
+        for held_b, held_e in (({"CCC"}, {"XLE"}), (set(), set())):
+            on = select_book(scored, etfs, held_b, held_e, PP,
+                             regime=True, rotate=rotate)
+            off = select_book(scored, etfs, held_b, held_e, PP,
+                              regime=False, rotate=rotate)
+            assert on == off, (
+                f"the regime moved the selection (rotate={rotate}, "
+                f"held={held_b}): on={on} off={off}")
+            # ...and on a rotation night regime-off must still produce a book.
+            # That is the failure that cost money on 2026-07-27. Scoped to
+            # rotate=True on purpose: a NON-rotation night with nothing held is
+            # legitimately empty (there is nothing to hold), and this assertion
+            # fired on exactly that case when first written — which is the test
+            # doing its job on its author.
+            if rotate:
+                assert off[0], "regime-off produced an empty book on a rotation night"
 
-    # PRODUCT MEMBERSHIP IS NOT OWNERSHIP. DDD carries a target but was never
-    # bought (the TER/pending-settlement case) -- it must NOT survive, or the
-    # fast loop opens a brand-new position while the regime is off.
-    assert regime_filter(sel, held, {"CCC"}) == ["CCC"], \
-        "a name in the product but NOT owned must not survive regime-off"
+    # THE FACT MUST SURVIVE. Removing a rule without leaving the information
+    # behind is a blind spot, which is worse than the rule. Assert against the
+    # PRODUCT OBJECT, not the source text -- the previous version searched the
+    # file for a string that its own assertion contained.
+    payload = {"status": "off", "floor": "SPY>50DMA=False",
+               "vix": 31.0, "vix_ceiling": 28.0, "vix_ok": False}
+    rt = ResearchProduct.from_dict(
+        ResearchProduct(as_of="2026-08-14", theses=[], regime=payload,
+                        notes="selftest").to_dict())
+    assert rt.regime == payload, rt.regime
+    assert rt.regime["vix"] == 31.0, "the VIX half must survive the round trip too"
 
-    # unreadable ownership falls back to membership, never to the empty set:
-    # failing toward "own nothing" would SELL THE WHOLE BOOK on a missing file
-    assert regime_filter(sel, held, None) == ["CCC", "DDD"], \
-        "unknown ownership must not be read as owning nothing"
-
-    # nothing held -> genuinely empty (there is no book to pause)
-    assert regime_filter(sel, set(), owned) == []
-    # a held name dropped from the ranking is still released: regime-off
-    # suspends new entries, it does not suspend the exit discipline
-    assert regime_filter(["AAA", "CCC"], held, owned) == ["CCC"]
-
-    # owned_symbols distinguishes "unknown" from "nothing" -- the whole point
-    import tempfile as _tf, json as _js, os as _os
-    assert owned_symbols(Path("/nonexistent/positions.json")) is None
-    with _tf.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        _js.dump({"positions": {"mu": {"qty": 3}, "ZERO": {"qty": 0}}}, f)
-        tmp = f.name
-    try:
-        got = owned_symbols(Path(tmp))
-        assert got == {"MU"}, got          # upper-cased, zero-qty excluded
-    finally:
-        _os.unlink(tmp)
-
-    print("selftest OK: regime-off pauses new entries, does NOT liquidate, and "
-          "cannot open an unowned name")
+    print("selftest OK: the regime cannot move the selection (proved by running "
+          "it both ways), regime-off is never empty, and the fact round-trips")
 
     # ---- the rebalance knob must actually BIND ----------------------------
     from datetime import date as _d
@@ -417,25 +421,29 @@ def main() -> None:
     held_etf = {t.symbol for t in prev.theses
                 if t.target_weight > 0 and t.rank >= 100} if prev else set()
 
-    book_sel = mom.select(book_scored, held_book, P["book_hold"], P["book_band"])
-    etf_sel = mom.select(etf_scored, held_etf, P["sleeve_hold"], P["sleeve_hold"])
-
     # ROTATE ONLY WHEN DUE. Geometry, stops, earnings and marks still refresh
     # below every night -- it is the SELECTION that is weekly. See rotation_due.
     rotate = rotation_due(cfg)
+    book_sel, etf_sel = select_book(book_scored, etf_scored, held_book, held_etf,
+                                    P, regime=regime, rotate=rotate)
     if not rotate:
-        book_sel = hold_selection(book_sel, book_scored, held_book)
-        etf_sel = hold_selection(etf_sel, etf_scored, held_etf)
         print("  rotation: not due (weekly) — holding the book, geometry refreshed")
-    if not regime:
-        # Whether a regime call justifies EXITING is a trading judgment, and it
-        # belongs to the agent, which can see the positions, the marks and the
-        # reason. This branch only declines to ADD. See regime_filter.
-        owned = owned_symbols()
-        book_sel = regime_filter(book_sel, held_book, owned)
-        if owned is None:
-            print("  ⚠️ regime-off: ownership snapshot unreadable — held names "
-                  "kept on product membership alone")
+    # ⛔ THE REGIME DOES NOT FILTER THE SELECTION. It is recorded on the product
+    # (below) and reported by brief() as "an observation about the market, not a
+    # rule that acts", and the agent decides what it means.
+    #
+    # It used to gate here. The first form was `book_sel = []`, which did not
+    # pause the book, it SOLD it -- eleven positions in one minute on
+    # 2026-07-27, essentially this book's whole drawdown. That was narrowed on
+    # 2026-08-12 to "keep what is held, add nothing new", which stopped the
+    # liquidation but was still the same shape: a rule about SPY deciding
+    # whether the agent may open a position it can see, has reasons for, and is
+    # accountable for.
+    #
+    # Nothing executes this product unsupervised any more -- the procedural fast
+    # loop was retired 2026-08-14 -- so a selection is a proposal to a session,
+    # not an order. Filtering it here would only hide candidates from the one
+    # party able to weigh them.
 
     per_book = P["book_weight"] / P["book_hold"]
     per_etf = P["sleeve_weight"] / P["sleeve_hold"]
@@ -473,7 +481,7 @@ def main() -> None:
         notes=f"slow_loop dual-momentum book as of {asof.date()}")
 
     # ---- report ----
-    print(f"as_of {asof.date()} | regime {'ON' if regime else 'OFF (no new entries)'} "
+    print(f"as_of {asof.date()} | regime {'ON' if regime else 'OFF (observation only)'} "
           f"(trend={trend}, vix={f'{vix:.1f}' if vix is not None else 'n/a'}/{ceiling:g}) | "
           f"book {len(book_held)}/{P['book_hold']} held, sleeve {len(etf_held)}/{P['sleeve_hold']} held")
     _soon = [t.symbol for t in theses if t.earnings_date
