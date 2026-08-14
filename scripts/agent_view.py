@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -48,6 +50,37 @@ READ_ONLY = {
     "performance", "research_log", "check_order",
 }
 
+
+# --------------------------------------------------------------------------- #
+# PERSISTENT SERVICE + THIN CLIENT
+#
+# The reviewer's own recommendation, after it diagnosed the cost problem it
+# lives with: "a persistent, read-only local service plus a thin CLI client,
+# with a heterogeneous batch endpoint. Load pandas once, keep one bounded
+# server process."
+#
+# Before: every invocation exec'd server.py -> pandas + numpy + FastMCP,
+# ~134 MB and ~2.3 s, even for the 13 of 19 tools that touch no dataframe.
+# 120 concurrent on 2026-08-14 took a 1963 MB box to 44 MB free during market
+# hours, with a software-only stop watcher on a live book.
+#
+# After: the FIRST call starts a daemon that pays the import once; every call
+# after it is a socket round-trip from a client that never imports pandas at
+# all. The daemon exits on its own after IDLE_EXIT_SECS, so it costs nothing
+# between reviews.
+#
+# ⛔ THE ALLOWLIST IS ENFORCED IN THE DAEMON, not just in the client. A client
+# is just a process anyone can write; the process holding the loaded server is
+# the only place the read-only guarantee can actually live.
+#
+# ⚠️ NOTHING IS CACHED. Each request re-invokes the tool, which re-reads the
+# book, the journal and the panel from disk. A reviewer served a cached number
+# would be judging a stale book -- worse than a slow reviewer, because it looks
+# right. Only the IMPORT is reused.
+SOCKET = Path(os.environ.get(
+    "AGENT_VIEW_SOCKET", REPO / "research_store" / "locks" / "agent_view.sock"))
+IDLE_EXIT_SECS = float(os.environ.get("AGENT_VIEW_IDLE", "900"))
+SPAWN_WAIT_SECS = float(os.environ.get("AGENT_VIEW_SPAWN_WAIT", "60"))
 
 _SERVER = None
 
@@ -103,6 +136,145 @@ def _call(name: str, kwargs: dict) -> dict:
         return {**rec, "ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
+def _serve(sock_path: Path = SOCKET, idle: float = IDLE_EXIT_SECS) -> None:
+    """Run the daemon: load the server ONCE, then answer batches until idle.
+
+    One connection at a time, deliberately. Requests are cheap once the import
+    is paid, and serialising them means this process cannot itself become the
+    fan-out it exists to prevent. Batching is what removes the need for
+    parallelism: thirty calls arrive on one connection.
+    """
+    import socket
+
+    sock_path.parent.mkdir(parents=True, exist_ok=True)
+    # A socket file left by a crashed daemon is not a live listener. Probe it
+    # before unlinking, so we can never kill a healthy running instance.
+    if sock_path.exists():
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(2)
+            probe.connect(str(sock_path))
+            probe.close()
+            print(f"agent_view: a daemon is already listening on {sock_path}",
+                  file=sys.stderr)
+            return
+        except OSError:
+            sock_path.unlink(missing_ok=True)   # stale
+        finally:
+            probe.close()
+
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(sock_path))
+    os.chmod(sock_path, 0o600)          # owner only; this serves the live book
+    srv.listen(16)
+    srv.settimeout(idle)
+
+    _server()                            # pay the 134 MB now, once
+    print(f"agent_view daemon: ready on {sock_path} "
+          f"({len(READ_ONLY)} read-only tools, idle-exit {idle:g}s)",
+          file=sys.stderr)
+
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except socket.timeout:
+            break                        # idle long enough — release the memory
+        with conn:
+            try:
+                conn.settimeout(120)
+                buf = b""
+                while not buf.endswith(b"\n"):
+                    chunk = conn.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                req = json.loads(buf.decode() or "{}")
+                calls = [(c[0], c[1] if len(c) > 1 and c[1] else {})
+                         for c in req.get("calls", [])]
+                # ⛔ allowlist enforced HERE — _call() rejects anything outside it
+                results = [_call(name, kwargs) for name, kwargs in calls]
+                payload = {"results": results}
+            except Exception as e:       # noqa: BLE001 — one bad client, not the daemon
+                payload = {"error": f"{type(e).__name__}: {e}"}
+            try:
+                conn.sendall((json.dumps(payload, default=str) + "\n").encode())
+            except OSError:
+                pass                     # client hung up; keep serving
+    sock_path.unlink(missing_ok=True)
+    print("agent_view daemon: idle, exiting", file=sys.stderr)
+
+
+def _spawn_daemon() -> None:
+    """Start the daemon detached, so the first caller does not host it.
+
+    Guarded by an exclusive lock: several clients starting at once (which is
+    exactly how the reviewer works) must produce ONE daemon, not twelve.
+    """
+    import fcntl
+    import subprocess
+
+    SOCKET.parent.mkdir(parents=True, exist_ok=True)
+    lock = os.open(SOCKET.parent / "spawn.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return                       # someone else is spawning; just wait
+        if SOCKET.exists():
+            return
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--serve"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+    finally:
+        os.close(lock)
+
+
+def _via_socket(calls: list[tuple[str, dict]]) -> list[dict] | None:
+    """Ask the daemon. -> results, or None if the socket route is unavailable.
+
+    Returning None rather than raising is the point: the caller falls back to
+    loading the server in-process. A daemon that fails to start must slow the
+    reviewer down, never blind it.
+    """
+    import socket
+
+    deadline = time.monotonic() + SPAWN_WAIT_SECS
+    spawned = False
+    while True:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.settimeout(180)
+            s.connect(str(SOCKET))
+            s.sendall((json.dumps({"calls": [[n, k] for n, k in calls]}) + "\n").encode())
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+            reply = json.loads(buf.decode() or "{}")
+            return reply.get("results") if "results" in reply else None
+        except (OSError, ValueError):
+            if not spawned:
+                _spawn_daemon()
+                spawned = True
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.25)
+        finally:
+            s.close()
+
+
+def _run_calls(calls: list[tuple[str, dict]], *, use_daemon: bool = True) -> list[dict]:
+    """One entry point for both modes: daemon if we can, in-process if not."""
+    if use_daemon and os.environ.get("AGENT_VIEW_NO_DAEMON") != "1":
+        got = _via_socket(calls)
+        if got is not None:
+            return got
+    return [_call(name, kwargs) for name, kwargs in calls]
+
+
 def _parse_batch(raw: str) -> list[tuple[str, dict]]:
     """Accept either shape, because both are natural to write:
 
@@ -141,7 +313,12 @@ def main() -> None:
               "costs the same 134 MB once, not 30 times.")
         return
 
-    # ---- batch: many calls, ONE interpreter, ONE pandas import --------------
+    # ---- daemon mode: load once, serve many -------------------------------
+    if args[0] == "--serve":
+        _serve()
+        return
+
+    # ---- batch: many calls, ONE import, served by the daemon --------------
     if args[0] == "--batch":
         raw = args[1] if len(args) > 1 and args[1] != "-" else sys.stdin.read()
         try:
@@ -149,8 +326,7 @@ def main() -> None:
         except (ValueError, json.JSONDecodeError) as e:
             print(json.dumps({"error": f"could not parse batch: {e}"}, indent=2))
             raise SystemExit(2)
-        results = [_call(name, kwargs) for name, kwargs in calls]
-        print(json.dumps(results, indent=2, default=str))
+        print(json.dumps(_run_calls(calls), indent=2, default=str))
         # A batch is a success if it RAN; individual failures are in the data.
         raise SystemExit(0)
 
@@ -169,7 +345,7 @@ def main() -> None:
                 kwargs[k] = v
 
     # Same path as --batch, so the two modes cannot drift into different answers.
-    rec = _call(name, kwargs)
+    rec = _run_calls([(name, kwargs)])[0]
     if rec["ok"]:
         print(rec["result"])
         return
