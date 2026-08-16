@@ -23,6 +23,8 @@ import json
 import math
 from pathlib import Path
 
+import snapshot_freshness
+
 REPO = Path(__file__).resolve().parents[1]
 RS = REPO / "research_store"
 SNAPSHOT = RS / "rh" / "positions.json"
@@ -96,8 +98,14 @@ def load(snapshot_path: Path = SNAPSHOT) -> dict | None:
     else:                                              # legacy snapshot: trust its total
         account_value = float(snap.get("account_value", 0) or 0)
         cash = account_value - invested
+    freshness = (snapshot_freshness.status(snapshot_path, RS / "journal.jsonl")
+                 if snapshot_path == SNAPSHOT else None)
     return {"account_number": snap.get("account_number"),
+            # `ts` is the authoritative BROKER-HOLDINGS observation time.
+            # `marked_at` may be newer merely because monitor quotes moved; it
+            # must never be used to claim that ownership itself is fresh.
             "as_of": snap.get("as_of"), "ts": snap_ts or None,
+            "snapshot_freshness": freshness,
             # Pass through the broker's OWN funding figures when the snapshot
             # carries them. `cash` is NOT what can be spent: on this cash account
             # sale proceeds are unsettled for T+1, so on 2026-08-10 cash was

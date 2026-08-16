@@ -10,6 +10,7 @@ Diagnostics go to stderr.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 from datetime import date, datetime, timezone
@@ -36,12 +37,14 @@ import notify                                   # noqa: E402
 import governance as gov                        # noqa: E402
 import strategy as strat                        # noqa: E402
 import momentum                                 # noqa: E402
+import snapshot_freshness                       # noqa: E402
 import pandas as pd                             # noqa: E402
 
 mcp = FastMCP("agentic-trader")
 
 EQUITY = REPO / "research_store" / "history" / "equity.jsonl"
 JOURNAL = REPO / "research_store" / "journal.jsonl"
+RH_POSITIONS = REPO / "research_store" / "rh" / "positions.json"
 CLOSES = REPO / "research_store" / "prices" / "closes.parquet"
 HIGHS = REPO / "research_store" / "prices" / "highs.parquet"
 LOWS = REPO / "research_store" / "prices" / "lows.parquet"
@@ -100,7 +103,21 @@ def _staleness(v: dict) -> dict | None:
     happens, not after.
     """
     from datetime import datetime, timezone           # noqa: PLC0415
-    raw = v.get("marked_at") or v.get("ts") or v.get("as_of")
+    causal = snapshot_freshness.status(
+        REPO / "research_store" / "rh" / "positions.json", JOURNAL)
+    # Only attach the on-disk journal comparison when `v` represents that same
+    # on-disk snapshot.  Unit tests and callers may pass an isolated valued dict.
+    value_ts = snapshot_freshness.parse_ts(v.get("ts"))
+    if causal["stale"] and value_ts == causal["snapshot_ts"]:
+        return {"age": "OLDER THAN LAST FILL", "stale": True,
+                "as_of": v.get("ts") or v.get("as_of"),
+                "warning": ("⚠️ THIS BROKER SNAPSHOT PREDATES THE NEWEST "
+                            "JOURNALLED FILL. Its holdings are not authoritative. "
+                            "Call get_equity_positions and get_portfolio, then "
+                            "record_fills with both broker outputs before acting.")}
+    # Price marks do not refresh broker ownership.  Using marked_at here let a
+    # fresh monitor quote disguise an old positions.json indefinitely.
+    raw = v.get("ts") or v.get("as_of")
     if not raw:
         return {"age": "UNKNOWN", "stale": True,
                 "warning": ("This snapshot carries NO timestamp, so its age "
@@ -400,7 +417,7 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
 
 
 @mcp.tool()
-def record_fills(orders: str) -> str:
+def record_fills(orders: str, broker_positions: str = "", portfolio: str = "") -> str:
     """Journal the orders you PLACED, so the fill is on the permanent record.
 
     ⛔ CALL THIS AFTER EVERY SESSION IN WHICH YOU PLACED AN ORDER, before you
@@ -423,7 +440,9 @@ def record_fills(orders: str) -> str:
         script you have no shell to run. The letter would have reported a week
         in which you did nothing.
 
-    Returns what it wrote, and says plainly when it wrote nothing.
+    Also requires the post-trade outputs of get_equity_positions and
+    get_portfolio.  The same call atomically rewrites positions.json, so an
+    execution cannot be recorded as complete while account state stays old.
     """
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
@@ -450,9 +469,11 @@ def record_fills(orders: str) -> str:
         seen = set()
 
     fills = []
+    filled_orders = []
     for o in raw:
         if not isinstance(o, dict) or str(o.get("state")) != "filled":
             continue
+        filled_orders.append(o)
         oid = str(o.get("id") or "")
         if not oid or oid in seen:
             continue           # idempotent: never double-append an order_id
@@ -470,15 +491,208 @@ def record_fills(orders: str) -> str:
                       "order_id": oid, "status": "filled",
                       "placed_at": o.get("created_at")})
 
+    snapshot_result = None
+    if filled_orders:
+        snapshot_result = _write_broker_snapshot(broker_positions, portfolio, ts)
+
     if not fills:
-        return json.dumps({"ok": True, "recorded": 0,
+        reconciled = not filled_orders or bool(snapshot_result and snapshot_result.get("ok"))
+        return json.dumps({"ok": reconciled, "recorded": 0,
+                           "snapshot": snapshot_result,
                            "note": ("nothing new to record — every filled order "
                                     "in this payload was already journalled, or "
                                     "none were filled")}, indent=2)
 
     store.append_journal({"event": "execution", "ts": ts,
                           "source": "session", "fills": fills})
-    return json.dumps({"ok": True, "recorded": len(fills), "fills": fills}, indent=2)
+    return json.dumps({"ok": bool(snapshot_result and snapshot_result.get("ok")),
+                       "recorded": len(fills), "fills": fills,
+                       "snapshot": snapshot_result,
+                       "error": (None if snapshot_result and snapshot_result.get("ok")
+                                 else "fills were journalled but positions.json was NOT refreshed")},
+                      indent=2)
+
+
+def _payload(value):
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _num(value, field: str) -> float:
+    """Parse a broker number. REJECTS non-finite — never coerces silently.
+
+    `float("nan")` succeeds and `json.dumps` will happily emit a bare NaN, which
+    is not valid JSON and poisons every consumer that reads it back. A number we
+    cannot trust must stop the write, not enter the snapshot.
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field}: {value!r} is not a number")
+    if not math.isfinite(f):
+        raise ValueError(f"{field}: {value!r} is not finite")
+    return f
+
+
+def _write_broker_snapshot(broker_positions, portfolio, ts: str,
+                           *, liquidated: bool = False) -> dict:
+    """VALIDATE broker reads, then atomically publish the shares/cost snapshot.
+
+    ⛔ THIS USED TO COERCE, NOT VALIDATE, and the difference is the whole point.
+    The previous version silently skipped any row it could not read, so a
+    TRUNCATED response — three of twelve positions — was published as the whole
+    book and the other nine were deleted from local truth. An EMPTY list wrote
+    `positions: {}` and returned ok, erasing every holding. A missing average
+    cost became 0.0. NaN passed straight through into the file. None of it
+    raised; all of it looked like a successful reconciliation.
+
+    Its docstring already said "Validate broker reads". The word was there and
+    the behaviour was not, which is the defect class this repo keeps paying for.
+
+    The rule now: ANY row we cannot fully parse REJECTS THE WHOLE SNAPSHOT. A
+    partial book is more dangerous than a stale one — stale is detectable and
+    was detected; partial looks current, carries a fresh timestamp, and silently
+    unprotects whatever it dropped.
+
+    `liquidated=True` is the ONLY way to publish an empty holdings list. It must
+    be asserted deliberately by a caller that has confirmed the account really
+    is flat, because "no positions" is indistinguishable from "the read failed"
+    and is the single most destructive thing this function can write.
+    """
+    try:
+        pos_raw, port_raw = _payload(broker_positions), _payload(portfolio)
+        if isinstance(pos_raw, dict) and "data" in pos_raw:
+            pos_raw = pos_raw["data"]
+        if isinstance(port_raw, dict) and "data" in port_raw:
+            port_raw = port_raw["data"]
+        rows = (pos_raw.get("positions") if isinstance(pos_raw, dict) else pos_raw)
+        if not isinstance(rows, list) or not isinstance(port_raw, dict):
+            raise ValueError("pass raw get_equity_positions and get_portfolio outputs")
+
+        positions = {}
+        account_number = pos_raw.get("account_number") if isinstance(pos_raw, dict) else None
+        for i, row in enumerate(rows):
+            # REJECT, never skip. A row we cannot read means the response is not
+            # trustworthy, and publishing the rest of it deletes real positions.
+            if not isinstance(row, dict):
+                raise ValueError(f"positions[{i}] is {type(row).__name__}, not an object")
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not symbol:
+                raise ValueError(f"positions[{i}] has no symbol")
+            if symbol in positions:
+                raise ValueError(f"positions[{i}]: duplicate symbol {symbol}")
+            raw_qty = row.get("quantity", row.get("qty"))
+            if raw_qty is None:
+                raise ValueError(f"{symbol}: no quantity in the broker row")
+            qty = _num(raw_qty, f"{symbol}.quantity")
+            if qty < 0:
+                raise ValueError(f"{symbol}: negative quantity {qty}")
+            if qty == 0:
+                continue          # a genuinely closed position; not an error
+            raw_avg = row.get("average_buy_price", row.get("avg_cost"))
+            if raw_avg is None:
+                raise ValueError(f"{symbol}: no average cost in the broker row")
+            positions[symbol] = {"qty": qty, "avg_cost": _num(raw_avg, f"{symbol}.avg_cost")}
+            account_number = account_number or row.get("account_number")
+
+        # ⛔ AN EMPTY BOOK MUST BE ASSERTED, NEVER INFERRED. This is the write
+        # that erases everything, and "the read came back empty" and "the
+        # account is flat" are the same bytes.
+        if not positions and not liquidated:
+            raise ValueError(
+                "broker read produced NO positions. Refusing to publish an empty "
+                "book — this is indistinguishable from a failed read and would "
+                "erase every holding. If the account really is flat, the caller "
+                "must assert liquidated=True.")
+
+        total = port_raw.get("total_value", port_raw.get("account_value"))
+        cash = port_raw.get("cash")
+        if total is None or cash is None:
+            raise ValueError("portfolio output lacks total_value/account_value or cash")
+        acct = str(port_raw.get("account_number") or account_number or "")
+
+        # IDENTITY. A snapshot from the wrong account is worse than none: it is
+        # a confident, fresh-looking description of a book that is not yours.
+        # CLAUDE.md hard rule 1 — one account is tradeable, every other is
+        # read-only — makes writing another account's state here a mandate breach.
+        expected = _expected_account()
+        if expected and acct and acct != expected:
+            raise ValueError(
+                f"account mismatch: broker payload is for {acct}, this system "
+                f"trades {expected}. Refusing to publish another account's state.")
+
+        snap = {"account_number": acct,
+                "account_value": _num(total, "portfolio.total_value"),
+                "cash": _num(cash, "portfolio.cash"),
+                "as_of": date.today().isoformat(), "ts": ts,
+                "positions": positions}
+        for key in ("buying_power", "unsettled_funds"):
+            v = port_raw.get(key)
+            if isinstance(v, dict):                 # RH nests buying_power
+                v = v.get(key)
+            if v is not None:
+                snap[key] = _num(v, f"portfolio.{key}")
+
+        path = RH_POSITIONS
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(snap, indent=2, allow_nan=False) + "\n")
+        os.replace(tmp, path)
+        return {"ok": True, "ts": ts, "positions": len(positions)}
+    except Exception as e:  # noqa: BLE001 - return loudly through the MCP tool
+        return {"ok": False, "error": str(e)}
+
+
+def _expected_account() -> str:
+    """The one tradeable account number, from the existing snapshot. '' if unknown.
+
+    Deliberately read from the snapshot rather than config: the account number is
+    not in any config file, and the previous snapshot is the system's own record
+    of which account it trades. On a first-ever write there is nothing to compare
+    against and the check stands down rather than blocking setup.
+    """
+    try:
+        return str(json.loads(RH_POSITIONS.read_text()).get("account_number") or "")
+    except Exception:                                # noqa: BLE001
+        return ""
+
+
+@mcp.tool()
+def refresh_broker_snapshot(broker_positions: str, portfolio: str,
+                            liquidated: bool = False) -> str:
+    """Publish the broker's CURRENT account state. Call this before you finish.
+
+    ⛔ EVERY SESSION, WHETHER OR NOT YOU TRADED. Pass the raw output of
+    `get_equity_positions` and `get_portfolio`. This is what keeps the system's
+    picture of your book from drifting away from the broker's.
+
+    WHY IT EXISTS. Refreshing state used to be possible only through
+    `record_fills()`, and only when that call contained a filled order — so a
+    session that traded nothing could not correct the file even when it could
+    see the truth. On 2026-08-14 a session sold AMAT, journalled the fill, and
+    the snapshot was never rewritten; it sat two days stale, still listing a
+    position that had been sold, while the stop watcher tracked a phantom and
+    every downstream number was wrong. Nothing could repair it, because repair
+    required a trade.
+
+    Journalling a fill and publishing account state are different jobs with
+    different prerequisites: a fill needs an execution, state needs only a good
+    read. Coupling them made the second impossible without the first.
+
+    ⚠️ IT CAN REFUSE, AND A REFUSAL IS NOT A FORMALITY. The write is rejected
+    outright — leaving the previous snapshot intact — if any row is unreadable,
+    a quantity or cost is missing or non-finite, a symbol repeats, or the
+    payload belongs to a different account. A partial book is more dangerous
+    than a stale one: stale is detectable, partial looks current.
+
+    `liquidated=True` is required to publish an EMPTY book, and only assert it
+    when you have confirmed the account is genuinely flat. "No positions
+    returned" and "the read failed" are the same bytes.
+
+    `ok:false` means the snapshot was NOT updated. Say so; do not report the
+    session reconciled.
+    """
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return json.dumps(_write_broker_snapshot(broker_positions, portfolio, ts,
+                                             liquidated=bool(liquidated)), indent=2)
 
 
 @mcp.tool()
@@ -1215,6 +1429,7 @@ def brief() -> str:
         "account": {k: v.get(k) for k in ("account_value", "cash", "invested")},
         "mandate": mandate_obj,
         "positions": held,
+        "snapshot_freshness": _staleness(v),
         "unprotected": [s for s, h in held.items() if not h["watched"]],
         "candidates": json.loads(top.to_json(orient="index")),
         "regime": regime,
@@ -1268,8 +1483,8 @@ def _selftest() -> None:
     fresh = (_dt.now(_tz.utc) - _td(hours=2)).isoformat()
     old_ts = (_dt.now(_tz.utc) - _td(days=9)).isoformat()      # >1 trading day, always
 
-    assert _staleness({"marked_at": fresh}) is None, "a fresh snapshot must be silent"
-    st = _staleness({"marked_at": old_ts})
+    assert _staleness({"ts": fresh}) is None, "a fresh snapshot must be silent"
+    st = _staleness({"ts": old_ts})
     assert st and st["stale"] is True and "trading days" in st["age"], st
 
     # ⚠️ MEASURED IN TRADING DAYS, NOT HOURS. The writers stop at the close by
@@ -1281,7 +1496,7 @@ def _selftest() -> None:
     for back in range(1, 5):
         gap = int(_np2.busday_count((_dt.now(_tz.utc) - _td(days=back)).date(),
                                     _dt.now(_tz.utc).date()))
-        got = _staleness({"marked_at": _ago(back)})
+        got = _staleness({"ts": _ago(back)})
         if gap <= 1:
             assert got is None, f"{back}d back = {gap} trading days, must be silent"
         else:
@@ -1297,7 +1512,7 @@ def _selftest() -> None:
         assert json.loads(positions()) == {}, "no snapshot must stay a bare {}"
     finally:
         marks.load = _no_snap
-    assert _staleness({"marked_at": "not-a-date"})["stale"] is True
+    assert _staleness({"ts": "not-a-date"})["stale"] is True
     # A bare date parses as midnight, and under the TRADING-DAY rule yesterday's
     # date is normal, not stale -- that is the premarket case. (It read as stale
     # under the old hours rule, which is exactly the false alarm being removed.)
@@ -1309,11 +1524,11 @@ def _selftest() -> None:
     # the banner reaches BOTH tools, not just account()
     _real_load = marks.load
     try:
-        marks.load = lambda *a, **k: {"marked_at": old_ts, "positions": {},
+        marks.load = lambda *a, **k: {"ts": old_ts, "marked_at": fresh, "positions": {},
                                       "account_value": 1.0, "cash": 1.0}
         assert "STALE" in json.loads(account()), "account() must carry the banner"
         assert "STALE" in json.loads(positions()), "positions() must carry it too"
-        marks.load = lambda *a, **k: {"marked_at": fresh, "positions": {},
+        marks.load = lambda *a, **k: {"ts": fresh, "positions": {},
                                       "account_value": 1.0, "cash": 1.0}
         assert "STALE" not in json.loads(account()), "fresh must not cry wolf"
         assert "STALE" not in json.loads(positions()), "fresh must not cry wolf"
@@ -1426,12 +1641,24 @@ def _selftest() -> None:
     ]}})
     _journalled2 = []
     _real_ap, _real_rj2 = store.append_journal, store.read_journal
+    global RH_POSITIONS
+    _real_rhp = RH_POSITIONS
     try:
+        import tempfile as _tf_fill
+        _fill_dir = _tf_fill.TemporaryDirectory()
+        RH_POSITIONS = Path(_fill_dir.name) / "positions.json"
         store.append_journal = lambda ev: _journalled2.append(ev)
         store.read_journal = lambda: []
-        r = json.loads(record_fills.fn(_payload) if hasattr(record_fills, "fn")
-                       else record_fills(_payload))
+        _bp = json.dumps({"positions": [{"symbol": "DELL", "quantity": "2",
+                                          "average_buy_price": "100"}]})
+        _port = json.dumps({"total_value": "250", "cash": "50",
+                            "buying_power": "40"})
+        r = json.loads(record_fills.fn(_payload, _bp, _port) if hasattr(record_fills, "fn")
+                       else record_fills(_payload, _bp, _port))
         assert r["ok"] and r["recorded"] == 1, r          # cancelled is NOT a fill
+        snap = json.loads(RH_POSITIONS.read_text())
+        assert snap["positions"]["DELL"] == {"qty": 2.0, "avg_cost": 100.0}, snap
+        assert snap["ts"], snap
         f = _journalled2[0]["fills"][0]
         assert f["symbol"] == "AMAT" and f["order_id"] == "abc", f
         assert abs(f["amount"] - 0.004646 * 547.0328) < 1e-6, f
@@ -1442,9 +1669,17 @@ def _selftest() -> None:
         _journalled2.clear()
         store.read_journal = lambda: [{"event": "execution",
                                        "fills": [{"order_id": "abc"}]}]
-        r2 = json.loads(record_fills.fn(_payload) if hasattr(record_fills, "fn")
-                        else record_fills(_payload))
+        r2 = json.loads(record_fills.fn(_payload, _bp, _port) if hasattr(record_fills, "fn")
+                        else record_fills(_payload, _bp, _port))
         assert r2["recorded"] == 0 and _journalled2 == [], r2
+
+        # A fill is still journalled if reconciliation input is absent, but the
+        # tool must return a loud failure rather than declaring completion.
+        store.read_journal = lambda: []
+        r3 = json.loads(record_fills.fn(_payload) if hasattr(record_fills, "fn")
+                        else record_fills(_payload))
+        assert r3["recorded"] == 1 and not r3["ok"] and r3["snapshot"]["ok"] is False, r3
+        _journalled2.clear()
 
         # garbage in must not raise, and must not write
         for bad in ("not json", "[]", '{"nope": 1}'):
@@ -1452,10 +1687,94 @@ def _selftest() -> None:
                             else record_fills(bad))
             assert rb.get("recorded", 0) == 0, (bad, rb)
         assert _journalled2 == []
+
+        # ================================================================
+        # ⛔ ADVERSARIAL: A BAD READ MUST NEVER REPLACE A GOOD SNAPSHOT.
+        # The old writer COERCED instead of validating — it silently skipped
+        # any row it could not parse, so a truncated response published a
+        # partial book and deleted the rest, an empty list erased everything,
+        # a missing cost became 0.0, and NaN went straight into the file. All
+        # of it returned ok. Every case below is one that used to succeed.
+        #
+        # The invariant each asserts is the same: REJECT, and leave the
+        # previous file BYTE-IDENTICAL. A partial book is worse than a stale
+        # one — stale is detectable and was detected; partial looks current,
+        # carries a fresh timestamp, and silently unprotects what it dropped.
+        # ================================================================
+        _refresh = (refresh_broker_snapshot.fn if hasattr(refresh_broker_snapshot, "fn")
+                    else refresh_broker_snapshot)
+        good_pos = json.dumps({"data": {"positions": [
+            {"symbol": "DELL", "quantity": "2", "average_buy_price": "100"},
+            {"symbol": "MU", "quantity": "3", "average_buy_price": "200"}]}})
+        good_port = json.dumps({"data": {"total_value": "500", "cash": "5",
+                                         "account_number": "948184924"}})
+        # a valid read with NO fills refreshes — the whole point of the new tool
+        assert json.loads(_refresh(good_pos, good_port))["ok"] is True
+        before = RH_POSITIONS.read_bytes()
+        assert len(json.loads(before.decode())["positions"]) == 2
+
+        def _must_reject(pos, port, why, **kw):
+            r = json.loads(_refresh(pos, port, **kw))
+            assert r["ok"] is False, (why, r)
+            assert RH_POSITIONS.read_bytes() == before, \
+                f"{why}: the previous snapshot was modified"
+            return r
+
+        # EMPTY BOOK — the most destructive write there is. "No positions
+        # returned" and "the read failed" are the same bytes, so it must be
+        # asserted, never inferred.
+        r = _must_reject(json.dumps({"data": {"positions": []}}), good_port, "empty")
+        assert "erase every holding" in r["error"], r
+        # ...and IS allowed when the caller explicitly asserts a flat account
+        assert json.loads(_refresh(json.dumps({"data": {"positions": []}}),
+                                   good_port, liquidated=True))["ok"] is True
+        RH_POSITIONS.write_bytes(before)          # restore for the rest
+
+        # ONE malformed row rejects the WHOLE snapshot — it must not publish
+        # the readable rows and drop the rest
+        _must_reject(json.dumps({"data": {"positions": [
+            {"symbol": "DELL", "quantity": "2", "average_buy_price": "100"},
+            "not-a-row"]}}), good_port, "malformed row")
+        for bad_row, why in (
+                ({"symbol": "", "quantity": "1", "average_buy_price": "1"}, "no symbol"),
+                ({"symbol": "X", "average_buy_price": "1"}, "no quantity"),
+                ({"symbol": "X", "quantity": "1"}, "no avg cost"),
+                ({"symbol": "X", "quantity": "-1", "average_buy_price": "1"}, "negative qty"),
+                ({"symbol": "X", "quantity": "NaN", "average_buy_price": "1"}, "NaN qty"),
+                ({"symbol": "X", "quantity": "Infinity", "average_buy_price": "1"}, "inf qty"),
+                ({"symbol": "X", "quantity": "1", "average_buy_price": "NaN"}, "NaN cost")):
+            _must_reject(json.dumps({"data": {"positions": [bad_row]}}), good_port, why)
+        # duplicate symbols: the old code let the last row silently win
+        _must_reject(json.dumps({"data": {"positions": [
+            {"symbol": "DELL", "quantity": "2", "average_buy_price": "100"},
+            {"symbol": "DELL", "quantity": "9", "average_buy_price": "1"}]}}),
+            good_port, "duplicate symbol")
+        # WRONG ACCOUNT — a confident, fresh-looking description of a book that
+        # is not ours. CLAUDE.md hard rule 1: every other account is read-only.
+        r = _must_reject(good_pos, json.dumps({"data": {
+            "total_value": "500", "cash": "5", "account_number": "999999999"}}),
+            "wrong account")
+        assert "account mismatch" in r["error"], r
+        # non-finite portfolio numbers
+        for bad_port, why in (
+                ({"total_value": "NaN", "cash": "5", "account_number": "948184924"}, "NaN total"),
+                ({"total_value": "500", "cash": "Infinity", "account_number": "948184924"}, "inf cash")):
+            _must_reject(good_pos, json.dumps({"data": bad_port}), why)
+        # a genuinely CLOSED position (qty 0) is dropped without rejecting
+        r = json.loads(_refresh(json.dumps({"data": {"positions": [
+            {"symbol": "DELL", "quantity": "2", "average_buy_price": "100"},
+            {"symbol": "GONE", "quantity": "0", "average_buy_price": "5"}]}}), good_port))
+        assert r["ok"] is True and r["positions"] == 1, r
+        assert "GONE" not in json.loads(RH_POSITIONS.read_text())["positions"]
+        print("selftest OK: a bad broker read is REFUSED and the previous snapshot "
+              "survives byte-identical (empty, truncated-row, missing qty/cost, "
+              "negative, NaN/inf, duplicate, wrong account); a no-fill refresh works")
     finally:
         store.append_journal, store.read_journal = _real_ap, _real_rj2
-    print("selftest OK: record_fills journals only FILLED orders, is idempotent "
-          "on order_id, and never writes on a malformed payload")
+        RH_POSITIONS = _real_rhp
+        _fill_dir.cleanup()
+    print("selftest OK: record_fills journals FILLED orders, atomically refreshes "
+          "positions, is idempotent, and fails loudly without broker state")
 
     # --- announce(): a NOTIFICATION, and it must never send during a test ----
     real_push = notify.push

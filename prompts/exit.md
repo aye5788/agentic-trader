@@ -46,6 +46,9 @@ PROCEDURE — follow exactly:
    dollar notional and not `amount / avg_price`. A sell without it leaves the
    ledger unable to see the position reach zero, which is exactly the event that
    closes its lifecycle.
+   This legacy exit procedure must still complete step 7 itself; unlike the
+   session MCP `record_fills` tool, this script cannot fetch or publish broker
+   state.
 7. **Reconcile.** If you sold anything: re-fetch `get_equity_positions` and
    `get_portfolio`, and rewrite `research_store/rh/positions.json` — shares and
    cost, NOT dollar values:

@@ -37,6 +37,7 @@ except Exception:
     pass
 import strategy as strat            # noqa: E402
 import governance as gov            # noqa: E402
+import snapshot_freshness            # noqa: E402
 from research_store import read_current, store   # noqa: E402
 from adapters.moomoo import prices as mmp        # noqa: E402
 from adapters.moomoo.client import quote_ctx     # noqa: E402
@@ -66,6 +67,7 @@ _LAST_HALTED: bool | None = None      # log kill-switch mode on transition, not 
 _LAST_UNPROTECTED: frozenset = frozenset()
 _LAST_SUSPECT_EMPTY: bool = False
 _LAST_NO_TARGET: frozenset = frozenset()
+_LAST_STALE_OWNERSHIP: bool = False
 
 
 def _now_et():
@@ -829,10 +831,29 @@ def check_once(cfg, client) -> int:
         _LAST_HALTED = halted
 
     held = {t.symbol: t for t in prod.theses if in_book(t) and t.stop}
-    try:                                     # watch only names we ACTUALLY hold
-        owned = owned_symbols(_load(RH_POSITIONS, None))
-    except Exception:
-        owned = None                         # torn read → fail open (watch all)
+    freshness = snapshot_freshness.status(RH_POSITIONS,
+                                           REPO / "research_store" / "journal.jsonl")
+    global _LAST_STALE_OWNERSHIP
+    if freshness["stale"]:
+        # Fail open: an old ownership set must never exclude a newly bought
+        # real position from software stop coverage. Stop arithmetic below is
+        # unchanged; only this ownership filter is bypassed.
+        owned = None
+        if not _LAST_STALE_OWNERSHIP:
+            print("  🚨 positions snapshot predates the last fill — ownership "
+                  "filter disabled; watching every eligible thesis")
+            notify("🚨 Broker positions snapshot stale after a fill",
+                   "positions.json predates the newest journalled execution. "
+                   "The monitor is failing open and watching every eligible "
+                   "thesis until broker state is reconciled.",
+                   tags="rotating_light")
+        _LAST_STALE_OWNERSHIP = True
+    else:
+        _LAST_STALE_OWNERSHIP = False
+        try:                                  # watch only names we ACTUALLY hold
+            owned = owned_symbols(_load(RH_POSITIONS, None))
+        except Exception:
+            owned = None                     # torn read → fail open (watch all)
     if owned is not None:
         dropped = [s for s in held if s not in owned]
         held = {s: t for s, t in held.items() if s in owned}

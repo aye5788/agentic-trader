@@ -52,6 +52,7 @@ import integrity                    # noqa: E402
 import mandate as mandate_mod       # noqa: E402
 import session_lock                 # noqa: E402
 import strategy                     # noqa: E402
+import snapshot_freshness            # noqa: E402
 
 MODES = ("premarket", "open", "close", "wake")
 LOCK = REPO / "research_store" / "session.lock"
@@ -421,6 +422,8 @@ def run(mode: str, dry_run: bool = False) -> dict:
 
     fh = None
     proc = None
+    fill_before = snapshot_freshness.latest_fill_ts(
+        REPO / "research_store" / "journal.jsonl")
     started = None
     try:
         # ⛔ acquire() RETURNS None ON TIMEOUT -- it does not raise. An earlier
@@ -481,6 +484,16 @@ def run(mode: str, dry_run: bool = False) -> dict:
             rc = -1
 
         ok, error = classify(rc, out, err)
+        fill_after = snapshot_freshness.latest_fill_ts(
+            REPO / "research_store" / "journal.jsonl")
+        if fill_after is not None and fill_after != fill_before:
+            snap = snapshot_freshness.status(
+                REPO / "research_store" / "rh" / "positions.json",
+                REPO / "research_store" / "journal.jsonl")
+            if snap["stale"]:
+                ok = False
+                error = ("session recorded a fill but positions.json was not "
+                         "refreshed afterward — broker reconciliation required")
         # `retryable` is ADVISORY -- nothing consumes it today (no cron entry,
         # no systemd unit, and run() never retries itself). Before anything acts
         # on it, re-read should_retry: a retry re-runs a session that may have

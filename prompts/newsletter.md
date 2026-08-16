@@ -20,7 +20,10 @@ around it rather than guessing. You are the narrator, not the calculator.
    withdrawals), net_deposits_this_week (+ = you added cash, − = withdrew;
    account.value INCLUDES it but week_pnl does NOT — see below),
    flows_this_week (the individual confirmed flows), unrealized_pnl_on_cost,
-   regime, book[] (rank order; sleeve=true = ETF sleeve), fills_this_week,
+   regime, positions[] (the broker's actual holdings, in broker snapshot order;
+   thesis fields are null where no thesis exists), proposed_positions[] (target
+   names not currently held; proposals only, never describe these as holdings),
+   fills_this_week,
    exit_signals_this_week, reentry_decisions_this_week (post-take-profit
    judgment calls — full/half/skip with reasons; when present, narrate them
    in the letter: these are the week's actual PM decisions),
@@ -86,11 +89,12 @@ around it rather than guessing. You are the narrator, not the calculator.
      (group same-symbol fills). Rationale = why the system did it (entered/left
      the band, geometry gate, stop breach, rebalance). SIDE_COLOR: buys
      `#2A6A4A`, sells/stops `#A13A2E`. No fills → one row saying so plainly.
-   - `{{BOOK_ROWS}}` — one BOOK ROW per book[] entry, given order (book then
-     sleeve). STOP and TARGETS come from the facts verbatim (sleeve rows have
-     real stops/targets too — the monitor enforces them); TARGETS as
+   - `{{POSITION_ROWS}}` — one POSITION ROW per positions[] entry, given order.
+     This array is the portfolio: do not add names from proposed_positions.
+     STOP and TARGETS come from the facts verbatim; when thesis fields are null,
+     show "—" rather than omitting the held position. TARGETS as
      "t1 / t2" (e.g. "2216 / 2706"). If more than ~8 rows, show top 8 and say
-     so in `{{BOOK_FOOTNOTE}}` (e.g. "Showing 8 of 14 · book 10 names @ 7.0% + sleeve 4 ETFs @ 7.5%").
+     so in `{{POSITION_FOOTNOTE}}` (e.g. "Showing 8 of 13 broker-held positions").
    - `{{OUTLOOK_PARAGRAPHS}}` — 1–2 paragraphs: next_rebalance date, review_by /
      earnings within the window, the standing regime rule.
    - `{{CRAB}}` — pick ONE mascot variant by mood, from week_pnl (or
@@ -125,7 +129,7 @@ around it rather than guessing. You are the narrator, not the calculator.
 </tr></table>
 ```
 
-### BOOK ROW
+### POSITION ROW
 ```html
 <tr>
   <td style="padding:10px 12px 10px 0;border-bottom:1px solid #EAE6DE;font-family:'IBM Plex Mono','Courier New',monospace;font-size:12.5px;color:#141413;"><strong>SYMBOL</strong></td>

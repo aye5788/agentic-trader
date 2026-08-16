@@ -49,6 +49,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+import snapshot_freshness
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
 # Remind this many days before expiry — enough runway to hit a busy day and still
@@ -274,6 +276,19 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
         else:
             out.append(Check("unrecorded_fills", "Unrecorded fills", None, "ok",
                              f"every decided trade on {fday} has an execution recorded"))
+
+    snapshot = probes.get("positions_snapshot")
+    if snapshot is not None:
+        if snapshot["stale"]:
+            out.append(Check("positions_snapshot", "Broker positions snapshot",
+                             snapshot["snapshot_ts"], "stale_after_fill",
+                             "positions.json predates the newest execution event — "
+                             "holdings, stop coverage, valuation, and the investor "
+                             "letter may be wrong; reconcile from the broker"))
+        else:
+            out.append(Check("positions_snapshot", "Broker positions snapshot",
+                             snapshot["snapshot_ts"], "ok",
+                             "positions.json is at least as new as the newest execution"))
 
     svcs = probes.get("deployed_code")
     if svcs:
@@ -519,6 +534,9 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "adaptive_tune": _last_actions_run() if use_network else SKIPPED,
         "unprotected_positions": _unprotected_probe(root),
         "unrecorded_fills": _unrecorded_fills_probe(root),
+        "positions_snapshot": snapshot_freshness.status(
+            root / "research_store" / "rh" / "positions.json",
+            root / "research_store" / "journal.jsonl"),
         # Is each long-running service running the code on disk? Scheduling
         # liveness (everything above) cannot see this: a stale process keeps
         # writing fresh artifacts, so every other check reads green while the
@@ -585,6 +603,16 @@ def _selftest() -> None:
     assert r["unrecorded_fills"].status == "ok", r["unrecorded_fills"]
     # absent probe -> nothing appended, never a fabricated pass
     assert "unrecorded_fills" not in {c.key for c in evaluate(now, {})}
+
+    # A recorded fill newer than ownership state is a distinct, loud failure.
+    stale_snap = {"stale": True, "snapshot_ts": now - day,
+                  "last_fill_ts": now}
+    c = {x.key: x for x in evaluate(now, {"positions_snapshot": stale_snap})}
+    assert c["positions_snapshot"].status == "stale_after_fill", c
+    fresh_snap = {"stale": False, "snapshot_ts": now,
+                  "last_fill_ts": now - day}
+    c = {x.key: x for x in evaluate(now, {"positions_snapshot": fresh_snap})}
+    assert c["positions_snapshot"].status == "ok", c
 
     # the probe must never judge TODAY -- a decision and its fill are minutes
     # apart, so a same-day check reports a gap that is about to close itself

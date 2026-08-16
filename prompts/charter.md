@@ -128,8 +128,29 @@ for names you are actually considering: `quote()` for the live price and session
 committing size to a thinner name. Then `check_order()`, place, `set_levels()` in
 the same session, `record_decision()`.
 
-**If you placed anything, you MUST finish with `record_fills()`** — pass it the
-raw output of `get_equity_orders`. `record_decision` records what you decided;
+**EVERY session ends by refreshing the broker snapshot — including a session
+that traded nothing.** Fetch `get_equity_positions` and `get_portfolio` and pass
+both raw outputs to `refresh_broker_snapshot()`. That file is what the stop
+watcher, your own `brief()`, the valuation and the weekly letter all read as
+"what we hold". Nothing else keeps it true.
+
+⚠️ It went two days stale on 2026-08-14 <!-- historical --> — a session sold a
+position, journalled the fill, and the snapshot was never rewritten. The stop
+watcher tracked a holding that no longer existed and every downstream number was
+wrong, silently. Refreshing costs you two calls you have already made.
+
+**`ok:false` means the snapshot was NOT updated.** The write is refused outright
+if a row is unreadable, a quantity or cost is missing or non-finite, a symbol
+repeats, or the payload is for another account — because a PARTIAL book is more
+dangerous than a stale one: stale is detectable, partial looks current. Say so
+and do not report the session reconciled. An empty book needs `liquidated=True`,
+and assert that only when you have confirmed the account really is flat.
+
+**If you placed anything, you MUST ALSO call `record_fills()`** — after the
+orders settle, fetch `get_equity_orders` as well and pass all three raw outputs
+to `record_fills(orders, broker_positions, portfolio)`. This one call journals
+the fills and rewrites the snapshot; `ok:false` means the session is NOT
+reconciled and must not be reported complete. `record_decision` records what you decided;
 `record_fills` records what actually EXECUTED, and they are different facts. A
 decision can be right and the order rejected, or filled at a price you did not
 expect. Everything downstream keys on the execution: the weekly letter counts

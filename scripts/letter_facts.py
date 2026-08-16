@@ -140,22 +140,41 @@ def main() -> None:
                if p.get("qty") and p.get("avg_cost"))
     unrealized = round(valued["invested"] / cost - 1.0, 4) if cost > 0 else None
 
-    # --- the book, valued, in rank order ---
+    # --- actual broker positions, enriched with a thesis where one exists ---
+    # The target book is a proposal, not account state.  Since the procedural
+    # executor was retired it may diverge from the broker, so ownership must
+    # come exclusively from marks.load()'s broker-backed position snapshot.
     prod = read_current()
-    book = []
+    theses = {t.symbol: t for t in prod.theses} if prod else {}
+    positions = []
+    for symbol, p in valued["positions"].items():
+        t = theses.get(symbol)
+        positions.append({
+            "symbol": symbol,
+            "rank": t.rank if t else None,
+            "sleeve": t.rank >= 100 if t else None,
+            "thesis": t.thesis if t else None,
+            "weight": round(t.target_weight, 4) if t else None,
+            "stop": round(t.stop, 2) if t and t.stop else None,
+            "targets": [round(x, 2) for x in (t.targets or [])] if t else [],
+            "score": t.signals.get("score") if t else None,
+            "value": p.get("value"),
+            "pnl": p.get("pnl"),
+            "review_by": t.review_by if t else None,
+        })
+
+    # Keep unowned targets available as proposals, but never mix them into the
+    # holdings list the letter renders as the portfolio.
+    held_symbols = set(valued["positions"])
+    proposed_positions = []
     if prod:
         for t in sorted(prod.theses, key=lambda x: x.rank):
-            if t.target_weight <= 0:
-                continue
-            p = valued["positions"].get(t.symbol) or {}
-            book.append({"symbol": t.symbol, "rank": t.rank,
-                         "sleeve": t.rank >= 100, "thesis": t.thesis,
-                         "weight": round(t.target_weight, 4),
-                         "stop": round(t.stop, 2) if t.stop else None,
-                         "targets": [round(x, 2) for x in (t.targets or [])],
-                         "score": t.signals.get("score"),
-                         "value": p.get("value"), "pnl": p.get("pnl"),
-                         "review_by": t.review_by})
+            if t.target_weight > 0 and t.symbol not in held_symbols:
+                proposed_positions.append({
+                    "symbol": t.symbol, "rank": t.rank,
+                    "target_weight": round(t.target_weight, 4),
+                    "thesis": t.thesis,
+                })
 
     # --- this week's journal events ---
     events = [e for e in _jsonl(RS / "journal.jsonl") if _in_window(e, since)]
@@ -237,7 +256,8 @@ def main() -> None:
                             for f in flows_week],
         "unrealized_pnl_on_cost": unrealized,
         "regime": (prod.regime if prod and prod.regime else {"status": "unknown"}),
-        "book": book,
+        "positions": positions,
+        "proposed_positions": proposed_positions,
         "fills_this_week": fills,
         "exit_signals_this_week": exits,
         # Narrate FROM these, never invent a motive for a trade. If a fill has
@@ -255,7 +275,7 @@ def main() -> None:
     out.write_text(json.dumps(facts, indent=2) + "\n")
     flow_note = f", net_flows={net_flows:+.2f}" if net_flows else ""
     print(f"facts -> {out}  (issue {facts['issue_number']}, "
-          f"{len(fills)} fills, {len(book)} positions, "
+          f"{len(fills)} fills, {len(positions)} positions, "
           f"week_pnl={'n/a' if week_pnl is None else f'{week_pnl:+.2%}'}"
           f"{flow_note})")
 
