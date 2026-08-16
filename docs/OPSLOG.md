@@ -9,6 +9,80 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-16 — the account snapshot went stale and nothing could repair it
+
+**Found by a rehearsal, not by a check.** A mock run of the newsletter agent read
+`positions[]` and said, unprompted, that the session decisions recorded no AMAT
+at the broker while the snapshot listed it. It was right and I was wrong: I had
+spent the afternoon verifying "13 positions, all protected" against a file that
+was two days old.
+
+`research_store/rh/positions.json` was written 08-14 10:02 ET. The journal:
+
+```
+08-14 14:02Z  BUY  AMAT filled   (the 10:00 procedural loop, deleted that day)
+08-14 14:41Z  SELL AMAT filled   (the 10:35 session exited it, 39 min later)
+```
+
+Nothing rewrote it after the sell. Robinhood held **12** positions; the file said
+**13**. For two days the stop watcher tracked a phantom, `brief()` showed the
+agent a book it did not own, the valuation was wrong, and tonight's investor
+letter would have reported a position that had been sold.
+
+**Root cause: deleting the fast loop removed the only writer.** `record_fills()`
+journalled executions and nothing else. `prompts/exit.md` required reconciliation
+only for monitor-triggered exits. A session-initiated sell left no trace in the
+snapshot — a consequence of the 08-14 retirement that nobody noticed at the time.
+
+**And it could not be repaired.** The snapshot write was gated behind
+`if filled_orders:`, so correcting the file required a trade. Handing it the true
+broker state with no fills returned `{"ok":true,"snapshot":null}` and did nothing.
+
+**⛔ THE PUBLISHER COERCED WHERE ITS DOCSTRING SAID "VALIDATE".** Enumerated by
+the independent reviewer, case by case: an EMPTY list wrote `positions: {}` and
+returned ok — erasing every holding; a TRUNCATED list (three of twelve) published
+the three and deleted the other nine; malformed rows were silently skipped; a
+missing average cost became 0.0; NaN and Infinity passed into the file. All
+returned success. The word was in the docstring and the behaviour was not, which
+is the defect class this repo keeps paying for.
+
+**Fixed:**
+
+- `refresh_broker_snapshot()` — the no-fill repair path that did not exist.
+- The publisher REJECTS rather than coerces; the previous file survives
+  byte-identical on every refusal. A partial book is more dangerous than a stale
+  one — stale is detectable and WAS detected; partial looks current, carries a
+  fresh timestamp, and silently unprotects whatever it dropped.
+- **Completeness is now proven, not inferred.** A truncated page is well-formed,
+  so no amount of row validation catches it. The publisher requires a
+  cursor-linked pagination transcript and verifies the chain itself. A caller can
+  assert `exhausted:true` and still be refused when the transcript contradicts it.
+  The empty-book case was already guarded on exactly this reasoning ("the read
+  came back empty" and "the account is flat" are the same bytes); it had been
+  applied to 0-of-n and nothing else.
+- Charter: EVERY session refreshes, trading or not.
+- Staleness surfaces in health as `positions_snapshot`.
+
+Reconciled live from the broker: 12 positions, AMAT gone, all consumers agree.
+
+**⚠️ I CORRUPTED THE LIVE SNAPSHOT WHILE TESTING THE FIX.** My adversarial run
+included a VALID transcript as a control and I pointed it at the real file rather
+than a tempdir, so two fake positions overwrote the real twelve for ~3 minutes.
+Sunday, market closed, no harm — on a weekday ten positions would have lost stop
+coverage. The system behaved exactly as designed; I aimed it at production. The
+reviewer's own selftests redirect `RH_POSITIONS` to a tempdir for this reason.
+
+**And I then wrote the snapshot without an `account_number`**, because the payload
+I hand-assembled omitted it — which left the new account-identity guard inert,
+since it compares against the value in the snapshot. Restored and verified by
+attempting to publish a foreign account (refused).
+
+**The pattern, again:** every failure here was silent. The snapshot did not error,
+it just stopped moving. Nothing in the test suite could have caught it — a
+liveness gap is not a unit-test failure. What found it was a rehearsal of the
+real thing and a second model reading the code.
+
+
 ## 2026-08-14 — the loop moved before the session and reversed it; it is gone
 
 **The failure, in three days of the journal.** 08-12: a session exited AMAT to

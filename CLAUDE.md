@@ -257,9 +257,33 @@ src/notify.py           THE ntfy phone-push helper (push(); never raises; no
                         skipped summaries). deploy/alert.sh mirrors it in shell.
 src/marks.py            Position valuation — the ONE place snapshot positions
                         become dollars (qty × freshest mark: monitor quote >
-                        snapshot last > cost). Dashboard, log_equity, and the
-                        fast-loop diff all read through it. Snapshot schema
-                        documented here.
+                        snapshot last > cost). Dashboard, log_equity and the
+                        sessions all read through it. Snapshot schema here.
+research_store/rh/positions.json
+                        ⛔ THE ACCOUNT SNAPSHOT — what the stop watcher, brief(),
+                        the valuation and the weekly letter all read as "what we
+                        hold". It is NOT authoritative; Robinhood is. This file
+                        is a cache, and it went 2 days stale on 2026-08-14 while
+                        the monitor stop-watched a position that had been sold.
+                        WRITTEN ONLY by agent_env.refresh_broker_snapshot() (every
+                        session, trading or not) and record_fills() (after a
+                        trade). The deleted fast loop used to write it; when it
+                        went, nothing took over.
+                        ⛔ THE PUBLISHER REFUSES rather than coerces. Any
+                        unreadable row, missing/negative/non-finite qty or cost,
+                        duplicate symbol, or wrong account REJECTS THE WHOLE
+                        WRITE and leaves the previous file byte-identical. An
+                        EMPTY book needs liquidated=True; a partial read needs a
+                        cursor-linked pagination transcript proving exhaustion.
+                        Completeness is EVIDENCE THE CALLER SUPPLIES, never
+                        inferred — a truncated page is well-formed, and
+                        publishing one silently unprotects everything it omits.
+                        `account_number` must be present: _expected_account()
+                        compares against it, so a snapshot written without one
+                        leaves the identity guard inert.
+                        Staleness is reported by src/snapshot_freshness.py and
+                        surfaces in health as `positions_snapshot`. See OPSLOG
+                        2026-08-16.
 dashboard/app.py        Flask monitor (127.0.0.1:8787), renders live from the
                         Research Store; password-gated (DASH_USER/DASH_PASS in
                         .env, fail-closed). Live at dash.ethobs.uk via cloudflared
