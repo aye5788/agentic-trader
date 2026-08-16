@@ -103,8 +103,9 @@ REMEDY = {
     "ledger_backup": "Check the box still has push access to agentic-trader-ledger",
     "adaptive_tune": "Check GitHub Actions — the weekly tuner has not run",
     "slow_loop":     "Check logs/slow.log",
-    "fast_loop":     "Check logs/fast.log",
-    "risk_review":   "Check logs/risk_review.log",
+    # "fast_loop" and "risk_review" removed 2026-08-14: both jobs are deleted,
+    # so their health.SPECS keys are gone and a remedy for them could never
+    # fire. A remedy map outliving its check is how a stale runbook survives.
     "monitor":       "systemctl status agentic-monitor",
     "newsletter":    "Check logs/newsletter.log",
 }
@@ -515,10 +516,10 @@ def _selftest() -> None:
 
     # "blocked" (ran but did not finish) alerts, and gets its own remedy: the
     # generic "check its log" does not tell you to look for an approval prompt.
-    blocked = C("fast_loop", "Fast loop (execution)", None, "blocked",
+    blocked = C("slow_loop", "Slow loop (rebalance)", None, "blocked",
                 "RAN 9h ago but did not finish — output 2.4d old")
     to_alert, _ = diff([blocked], {})
-    assert [c.key for c in to_alert] == ["fast_loop"], to_alert
+    assert [c.key for c in to_alert] == ["slow_loop"], to_alert
     title, body = compose([blocked])
     assert "did not finish" in body, body
     assert "allowlist" in body, "blocked must point at the permission cause"

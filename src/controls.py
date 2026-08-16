@@ -80,7 +80,9 @@ class Binding:
 # the ONLY thing computing `risk_review facts flags`, so:
 #
 #   earnings_soon, near_stop, giveback, vol_expansion, ma_break
-#       -> their producer, `risk_review.py --facts`, is no longer scheduled.
+#       -> ⛔ their producer, `risk_review.py --facts`, was DELETED 2026-08-14
+#          (not merely unscheduled). If these are ever wanted again they must be
+#          REBUILT, not re-enabled — there is no script left to put back on cron.
 #   risk_review_order
 #       -> obsolete outright; there is no risk-review agent to place an order.
 #
@@ -119,7 +121,7 @@ REGISTRY = {
     # for its whole life. A control nobody measures is a control that is dead
     # without anybody noticing — which is the entire point of this file.
     "rule_out_block": Control("rule_out_block", "Rule-out blocked a rebuy", 60,
-                              "fast_loop order_plan blocked (reason=ruled out)"),
+                              "order gate deny (reason=RULED THIS OUT)"),
 }
 
 
