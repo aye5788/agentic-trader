@@ -140,10 +140,11 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
     # that was already protected. Found by the independent audit, 2026-08-16.
     watched = (target_weight is not None and target_weight > 0) or verdict == "hold"
     if not watched:
-        note = ("this thesis is neither weighted nor a held-protective one "
-                "(verdict='hold'), so the monitor's book filter excludes the "
-                "symbol from the watch-list entirely and overrides for it are "
-                "never evaluated")
+        note = ("target_weight is not positive and this is not a held-protective "
+                "thesis (verdict='hold'), so the monitor's book filter "
+                "(target_weight > 0 or verdict == 'hold') excludes this symbol "
+                "from the watch-list entirely and overrides for it are never "
+                "evaluated")
         return {
             "stop": {"enforced": False, "note": note},
             "target": {"enforced": False, "note": note} if target is not None else

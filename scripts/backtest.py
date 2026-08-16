@@ -90,7 +90,7 @@ def simulate(panel, names, etfs, spy, *, lookback=mom.LOOKBACK,
         if not regime:
             new_book = [t for t in new_book if t in held_book]
 
-        if use_sleeve:
+        if use_sleeve and sleeve_hold > 0:
             etf_scored = mom.compute(etf_panel, t0, lookback)
             new_etf = mom.select(etf_scored, held_etf, sleeve_hold, sleeve_hold)
         else:

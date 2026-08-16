@@ -87,7 +87,7 @@ def run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cap_
     book_w, sleeve_w = P["book_weight"], P["sleeve_weight"]
     book_hold, book_band, sleeve_hold = P["book_hold"], P["book_band"], P["sleeve_hold"]
     per_slot_book = book_w / book_hold
-    per_slot_etf = sleeve_w / sleeve_hold
+    per_slot_etf = (sleeve_w / sleeve_hold) if sleeve_hold else 0.0
 
     held_book, held_etf = set(), set()
     equity = 1.0
@@ -102,8 +102,11 @@ def run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cap_
         new_book = mom.select(book_scored, held_book, book_hold, book_band)
         if not regime:
             new_book = [t for t in new_book if t in held_book]
-        etf_scored = mom.compute(etf_panel, t0)
-        new_etf = mom.select(etf_scored, held_etf, sleeve_hold, sleeve_hold)
+        if sleeve_hold > 0:
+            etf_scored = mom.compute(etf_panel, t0)
+            new_etf = mom.select(etf_scored, held_etf, sleeve_hold, sleeve_hold)
+        else:
+            new_etf = []
 
         turnover.append(len(set(new_book) ^ held_book) + len(set(new_etf) ^ held_etf))
         held_book, held_etf = set(new_book), set(new_etf)

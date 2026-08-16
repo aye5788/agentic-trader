@@ -14,7 +14,7 @@ from .models import Thesis, VERDICTS
 DEFAULT_MANDATE = {
     "max_weight_per_name": 0.10,   # IBD "full position" = 10% of the sleeve
     "max_total_weight": 1.0,       # fully-invested ceiling (sum of weights)
-    "max_holdings": 14,            # concentration guard = book_hold(10) + sleeve_hold(4)
+    "max_holdings": 14,            # concentration guard = equity-only book_hold(14)
 }
 
 
