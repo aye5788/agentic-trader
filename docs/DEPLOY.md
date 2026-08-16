@@ -6,7 +6,7 @@ the ordered runbook. Two things run on the box, on different clocks:
 | Loop | What runs | Needs Claude? | Cadence |
 | ---- | --------- | ------------- | ------- |
 | **Slow** | `deploy/run_slow_loop.sh` — fetch prices, rank, write the target book | **No** (pure Python) | weekly rebalance + nightly exits |
-| **Fast** | `deploy/run_fast_loop.sh` — read book, fetch live account, place approved plan | **Yes** (RH is MCP-only) | weekday, after open |
+| **Sessions** | `deploy/run_session.sh` — the agent reads the book, decides, and places its own orders through the gate | **Yes** (RH is MCP-only) | weekdays 10:35 + 15:15 |
 
 Claude only runs to *execute*. All ranking is free Python.
 
@@ -72,7 +72,7 @@ systemctl status opend                     # must be up on 127.0.0.1:11111
 
 ```bash
 deploy/run_slow_loop.sh          # writes the target book — inspect research_store/current.json
-.venv/bin/python scripts/fast_loop.py   # prints the plan; live_approved=false → places nothing
+.venv/bin/python scripts/slow_loop.py --dry   # prints the ranked proposal; writes nothing
 ```
 
 **Scheduling — ⚠️ do NOT run `crontab deploy/crontab.template` on the live box.**
@@ -116,7 +116,7 @@ Stop everything: `touch research_store/HALT`.
 
 ## Going live — the deliberate switch
 
-The fast loop **cannot place an order** until you flip the master switch. Nothing
+A session **cannot place an order** until you flip the master switch. Nothing
 before this touches money:
 
 1. `config/strategy.toml` → `[proof] live_approved = true`.
@@ -244,7 +244,7 @@ Full plain-language walkthrough of what an issue/PR from this loop looks like:
 systemctl status agentic-monitor agentic-dashboard cloudflared   # all: active (running)
 crontab -l                                    # 10 agentic-trader lines (+3 box-only, see below)
 # slow (Sun 20:00, M-F 18:00) · signal panel (Sun 20:15) · fast (M-F 10:00)
-# risk review (M-F 12:00 + 15:45) · letter (Sun 21:00) · upkeep check (daily 8:00)
+# sessions (M-F 10:35 + 15:15, systemd) · letter (Sun 21:00) · upkeep check (daily 8:00)
 # ledger backup (daily 22:30) · universe refresh (quarterly, 1st Sun 19:00)
 # box-only, NOT this project: moomoo-vol-desk 9:30/9:35, data-collector 16:30
 timedatectl                                   # MUST be America/New_York or cron fires at wrong times
@@ -277,7 +277,7 @@ journalctl -u agentic-monitor -n 50           # monitor: silent unless a stop/ta
   redirects (broke heredocs, printf, and nano YAML). Prefer short single-line
   commands or type into an editor; fix stray YAML indent with `sed '2,$ s/^  //'`.
 
-**Kill switch:** `touch research_store/HALT` — fast loop and monitor place
+**Kill switch:** `touch research_store/HALT` — sessions and monitor place
 nothing; `rm` resumes. The monitor keeps watching and alerting, but ⚠️ **your
 stops no longer fire — sell by hand while this is on.**
 **Pause new buys only (stops stay armed):** `touch research_store/HALT_ENTRIES`.
@@ -294,7 +294,7 @@ stops no longer fire — sell by hand while this is on.**
   human credential chore in the system**.
 
 Done since this list was written (2026-07-09): fill reconciliation + realized
-P&L journaling (fast_loop/exit prompts reconcile positions and snapshot
+P&L journaling (the session/exit prompts reconcile positions and snapshot
 `get_realized_pnl` after sells); failure alerting (deploy/alert.sh ERR-traps
 every cron wrapper to ntfy; the monitor pushes stop/target triggers, execution
 results, and re-entry judgments to the same topic).
@@ -302,8 +302,8 @@ results, and re-entry judgments to the same topic).
 Added 2026-07-10 — **trade notifications**: `scripts/record_fills.py` now pushes
 a phone summary (ntfy) of every journaled execution — placed fills AND skipped
 orders — so rebalance trades are no longer silent (before this, only cron
-failures and monitor stop/target breaches pushed; a routine fast-loop rotation
-produced no alert at all). Skips are journaled first-class: the fast loop
+failures and monitor stop/target breaches pushed; a routine rotation
+produced no alert at all). Skips are journaled first-class: a session
 records review-rejected orders in `fills.json` with `status:"skipped"` +
 `reason` — notably `pending_settlement`, the expected one-day deferral when a
 buy follows a sell in this cash account (T+1; the leg re-plans next run). The

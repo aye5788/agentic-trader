@@ -78,16 +78,26 @@ Do **not** run deep research at trade time. Split into two cadences that hand of
 through a persisted **Research Store**:
 
 ```
-  SLOW LOOP (nightly / weekly)              FAST LOOP (at trade time)
-  - fan-out research (per lens)             - read stored theses + guardrails
-  - adversarial bull/bear verify            - pull live quotes
-  - synthesize ranked conviction list  -->  - diff target vs current portfolio
-    + theses + target weights               - size to $ notional
-        stored in Research Store            - review -> place -> journal fills
+  SLOW LOOP (nightly / weekly)              SESSION (at trade time)
+  - rank the universe on the signal         - read the proposal + the book
+  - compute the regime, record it           - pull live quotes, terrain, news
+  - default stop/target geometry       -->  - DECIDE what to hold and why
+    written to the Research Store           - place -> set levels -> journal
 ```
 
-- **Slow loop** does the expensive thinking and writes a *research product*.
-- **Fast loop** is cheap and deterministic; it only acts on that product.
+- **Slow loop** does the deterministic ranking and writes a *proposal*.
+- **The session decides.** It reads that proposal and is not bound by it.
+
+⚠️ **CHANGED 2026-08-14.** The right-hand column used to be a FAST LOOP: a
+procedural runner that read the stored targets, diffed them against holdings and
+placed the difference. It has been deleted. It ran at 10:00 and the open session
+reasoned at 10:35, so the deterministic component moved first every day and the
+judgment layer spent its run undoing it — it re-opened AMAT twice after a session
+had deliberately exited, the second time into a post-earnings gap. See OPSLOG
+2026-08-14.
+
+The slow loop's output is therefore an INPUT to judgment, not an order. Nothing
+executes it unsupervised.
 
 ### Research Store design
 
@@ -198,7 +208,7 @@ rule becomes a hard field on the thesis record and/or a governance guardrail:
 
 | Rule | Setting | Where enforced |
 | ---- | ------- | -------------- |
-| Entry zone | defined buy-price range; never chase **above** it — cheaper never blocks | `entry_zone` + `[trade_management] no_chase`/`chase_tol_sigma`; enforced by `fast_loop.apply_chase_guard` (asymmetric, vol-scaled, fails open). ⚠️ Was documented here as enforced from the start but wired NOWHERE until 2026-07-28 — see OPSLOG |
+| Entry zone | defined buy-price range; never chase **above** it — cheaper never blocks | `entry_zone` + `[trade_management] no_chase`/`chase_tol_sigma`. ⚠️ **NOT ENFORCED ANYWHERE since 2026-08-14** — `fast_loop.apply_chase_guard` was its only implementation and went with the executor. The keys remain as the documented default for a judgement the SESSION makes; `brief()` and `terrain()` carry the entry zone. This clause was documented as enforced from the start and wired NOWHERE until 2026-07-28, so state the current answer plainly: it is guidance, not a gate |
 | Stop loss | defined + enforced, **volatility-adjusted** (below recent swing low / ATR mult) — *not* IBD's flat 2–3% (too tight for volatile momentum names) | `stop`; governance auto-exits on breach |
 | Profit targets | tiered at **multiples of risk** (~2.2R / 4R), vol-scaled so reward:risk ≥ 2:1 holds for any name — *not* a fixed 5/10% (unreachable at 2:1 for a high-vol mover) | `targets: [t1, t2]` |
 | Moving-average exit | exit if close < short-term MA (e.g. 21-day), even if stop not hit | daily fast-loop check (Schwab price history) |
@@ -255,7 +265,7 @@ outcome-tracking applies to it ("on risk-off nights, did trades do worse?").
 ## Layer 6 — Orchestration
 
 Cadence engine: scheduled cloud cron / loop / event triggers (earnings, price
-moves). Fires the slow and fast loops on their own clocks.
+moves). Fires the slow loop and the agent sessions on their own clocks.
 
 ## Deployment (VPS)
 
@@ -383,23 +393,33 @@ on a timer, with nobody watching**. Three things make that work:
 - [x] **Slow loop** (`scripts/slow_loop.py`) — deterministic: momentum signal →
       top-10 book + top-4 sleeve → IBD geometry (vol-scaled, R:R≥2) → validated
       write to the Research Store. Writes a full 14-name book, verified round-trip.
-- [x] **Fast loop** (`scripts/fast_loop.py`) — deterministic diff (targets vs.
-      holdings → dollar-notional buy/sell plan, tested); enforces the one-Agentic-
-      account guardrail. Verified live read-only against RH (a one-off 2026-07
-      bring-up check: whatever cash was present → a full 14-order plan; the
-      figures were a point-in-time observation, not a standing account size).
-      **Placement (review→place) held at the proof gate** — needs
-      explicit human approval before any live order.
-- [ ] Wire the RH read (get_equity_positions/get_portfolio → snapshot) + the
-      review→place placement step into the deployed agent's fast-loop run
+- [x] ~~**Fast loop** (`scripts/fast_loop.py`)~~ — **DELETED 2026-08-14.** The
+      deterministic diff (targets vs. holdings → buy/sell plan) worked exactly as
+      specified, and that was the problem: it placed at 10:00 while the open
+      session reasoned at 10:35, so it moved first every day and the session spent
+      its run reversing it. Execution is the SESSIONS now, with judgment, through
+      the unbypassable order gate. The guards that lived inside it — `no_chase`,
+      the `[reentry]` knife-guard, the order-time cooldown and the AUTOMATIC
+      DRAWDOWN HALT (it was the halt's only caller) — went with it; the cooldown
+      and the drawdown halt were restored at the order gate, the other two are now
+      the session's judgement. See OPSLOG 2026-08-14.
+- [x] Wire the RH read (get_equity_positions/get_portfolio → snapshot) + the
+      review→place placement step — done, but into the SESSIONS rather than a
+      fast-loop run; that runner no longer exists.
 - [x] **Governance guardrails** (`src/governance.py`) — kill-switch file,
       drawdown halt (peak-tracked), per-order cap, universe whitelist, and the
-      `[proof] live_approved` master switch. Wired into the fast loop; the
-      mechanical regime floor lives in `momentum.regime_on` + the slow loop.
+      `[proof] live_approved` master switch. Enforced at the PreToolUse order
+      gate (scripts/hooks/pretooluse_order_gate.py), which every session order
+      passes through — it was wired into the fast loop until that was deleted
+      2026-08-14, and the drawdown halt had to be re-plumbed as a write-free
+      `drawdown_breach()` because the hook must not ratchet state. The regime is
+      computed by `momentum.regime_on` + the slow loop and is REPORTED, not
+      enforced.
 - [x] **Orchestration + deploy artifacts** — `deploy/` (run_slow_loop.sh,
-      run_fast_loop.sh with the ANTHROPIC_API_KEY footgun guard, crontab.template),
-      `prompts/fast_loop.md` (the headless-Claude execution procedure), and
-      `docs/DEPLOY.md` (the ordered droplet runbook).
+      run_session.sh with the ANTHROPIC_API_KEY footgun guard, the
+      agentic-session@ systemd timers, crontab.template), `prompts/charter.md`
+      (what the session is handed instead of a procedure), and `docs/DEPLOY.md`
+      (the ordered droplet runbook).
 - [x] **Intraday exit monitor** (`scripts/market_monitor.py`) — the always-on
       stop-loss / take-profit watcher the daily loops couldn't be. Polls live
       Schwab quotes for held names every ~15s during RTH, checks vs. each name's

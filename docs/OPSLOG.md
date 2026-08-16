@@ -60,6 +60,43 @@ and its own assertion contained the string it searched for, so deleting the real
 field still passed. *"It proves syntax spellings, not behavior."* Replaced with a
 behavioural test that runs the selection both ways and requires equality.
 
+**Later the same day, the rest of it:**
+
+6. **The order-time cooldown was restored** (`1d7bb24`). market_monitor writes a
+   cooldown when a stop fires; TWO readers honoured it and one of them was
+   fast_loop.py, so deleting that left only the slow loop's next-rebuild half. A
+   session could rebuy a name the monitor stopped minutes earlier.
+   `governance.cooldown_until()` is read-only and fails OPEN on a torn file.
+7. **The regime guard was made structural** (`1d7bb24`). It now walks `main()`'s
+   parse tree: `regime` may only be assigned, recorded and printed. **The guard
+   was then PROVEN to fail** — the regression the reviewer described was injected
+   deliberately and the selftest caught it. A guard nobody has watched fail is a
+   guard nobody has tested, which is how the previous one shipped vacuous.
+8. **The protective theses were not actually watched** (`9eab32a`). Item 5 above
+   gave held-but-unselected names geometry at `target_weight 0.0` — and the
+   monitor's watch set was `target_weight > 0 and t.stop`, so every one of them
+   was excluded by the very field chosen to mean "not prescribing this". The
+   geometry existed and the protection did not. Four call sites plus
+   `agent_env/state.py` all agreed with each other; they were consistently wrong.
+   One `in_book()` predicate now distinguishes verdict `hold` (HELD, watch it)
+   from `avoid` (R:R-dropped, do not). Live effect: AMAT and XLV were carrying
+   unenforced stops.
+9. **The orphans were deleted** (`2c84da4`, `602e5d7`): risk_review.py, its
+   prompt and runner; `get_targets()` (the last API handing out weights as an
+   allocation to fill); dead remedy entries in health_check keyed to SPECS keys
+   that no longer exist; and the `rule_out_block` control registered that morning
+   with evidence pointing at `fast_loop order_plan` — **the control that exists
+   to catch guards pointing at nothing was itself pointing at nothing.**
+   `docs/OPERATOR_MANUAL.md` had been telling the operator the risk-review
+   overlay was "**armed**, places real trades" for three days after it stopped
+   existing.
+
+⚠️ **`risk_review.py --facts` was the ONLY producer** of the earnings_soon /
+near_stop / giveback / vol_expansion / ma_break flags in `src/controls.py`.
+Nothing consumes them (controls.py has never been wired live), which is why
+deleting it was safe — but if it is ever wired those five must be REBUILT, not
+re-enabled. There is no script left to put back on cron.
+
 **The lesson that generalises: unit selftests of pure functions do not catch this
 class.** Every defect above was a control that read as present and did nothing,
 or a component that should not exist. The checks that worked were the ones
