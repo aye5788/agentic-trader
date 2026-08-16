@@ -48,7 +48,6 @@ def main() -> None:
 
     p = rs.read_current()
     print(f"read_current(): {len(p.theses)} theses, regime={p.regime['status']}")
-    print(f"get_targets(): {rs.get_targets()}")
     print(f"top(2): {[t.symbol for t in rs.top(2)]}")
     print(f"is_stale(24h): {rs.is_stale(24, as_of)}   "
           f"is_stale(0h, +1h): {rs.is_stale(0, (now + timedelta(hours=1)).isoformat())}")

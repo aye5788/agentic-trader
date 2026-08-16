@@ -13,15 +13,20 @@ itself on cron; this is the short list of things that need *you*. Keep this hand
 
 Two kinds of thing trade this book now. They are different and it matters.
 
-**The legacy loops — a script the agent follows.** Unchanged, running for months:
+**⛔ THE LEGACY LOOPS ARE GONE.** Both are deleted, not merely unscheduled —
+`run_risk_review.sh` (retired 2026-08-13, folded into the sessions) and
+`run_fast_loop.sh` (deleted 2026-08-14, because it placed the stored book at
+10:00, 35 minutes before the open session reasoned, and the session spent its
+run undoing it). Nothing places an order now except a session, with judgment,
+through the order gate.
 
 | Time (ET) | What |
 | --- | --- |
-| 10:00 | `run_fast_loop.sh` — buys/sells the difference between the stored book and what you hold |
-| 12:00, 15:45 | `run_risk_review.sh` — intraday de-risk overlay, **armed**, places real trades |
+| 10:35 | `agentic-session@open` — the agent decides and trades |
+| 15:15 | `agentic-session@close` — the agent reviews and trades |
 | 16:15 | equity logged for the dashboard curve |
-| 18:00 (Sun 20:00) | `run_slow_loop.sh` — rebuilds the target book |
-| always | `agentic-monitor.service` — watches stops/targets every 15s during RTH |
+| 18:00 (Sun 20:00) | `run_slow_loop.sh` — ranks candidates, records the regime, supplies default stop/target geometry. **It does not decide the book and nothing executes its output.** |
+| always | `agentic-monitor.service` — watches stops/targets every 15s during RTH. **This IS the stop.** |
 
 **The agent sessions — the agent DECIDES.** New, live since 2026-08-12:
 
@@ -39,11 +44,12 @@ and the guardrails; the agent plays.
 else: kill switch, per-order size cap, universe whitelist, `live_approved`. The
 gate runs in the harness, so the agent cannot skip it by forgetting.
 
-**Why those odd times.** Not preference — collision avoidance. 10:35 is after
-the 10:00 loop finishes (~10:04) so two Claude processes are never writing at
-once. 15:15 is *before* risk_review at 15:45 because both write the same
-overrides file with no lock, and a session write was measured erasing a
-risk_review protective stop.
+**Why those times.** They were collision avoidance with jobs that no longer
+exist: 10:35 cleared the 10:00 fast loop (~10:04), and 15:15 landed before
+risk_review at 15:45 because both wrote `monitor/overrides.json` with no lock,
+which was measured erasing a protective stop. Both jobs are now deleted, so
+neither constraint binds — the times are unchanged simply because nothing has
+required moving them. 10:35 still has the merit of letting the open settle.
 
 **There is deliberately no premarket session.** Nothing in this system stops an
 order being placed into a closed market, so a 09:00 session could queue a market

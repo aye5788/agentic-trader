@@ -1,9 +1,10 @@
 # Tool surface for the NEW session runner only. Sourced, not executed.
 #
-# ⚠️ NOT FOR THE LEGACY LOOPS. prompts/fast_loop.md, risk_review.md and
-# newsletter.md all drive `python3 scripts/*.py` through Bash. Sourcing this in
-# those runners removes the tool they depend on and they fail in the direction
-# that looks like a quiet day. The new session needs no shell: everything it
+# ⚠️ NOT FOR THE PROMPT-DRIVEN RUNNERS. newsletter.md drives
+# `python3 scripts/*.py` through Bash. Sourcing this in that runner removes the
+# tool it depends on and it fails in the direction that looks like a quiet day.
+# (fast_loop.md and risk_review.md were the other two; both deleted 2026-08-13/14
+# with their loops.) The session needs no shell: everything it
 # needs is an MCP tool.
 #
 # `--tools ""` disables EVERY built-in tool (`claude --help`: 'Use "" to disable
@@ -17,7 +18,7 @@
 #
 # No `set -euo pipefail` here. This file is SOURCED, not executed — a `set`
 # here changes the CALLING shell's options too, which is a side effect on a
-# process we don't own (and unlike run_fast_loop.sh etc., this has no `cd` of
+# process we don't own (and unlike the executed runners, this has no `cd` of
 # its own to make that trade-off for). The empty-discovery guard below is an
 # explicit `if`, so it does not depend on `-e` anyway — and `-e` would not
 # have covered the python failure mode either: with `mapfile -t X < <(cmd)`,

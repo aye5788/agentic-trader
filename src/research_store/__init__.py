@@ -9,7 +9,6 @@ as history grows past any single context window. Full rationale in docs/DESIGN.m
 Public API
   write_product(product, mandate)        validate → persist → archive → journal
   read_current()                         → ResearchProduct | None
-  get_targets(product=None)              → {symbol: weight}   (fast loop sizing)
   top(n) / by_symbol(symbol)             consumer queries
   is_stale(max_age_hours, now_iso)       guard the fast loop against stale research
   record_outcome(symbol, outcome, now)   close the calibration loop
@@ -35,7 +34,7 @@ from .validate import DEFAULT_MANDATE, reward_risk, validate_product
 __all__ = [
     "ResearchProduct", "Thesis", "TRADEABLE_VERDICTS", "VERDICTS",
     "DEFAULT_MANDATE", "reward_risk", "validate_product", "MandateViolation",
-    "write_product", "read_current", "get_targets", "top", "by_symbol",
+    "write_product", "read_current", "top", "by_symbol",
     "is_stale", "record_outcome", "record_rotation_outcome", "record_partial_outcome",
     "recent_journal", "store",
 ]
@@ -75,12 +74,12 @@ def read_current():
     return ResearchProduct.from_dict(d) if d else None
 
 
-def get_targets(product=None) -> dict:
-    """Fast-loop sizing input: {symbol: target_weight} for weighted positions only."""
-    p = product or read_current()
-    if not p:
-        return {}
-    return {t.symbol: t.target_weight for t in p.theses if t.target_weight > 0}
+# get_targets() removed 2026-08-14. It returned {symbol: target_weight} as the
+# fast loop's sizing input -- an ALLOCATION TO FILL. The fast loop was deleted
+# with the procedural executor, leaving one caller (a demo print), and the
+# product is now a ranked proposal a session reads and judges, not a book that
+# gets filled. Weights survive on each Thesis as a suggested size; nothing
+# hands them out as targets any more.
 
 
 def top(n: int = 5, product=None) -> list:

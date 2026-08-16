@@ -87,12 +87,14 @@ HOME=/root
 # read-modify-write monitor/overrides.json with no shared lock, and that
 # interleaving was measured DROPPING a protective stop. One writer fewer.
 #
-# scripts/risk_review.py and prompts/risk_review.md remain on disk, unwired.
-# `risk_review.py --facts` is pure Python (3s, no model) and is the only
-# producer of the earnings_soon / near_stop / giveback / vol_expansion /
-# ma_break flags — deliberately NOT kept on cron, because nothing consumes them
-# (src/controls.py, their only reader, is not wired to run live). If controls.py
-# is ever wired, add the facts job back DELIBERATELY rather than assuming.
+# scripts/risk_review.py, prompts/risk_review.md and deploy/run_risk_review.sh
+# were DELETED 2026-08-14 — they had sat unwired since the retirement and were
+# the last thing describing a job that no longer runs.
+# ⚠️ WHAT WENT WITH THEM: `risk_review.py --facts` was the only producer of the
+# earnings_soon / near_stop / giveback / vol_expansion / ma_break flags in
+# src/controls.py. Nothing consumed them (controls.py has never been wired to
+# run live), which is why it was safe to delete — but if controls.py is ever
+# wired, those five flags have NO producer and must be rebuilt, not re-enabled.
 
 # --- AGENT SESSIONS (the inversion) - the agent decides, LIVE 2026-08-12 ---
 # Supervision (lock, brief, process group, integrity tripwire, verdict) lives in
@@ -105,9 +107,10 @@ HOME=/root
 # health check, the slot silently does nothing.
 #
 # Times are constrained by MEASUREMENT, not preference:
-#  10:35 - run_fast_loop.sh starts 10:00 and finishes ~10:04 (logs/fast.log).
-#          Running inside that window puts two Claude processes in
-#          research_store at once.
+#  10:35 - originally because run_fast_loop.sh ran 10:00-~10:04 and two Claude
+#          processes in research_store at once took the droplet down. That loop
+#          was DELETED 2026-08-14, so the constraint is gone; the time is kept
+#          only because it lets the open settle before the agent reads prices.
 #  15:15 - the last decision point that matters: there is no extended-hours
 #          trading, so whatever is held at 16:00 goes through the overnight gap.
 #          (Until 2026-08-13 this also had to land before risk_review at 15:45,

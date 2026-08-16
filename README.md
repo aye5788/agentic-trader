@@ -50,8 +50,8 @@ This trips everyone, including agents:
 - Most code runs under the repo **`.venv` (Python 3.12)**.
 - The **moomoo SDK is installed only in system `/usr/bin/python3` (3.10)**.
 
-So anything importing `moomoo` — `fetch_prices.py`, `market_monitor.py`,
-`fast_loop.py`, `risk_review.py` — **must** run under `/usr/bin/python3`. Under
+So anything importing `moomoo` — `fetch_prices.py`, `market_monitor.py` —
+**must** run under `/usr/bin/python3`. Under
 `.venv` the import fails, and because some guards deliberately fail open, a run can
 proceed with a safety check silently skipped. That exact mistake cost real money on
 2026-07-23.
