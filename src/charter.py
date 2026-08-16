@@ -379,6 +379,15 @@ def _selftest() -> None:
                  "Do not report done when it is partly done"):
         assert must in out, f"anti-circumvention clause lost: {must}"
 
+    # Publishing one broker page as the whole book silently deletes holdings on
+    # later pages. The charter must demand evidence of cursor exhaustion, not a
+    # position-count guess or comparison with the previous snapshot.
+    for must in ("continue until a response has no `next`",
+                 "every later cursor must match the prior page's",
+                 "Completeness is evidence you supply",
+                 "pagination exhaustion is unproven"):
+        assert must in out, f"pagination-completeness instruction lost: {must}"
+
     # ⚠️ CLAIMS THAT WERE FALSE AND ARE NOW PINNED. Three independent audits found
     # the charter asserting safety properties the code does not provide -- the most
     # dangerous class of error here, because the agent cannot check and will rely.

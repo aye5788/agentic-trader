@@ -129,10 +129,24 @@ committing size to a thinner name. Then `check_order()`, place, `set_levels()` i
 the same session, `record_decision()`.
 
 **EVERY session ends by refreshing the broker snapshot — including a session
-that traded nothing.** Fetch `get_equity_positions` and `get_portfolio` and pass
-both raw outputs to `refresh_broker_snapshot()`. That file is what the stop
-watcher, your own `brief()`, the valuation and the weekly letter all read as
-"what we hold". Nothing else keeps it true.
+that traded nothing.** Fetch `get_equity_positions` starting without a cursor.
+If its response has a `next` URL, extract that URL's `cursor`, call the tool
+again with it, and continue until a response has no `next`. Fetch
+`get_portfolio` too. Pass the page transcript to `refresh_broker_snapshot()` as:
+
+`{"pages":[{"cursor":null,"response":FIRST_RAW_RESPONSE},{"cursor":"CURSOR_FROM_PRIOR_NEXT","response":NEXT_RAW_RESPONSE}],"exhausted":true}`
+
+Include every page (one entry is correct when the first response has no `next`).
+The first cursor must be null, every later cursor must match the prior page's
+`next` URL, and the last response must have no `next`. The publisher checks that
+chain. A bare response, a missing page, a mismatched cursor, or a transcript
+that stops while `next` remains is refused. This is deliberate: three returned
+positions and three total positions are identical bytes; only pagination
+exhaustion distinguishes them. Completeness is evidence you supply, never a
+count the publisher guesses from the previous book.
+
+That file is what the stop watcher, your own `brief()`, the valuation and the
+weekly letter all read as "what we hold". Nothing else keeps it true.
 
 ⚠️ It went two days stale on 2026-08-14 <!-- historical --> — a session sold a
 position, journalled the fill, and the snapshot was never rewritten. The stop
@@ -140,15 +154,17 @@ watcher tracked a holding that no longer existed and every downstream number was
 wrong, silently. Refreshing costs you two calls you have already made.
 
 **`ok:false` means the snapshot was NOT updated.** The write is refused outright
-if a row is unreadable, a quantity or cost is missing or non-finite, a symbol
-repeats, or the payload is for another account — because a PARTIAL book is more
-dangerous than a stale one: stale is detectable, partial looks current. Say so
-and do not report the session reconciled. An empty book needs `liquidated=True`,
-and assert that only when you have confirmed the account really is flat.
+if pagination exhaustion is unproven, a row is unreadable, a quantity or cost
+is missing or non-finite, a symbol repeats, or the payload is for another
+account — because a PARTIAL book is more dangerous than a stale one: stale is
+detectable, partial looks current. Say so and do not report the session
+reconciled. An empty book additionally needs `liquidated=True`, and assert that
+only when you have confirmed the account really is flat.
 
 **If you placed anything, you MUST ALSO call `record_fills()`** — after the
-orders settle, fetch `get_equity_orders` as well and pass all three raw outputs
-to `record_fills(orders, broker_positions, portfolio)`. This one call journals
+orders settle, fetch `get_equity_orders` as well and pass the complete positions
+page transcript described above plus the portfolio output to
+`record_fills(orders, broker_positions, portfolio)`. This one call journals
 the fills and rewrites the snapshot; `ok:false` means the session is NOT
 reconciled and must not be reported complete. `record_decision` records what you decided;
 `record_fills` records what actually EXECUTED, and they are different facts. A

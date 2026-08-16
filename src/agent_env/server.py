@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from urllib.parse import parse_qs, urlparse
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -440,9 +441,11 @@ def record_fills(orders: str, broker_positions: str = "", portfolio: str = "") -
         script you have no shell to run. The letter would have reported a week
         in which you did nothing.
 
-    Also requires the post-trade outputs of get_equity_positions and
-    get_portfolio.  The same call atomically rewrites positions.json, so an
-    execution cannot be recorded as complete while account state stays old.
+    Also requires a completeness-proven transcript of the post-trade
+    get_equity_positions pages and the raw get_portfolio output. The same call
+    atomically rewrites positions.json, so an execution cannot be recorded as
+    complete while account state stays old. See refresh_broker_snapshot for the
+    required page-transcript shape.
     """
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
@@ -533,6 +536,78 @@ def _num(value, field: str) -> float:
     return f
 
 
+def _position_pages(value) -> tuple[list, str]:
+    """Verify a caller-supplied, cursor-linked transcript through exhaustion.
+
+    The broker read is paginated.  A bare response can never prove it is the
+    whole book, even when it happens to contain every current holding.  The
+    accepted shape is::
+
+        {"pages": [
+          {"cursor": null, "response": <raw first response>},
+          {"cursor": "...", "response": <raw next response>}
+        ], "exhausted": true}
+
+    Every non-final response must point at the cursor recorded for the next
+    request, and the final response must have no next URL/cursor.  Thus dropping
+    either a middle page or the tail makes the transcript fail closed.
+    """
+    proof = _payload(value)
+    if not isinstance(proof, dict) or proof.get("exhausted") is not True:
+        raise ValueError(
+            "positions completeness proof required: pass a cursor-linked pages[] "
+            "transcript with exhausted=true; a bare positions response cannot "
+            "prove that every pagination page was read")
+    pages = proof.get("pages")
+    if not isinstance(pages, list) or not pages:
+        raise ValueError("positions completeness proof has no pages[]")
+
+    rows = []
+    account_number = ""
+    for i, item in enumerate(pages):
+        if not isinstance(item, dict) or "response" not in item or "cursor" not in item:
+            raise ValueError(f"positions proof page[{i}] needs cursor and response")
+        supplied_cursor = item["cursor"]
+        if i == 0 and supplied_cursor not in (None, ""):
+            raise ValueError("positions proof must begin with the cursorless first page")
+
+        envelope = _payload(item["response"])
+        raw = envelope["data"] if isinstance(envelope, dict) and "data" in envelope else envelope
+        page_rows = raw.get("positions") if isinstance(raw, dict) else None
+        if not isinstance(page_rows, list):
+            raise ValueError(f"positions proof page[{i}] is not a raw positions response")
+        rows.extend(page_rows)
+        page_account = str(raw.get("account_number") or "")
+        if page_account and account_number and page_account != account_number:
+            raise ValueError("positions proof pages belong to different accounts")
+        account_number = account_number or page_account
+
+        # Connectors differ on whether pagination metadata sits beside `data`
+        # or inside it. Accept both, but never infer exhaustion from row count.
+        next_value = (envelope.get("next") or envelope.get("next_url")
+                      if isinstance(envelope, dict) else None)
+        if not next_value:
+            next_value = raw.get("next") or raw.get("next_url")
+        next_cursor = None
+        if next_value:
+            if not isinstance(next_value, str):
+                raise ValueError(f"positions proof page[{i}] has a non-string next link")
+            parsed = parse_qs(urlparse(next_value).query).get("cursor", [])
+            if len(parsed) != 1 or not parsed[0]:
+                raise ValueError(f"positions proof page[{i}] next link has no unique cursor")
+            next_cursor = parsed[0]
+
+        if i + 1 < len(pages):
+            if next_cursor is None:
+                raise ValueError(f"positions proof continues after exhausted page[{i}]")
+            if str(pages[i + 1].get("cursor")) != next_cursor:
+                raise ValueError(f"positions proof page[{i + 1}] cursor does not follow page[{i}]")
+        elif next_cursor is not None:
+            raise ValueError(
+                f"positions proof stops before exhaustion; page[{i}] has another cursor")
+    return rows, account_number
+
+
 def _write_broker_snapshot(broker_positions, portfolio, ts: str,
                            *, liquidated: bool = False) -> dict:
     """VALIDATE broker reads, then atomically publish the shares/cost snapshot.
@@ -548,7 +623,8 @@ def _write_broker_snapshot(broker_positions, portfolio, ts: str,
     Its docstring already said "Validate broker reads". The word was there and
     the behaviour was not, which is the defect class this repo keeps paying for.
 
-    The rule now: ANY row we cannot fully parse REJECTS THE WHOLE SNAPSHOT. A
+    The rule now: NO WRITE WITHOUT PAGINATION EXHAUSTION EVIDENCE, and ANY row
+    we cannot fully parse REJECTS THE WHOLE SNAPSHOT. A
     partial book is more dangerous than a stale one — stale is detectable and
     was detected; partial looks current, carries a fresh timestamp, and silently
     unprotects whatever it dropped.
@@ -559,17 +635,14 @@ def _write_broker_snapshot(broker_positions, portfolio, ts: str,
     and is the single most destructive thing this function can write.
     """
     try:
-        pos_raw, port_raw = _payload(broker_positions), _payload(portfolio)
-        if isinstance(pos_raw, dict) and "data" in pos_raw:
-            pos_raw = pos_raw["data"]
+        rows, account_number = _position_pages(broker_positions)
+        port_raw = _payload(portfolio)
         if isinstance(port_raw, dict) and "data" in port_raw:
             port_raw = port_raw["data"]
-        rows = (pos_raw.get("positions") if isinstance(pos_raw, dict) else pos_raw)
         if not isinstance(rows, list) or not isinstance(port_raw, dict):
-            raise ValueError("pass raw get_equity_positions and get_portfolio outputs")
+            raise ValueError("pass proven get_equity_positions pages and raw get_portfolio output")
 
         positions = {}
-        account_number = pos_raw.get("account_number") if isinstance(pos_raw, dict) else None
         for i, row in enumerate(rows):
             # REJECT, never skip. A row we cannot read means the response is not
             # trustworthy, and publishing the rest of it deletes real positions.
@@ -660,9 +733,17 @@ def refresh_broker_snapshot(broker_positions: str, portfolio: str,
                             liquidated: bool = False) -> str:
     """Publish the broker's CURRENT account state. Call this before you finish.
 
-    ⛔ EVERY SESSION, WHETHER OR NOT YOU TRADED. Pass the raw output of
-    `get_equity_positions` and `get_portfolio`. This is what keeps the system's
-    picture of your book from drifting away from the broker's.
+    ⛔ EVERY SESSION, WHETHER OR NOT YOU TRADED. Read get_equity_positions from
+    the cursorless first page through the page with no `next`, then pass this
+    JSON as broker_positions (response is each tool's raw output)::
+
+      {"pages":[{"cursor":null,"response":FIRST},
+                  {"cursor":"CURSOR_FROM_FIRST_NEXT","response":SECOND}],
+       "exhausted":true}
+
+    Each cursor must match the prior response's next URL. Also pass the raw
+    get_portfolio output. This is what keeps the system's picture of your book
+    from drifting away from the broker's.
 
     WHY IT EXISTS. Refreshing state used to be possible only through
     `record_fills()`, and only when that call contained a filled order — so a
@@ -678,7 +759,8 @@ def refresh_broker_snapshot(broker_positions: str, portfolio: str,
     read. Coupling them made the second impossible without the first.
 
     ⚠️ IT CAN REFUSE, AND A REFUSAL IS NOT A FORMALITY. The write is rejected
-    outright — leaving the previous snapshot intact — if any row is unreadable,
+    outright — leaving the previous snapshot intact — if pagination exhaustion
+    is not proven, a page is omitted or mis-linked, any row is unreadable,
     a quantity or cost is missing or non-finite, a symbol repeats, or the
     payload belongs to a different account. A partial book is more dangerous
     than a stale one: stale is detectable, partial looks current.
@@ -1649,8 +1731,12 @@ def _selftest() -> None:
         RH_POSITIONS = Path(_fill_dir.name) / "positions.json"
         store.append_journal = lambda ev: _journalled2.append(ev)
         store.read_journal = lambda: []
-        _bp = json.dumps({"positions": [{"symbol": "DELL", "quantity": "2",
-                                          "average_buy_price": "100"}]})
+        def _proof(response, *, cursor=None, exhausted=True):
+            return json.dumps({"pages": [{"cursor": cursor, "response": response}],
+                               "exhausted": exhausted})
+
+        _bp = _proof({"positions": [{"symbol": "DELL", "quantity": "2",
+                                      "average_buy_price": "100"}]})
         _port = json.dumps({"total_value": "250", "cash": "50",
                             "buying_power": "40"})
         r = json.loads(record_fills.fn(_payload, _bp, _port) if hasattr(record_fills, "fn")
@@ -1703,9 +1789,10 @@ def _selftest() -> None:
         # ================================================================
         _refresh = (refresh_broker_snapshot.fn if hasattr(refresh_broker_snapshot, "fn")
                     else refresh_broker_snapshot)
-        good_pos = json.dumps({"data": {"positions": [
+        good_response = {"data": {"positions": [
             {"symbol": "DELL", "quantity": "2", "average_buy_price": "100"},
-            {"symbol": "MU", "quantity": "3", "average_buy_price": "200"}]}})
+            {"symbol": "MU", "quantity": "3", "average_buy_price": "200"}]}}
+        good_pos = _proof(good_response)
         good_port = json.dumps({"data": {"total_value": "500", "cash": "5",
                                          "account_number": "948184924"}})
         # a valid read with NO fills refreshes — the whole point of the new tool
@@ -1714,7 +1801,11 @@ def _selftest() -> None:
         assert len(json.loads(before.decode())["positions"]) == 2
 
         def _must_reject(pos, port, why, **kw):
-            r = json.loads(_refresh(pos, port, **kw))
+            decoded = json.loads(pos)
+            proof = (pos if kw.pop("as_proof", False) or
+                     (isinstance(decoded, dict) and "pages" in decoded)
+                     else _proof(decoded))
+            r = json.loads(_refresh(proof, port, **kw))
             assert r["ok"] is False, (why, r)
             assert RH_POSITIONS.read_bytes() == before, \
                 f"{why}: the previous snapshot was modified"
@@ -1723,10 +1814,48 @@ def _selftest() -> None:
         # EMPTY BOOK — the most destructive write there is. "No positions
         # returned" and "the read failed" are the same bytes, so it must be
         # asserted, never inferred.
+        # A legacy bare response has well-formed rows but no evidence it is the
+        # final page. It must never publish, regardless of whether it grew,
+        # shrank, or happens to equal the previous book.
+        r = _must_reject(json.dumps(good_response), good_port,
+                         "bare page without completeness proof", as_proof=True)
+        assert "completeness proof required" in r["error"], r
+        # A well-formed partial page is still partial. `exhausted:true` cannot
+        # overrule the page's own next link.
+        partial = {"positions": good_response["data"]["positions"][:1],
+                   "next": "https://broker.test/positions?cursor=page-2"}
+        r = _must_reject(_proof(partial), good_port, "tail omitted", as_proof=True)
+        assert "stops before exhaustion" in r["error"], r
+        # Supplying another page is not enough: it must be the page named by
+        # the prior next URL, and the transcript must start cursorless.
+        bad_chain = json.dumps({"pages": [
+            {"cursor": None, "response": partial},
+            {"cursor": "wrong", "response": {"positions": [
+                good_response["data"]["positions"][1]]}}], "exhausted": True})
+        _must_reject(bad_chain, good_port, "broken cursor chain", as_proof=True)
+        wrong_first = json.dumps({"pages": [
+            {"cursor": "page-2", "response": {"positions":
+                good_response["data"]["positions"]}}], "exhausted": True})
+        _must_reject(wrong_first, good_port, "first page omitted", as_proof=True)
+        # Nor does a fully linked transcript count until the terminal page says
+        # there is no next page.
+        not_asserted = json.dumps({"pages": [
+            {"cursor": None, "response": {"positions":
+                good_response["data"]["positions"]}}], "exhausted": False})
+        _must_reject(not_asserted, good_port, "exhaustion not asserted", as_proof=True)
+        # Positive multi-page control: cursor linkage plus a terminal page is
+        # sufficient evidence, independent of how many holdings are present.
+        complete = json.dumps({"pages": [
+            {"cursor": None, "response": partial},
+            {"cursor": "page-2", "response": {"positions": [
+                good_response["data"]["positions"][1]]}}], "exhausted": True})
+        assert json.loads(_refresh(complete, good_port))["ok"] is True
+        assert len(json.loads(RH_POSITIONS.read_text())["positions"]) == 2
+        RH_POSITIONS.write_bytes(before)
         r = _must_reject(json.dumps({"data": {"positions": []}}), good_port, "empty")
         assert "erase every holding" in r["error"], r
         # ...and IS allowed when the caller explicitly asserts a flat account
-        assert json.loads(_refresh(json.dumps({"data": {"positions": []}}),
+        assert json.loads(_refresh(_proof({"data": {"positions": []}}),
                                    good_port, liquidated=True))["ok"] is True
         RH_POSITIONS.write_bytes(before)          # restore for the rest
 
@@ -1761,13 +1890,14 @@ def _selftest() -> None:
                 ({"total_value": "500", "cash": "Infinity", "account_number": "948184924"}, "inf cash")):
             _must_reject(good_pos, json.dumps({"data": bad_port}), why)
         # a genuinely CLOSED position (qty 0) is dropped without rejecting
-        r = json.loads(_refresh(json.dumps({"data": {"positions": [
+        r = json.loads(_refresh(_proof({"data": {"positions": [
             {"symbol": "DELL", "quantity": "2", "average_buy_price": "100"},
             {"symbol": "GONE", "quantity": "0", "average_buy_price": "5"}]}}), good_port))
         assert r["ok"] is True and r["positions"] == 1, r
         assert "GONE" not in json.loads(RH_POSITIONS.read_text())["positions"]
         print("selftest OK: a bad broker read is REFUSED and the previous snapshot "
-              "survives byte-identical (empty, truncated-row, missing qty/cost, "
+              "survives byte-identical (unproven/truncated pagination, empty, "
+              "truncated-row, missing qty/cost, "
               "negative, NaN/inf, duplicate, wrong account); a no-fill refresh works")
     finally:
         store.append_journal, store.read_journal = _real_ap, _real_rj2
