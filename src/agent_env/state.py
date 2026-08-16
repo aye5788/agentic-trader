@@ -55,8 +55,14 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
             "share_of_equity": (float(p["value"]) / av) if av > 0 and p.get("value") is not None else None,
             "stop": agent_stop if agent_stop is not None else book_stop,
             "targets": agent_targets if agent_targets else book_targets,
-            "watched": bool(t is not None and getattr(t, "target_weight", 0) > 0
-                            and getattr(t, "stop", None)),
+            # Mirrors market_monitor.in_book() EXACTLY — see this function's
+            # docstring on why it must not approximate. A weight of 0 with
+            # verdict "hold" is a HELD name the ranking did not select, given
+            # geometry so it can be watched (slow_loop.protective_theses);
+            # weight 0 with verdict "avoid" failed the R:R gate and is not held.
+            "watched": bool(t is not None and getattr(t, "stop", None)
+                            and (getattr(t, "target_weight", 0) > 0
+                                 or getattr(t, "verdict", "") == "hold")),
         }
         if agent_stop is not None or agent_targets:
             rec["set_by_agent"] = True

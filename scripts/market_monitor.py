@@ -130,6 +130,32 @@ def _selftest() -> None:
 
     print("monitor selftest OK: stricter-only override overlay")
 
+    # ⛔ WEIGHT 0 MEANS TWO DIFFERENT THINGS. A protective thesis (verdict
+    # "hold") is a name the AGENT holds that the ranking did not select --
+    # geometry supplied precisely so it CAN be watched. An "avoid" thesis
+    # failed the reward:risk gate and is not held. Watching keyed on
+    # target_weight>0 alone excluded both, so the protective geometry added
+    # 2026-08-14 had a stop that nothing enforced.
+    import types as _t
+    assert in_book(_t.SimpleNamespace(target_weight=0.07, verdict="buy"))
+    assert in_book(_t.SimpleNamespace(target_weight=0.0, verdict="hold")), \
+        "a HELD protective thesis must be watched — that is why it exists"
+    assert not in_book(_t.SimpleNamespace(target_weight=0.0, verdict="avoid")), \
+        "an R:R-dropped name is not held and must not be watched"
+    assert not in_book(_t.SimpleNamespace(target_weight=0.0, verdict=""))
+    # and the unprotected report must agree: held + hold-thesis + stop = watched
+    prot = Thesis(symbol="ZZZ", rank=200, verdict="hold", stop=9.0,
+                  targets=[11.0], target_weight=0.0)
+    rep = unprotected_positions([prot], {"ZZZ"})
+    assert rep["unprotected"] == [], rep
+    drop = Thesis(symbol="YYY", rank=99, verdict="avoid", stop=9.0,
+                  targets=[11.0], target_weight=0.0)
+    assert unprotected_positions([drop], {"YYY"})["unprotected"] == ["YYY"], \
+        "an avoid thesis must still read as unprotected when held"
+    print("monitor selftest OK: protective (weight-0, verdict hold) theses ARE "
+          "watched; R:R-dropped (verdict avoid) are not")
+
+
     # holdings filter: only names actually held in RH are stop-watched. A book
     # name that was never bought (phantom) must be excluded so it can't fire an
     # un-fillable exit every tick (the AMAT infinite-loop bug, 2026-07-17).
@@ -205,7 +231,11 @@ def _selftest() -> None:
     out = unprotected_positions(book, set())
     assert out["unprotected"] == [] and out["suspect_empty_snapshot"] is True, out
     # well-formed empty snapshot with an EMPTY book too -> genuinely nothing wrong
-    flat_book = [Thesis(symbol="X", rank=1, verdict="hold", stop=None,
+    # verdict "avoid", not "hold": since 2026-08-14 `hold` means HELD BY THE
+    # AGENT (a protective thesis the ranking did not select) and in_book() counts
+    # it, so a fixture standing for "the book expects no holdings" must use the
+    # verdict that actually means not-held. This assertion caught the collision.
+    flat_book = [Thesis(symbol="X", rank=1, verdict="avoid", stop=None,
                         targets=[], target_weight=0.0)]
     out = unprotected_positions(flat_book, set())
     assert out["unprotected"] == [] and out["suspect_empty_snapshot"] is False, out
@@ -460,9 +490,9 @@ def unprotected_positions(theses, owned) -> dict:
     """
     if owned is None:
         return {"unprotected": [], "no_target": [], "suspect_empty_snapshot": False}
-    watched = {t.symbol for t in theses if t.target_weight > 0 and t.stop}
+    watched = {t.symbol for t in theses if in_book(t) and t.stop}
     if not owned:
-        expects_holdings = any(t.target_weight > 0 for t in theses)
+        expects_holdings = any(in_book(t) for t in theses)
         return {"unprotected": [], "no_target": [],
                 "suspect_empty_snapshot": expects_holdings}
     # A position needs BOTH levels. A stop bounds the loss; a target is the
@@ -472,10 +502,35 @@ def unprotected_positions(theses, owned) -> dict:
     # an unfinished decision -- but both are announced, because the standing
     # instruction is that every position carries both and neither is optional.
     targeted = {t.symbol for t in theses
-                if t.target_weight > 0 and t.stop and (t.targets or [])}
+                if in_book(t) and t.stop and (t.targets or [])}
     return {"unprotected": sorted(owned - watched),
             "no_target": sorted((owned & watched) - targeted),
             "suspect_empty_snapshot": False}
+
+
+def in_book(t) -> bool:
+    """Is this thesis one the monitor should WATCH? (before the stop check)
+
+    ⛔ NOT just `target_weight > 0`. That was the whole condition until
+    2026-08-14, and it silently excluded the theses added the same day to
+    protect names the AGENT holds but the ranking did not select
+    (slow_loop.protective_theses). Those carry full geometry at weight 0.0 --
+    deliberately, because the loop is not prescribing the position -- so under
+    the old test they had a stop that nothing enforced. The geometry existed and
+    the protection did not, which is the exact defect class this repo keeps
+    finding.
+
+    A weight of zero means two different things and they must not be conflated:
+      verdict "avoid"  -> failed the reward:risk gate, NOT held, do not watch.
+      verdict "hold"   -> HELD by the agent, outside the ranked selection,
+                          geometry supplied so it can be watched. Watch it.
+
+    src/agent_env/state.py mirrors this exactly; the two must not drift, because
+    reporting `watched=True` for something unwatched is a false "protected"
+    signal and worse than reporting nothing.
+    """
+    return bool(getattr(t, "target_weight", 0) > 0
+                or getattr(t, "verdict", "") == "hold")
 
 
 def _load(path, default):
@@ -773,7 +828,7 @@ def check_once(cfg, client) -> int:
               if halted else "  kill-switch cleared — resuming normal mode")
         _LAST_HALTED = halted
 
-    held = {t.symbol: t for t in prod.theses if t.target_weight > 0 and t.stop}
+    held = {t.symbol: t for t in prod.theses if in_book(t) and t.stop}
     try:                                     # watch only names we ACTUALLY hold
         owned = owned_symbols(_load(RH_POSITIONS, None))
     except Exception:
