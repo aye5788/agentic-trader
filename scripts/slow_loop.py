@@ -382,6 +382,59 @@ def _selftest() -> None:
             if rotate:
                 assert off[0], "regime-off produced an empty book on a rotation night"
 
+    # ⛔ ...AND THE REST OF THE PIPELINE CANNOT REINTRODUCE IT. The test above
+    # proves select_book() ignores the regime; the reviewer pointed out that
+    # proves only that ONE function does. "A caller-side filter immediately
+    # after select_book(), or filtering during build_theses(), would restore
+    # the gate while this test remained green."
+    #
+    # Two structural checks, neither of them substring matching:
+    #  1. the theses builders cannot even RECEIVE the regime -- checked on the
+    #     real signatures, so renaming a parameter cannot hide it;
+    #  2. inside main(), the name `regime` may only be ASSIGNED (computed),
+    #     recorded on the product, and printed. Any other use -- a comparison,
+    #     an `if`, passing it to a call, or aliasing it into another variable --
+    #     fails here. Walked over the parse tree, not the text.
+    import ast as _ast
+    import inspect as _inspect
+    for fn in (build_theses, protective_theses):
+        params = set(_inspect.signature(fn).parameters)
+        assert not {p for p in params if "regime" in p.lower()}, \
+            f"{fn.__name__} takes a regime argument; it must not see one"
+
+    tree = _ast.parse(pathlib.Path(__file__).read_text())
+    main_fn = next(n for n in tree.body
+                   if isinstance(n, _ast.FunctionDef) and n.name == "main")
+    for node in _ast.walk(main_fn):
+        # aliasing: `x = regime` launders the flag past the checks below.
+        # Narrow to a DIRECT alias on purpose — argument passing is covered by
+        # the Call check further down, and a broader rule flagged the two uses
+        # that are explicitly allowed (select_book and the product record).
+        if isinstance(node, _ast.Assign) and isinstance(node.value, _ast.Name):
+            assert node.value.id != "regime", \
+                "main() copies `regime` into another name — it must not be reused"
+        # any branch on it is a gate by definition
+        if isinstance(node, (_ast.If, _ast.IfExp)):
+            names = {n.id for n in _ast.walk(node.test) if isinstance(n, _ast.Name)}
+            if "regime" in names:
+                # the run-summary line is `'ON' if regime else 'OFF ...'` — a
+                # report, allowed. Anything else branching on it is not.
+                assert isinstance(node, _ast.IfExp) and all(
+                    isinstance(b, _ast.Constant) for b in (node.body, node.orelse)), \
+                    "main() branches on `regime`; it must not gate anything"
+        # passing it into a call is how a filter would be reintroduced, EXCEPT
+        # into select_book (which provably discards it) and the product record
+        if isinstance(node, _ast.Call):
+            fname = getattr(node.func, "id", getattr(node.func, "attr", ""))
+            passed = any(isinstance(a, _ast.Name) and a.id == "regime"
+                         for a in node.args) or any(
+                isinstance(k.value, _ast.Name) and k.value.id == "regime"
+                for k in node.keywords)
+            if passed:
+                assert fname in ("select_book", "ResearchProduct"), \
+                    f"main() passes `regime` into {fname}() — only select_book " \
+                    "(which discards it) and the product record may receive it"
+
     # THE FACT MUST SURVIVE. Removing a rule without leaving the information
     # behind is a blind spot, which is worse than the rule. Assert against the
     # PRODUCT OBJECT, not the source text -- the previous version searched the

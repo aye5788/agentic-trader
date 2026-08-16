@@ -257,6 +257,21 @@ def decide(payload: dict, cfg: dict, valued: dict, shadow: bool,
             f"{cap} limit; BUY of {sym or '?'} refused. Exits stay armed "
             "(this is an entries halt, never a reason to strand a position).")
 
+    # ---- stop-out cooldown ------------------------------------------------
+    # The monitor writes {SYMBOL: until-date} when a stop fires. TWO readers
+    # honoured it: the slow loop (excludes cooled names at the next rebuild) and
+    # scripts/fast_loop.py (refused the buy at order time). Deleting fast_loop.py
+    # took the ORDER-TIME half with it, so a session could rebuy a name the
+    # monitor had stopped minutes earlier and the slow loop's half would not
+    # bite until the next rebuild. Fails open on an unreadable file.
+    cooled = gov.cooldown_until(sym)
+    if cooled:
+        return _deny(
+            f"COOLDOWN — {sym} was stopped out recently and is cooling until "
+            f"{cooled}; BUY refused. The stop that fired is the reason: rebuying "
+            "into it churns the position against a book that has not rebuilt "
+            "yet. (Exits are unaffected — a cooldown never blocks a sell.)")
+
     # ---- an active rule-out refuses the rebuy -----------------------------
     # The fast loop also drops these from the plan (apply_rule_outs), but the
     # loop is not the only path to place_equity_order: a session can call the
@@ -606,6 +621,32 @@ def _selftest() -> None:
             assert decide(sell, DD, {"account_value": float("nan")},
                           shadow=False)["permissionDecision"] == "allow"
             gov.STATE.unlink(missing_ok=True)
+
+            # --- STOP-OUT COOLDOWN, restored to the order path ---------------
+            # The monitor writes this when a stop fires; fast_loop.py used to
+            # refuse the buy at order time and was deleted, leaving only the
+            # slow loop's next-rebuild half.
+            cdp = gov.REPO / "research_store" / "monitor"
+            cdp.mkdir(parents=True, exist_ok=True)
+            (cdp / "cooldown.json").write_text(json.dumps({"MU": "2099-01-01"}))
+            r = decide(buy, CFG, V, shadow=False)
+            assert r["permissionDecision"] == "deny", r
+            assert "COOLDOWN" in r["permissionDecisionReason"], r
+            assert decide(sell, CFG, V, shadow=False)["permissionDecision"] == "allow", \
+                "a cooldown must never block a sell"
+            assert decide(qty_sell, CFG, V, shadow=False)["permissionDecision"] == "allow"
+            # an EXPIRED cooldown does not block
+            (cdp / "cooldown.json").write_text(json.dumps({"MU": "2000-01-01"}))
+            assert decide(buy, CFG, V, shadow=False)["permissionDecision"] == "allow"
+            # a different symbol is untouched
+            (cdp / "cooldown.json").write_text(json.dumps({"AAPL": "2099-01-01"}))
+            assert decide(buy, CFG, V, shadow=False)["permissionDecision"] == "allow"
+            # a TORN file fails OPEN — a guard that refuses buys because it
+            # cannot read a file is an outage, not a guard
+            (cdp / "cooldown.json").write_text("{not json")
+            assert decide(buy, CFG, V, shadow=False)["permissionDecision"] == "allow"
+            (cdp / "cooldown.json").unlink()
+            assert decide(buy, CFG, V, shadow=False)["permissionDecision"] == "allow"
 
             # --- an active RULE-OUT refuses the rebuy, and never an exit ------
             # The failure: a session exited AMAT to be flat into earnings and

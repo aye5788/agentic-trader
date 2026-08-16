@@ -43,6 +43,7 @@ Run the tests:  .venv/bin/python src/governance.py --selftest
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import math
 from pathlib import Path
@@ -173,6 +174,40 @@ def drawdown_breach(account_value: float, cfg) -> tuple[bool, float]:
     if limit is None:
         return False, dd
     return dd < -abs(float(limit)), dd
+
+
+COOLDOWN_FILE = "research_store/monitor/cooldown.json"
+
+
+def cooldown_until(symbol: str, today: str | None = None,
+                   path: Path | None = None) -> str | None:
+    """-> the date this symbol's stop-out cooldown runs to, or None. READS ONLY.
+
+    ⛔ WHY THIS IS HERE. scripts/market_monitor.py writes {SYMBOL: "YYYY-MM-DD"}
+    when a stop fires, so a name just stopped out is not immediately rebought
+    against a book that has not rebuilt yet. TWO readers honoured it: the slow
+    loop (excludes cooled names at rebuild) and scripts/fast_loop.py (refused
+    the buy at order time). fast_loop.py was deleted 2026-08-14 with the
+    procedural executor, so the ORDER-TIME half vanished -- a session could buy
+    a name the monitor had stopped minutes earlier, which is exactly the churn
+    the cooldown exists to prevent. The slow loop's half only bites at the next
+    rebuild.
+
+    FAILS OPEN. An absent, torn or unreadable file yields None for every symbol:
+    a missing cooldown record is not evidence of a cooldown, and a guard that
+    blocked buying because it could not read a file would be an outage. Same
+    direction the deleted implementation chose.
+    """
+    today = today or dt.date.today().isoformat()
+    p = path or (REPO / COOLDOWN_FILE)
+    try:
+        cd = json.loads(p.read_text())
+        until = cd.get(str(symbol).strip().upper())
+    except Exception:                      # noqa: BLE001 — see FAILS OPEN above
+        return None
+    if until is None:
+        return None
+    return str(until) if str(until) >= today else None
 
 
 def whitelist(cfg) -> set[str]:

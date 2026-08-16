@@ -909,7 +909,7 @@ def check_no_api_key(root: pathlib.Path) -> list[str]:
     Scope, honestly — what this does NOT cover:
       * files, not the box. This reads git-tracked files. An export typed into
         a live shell, a systemd unit outside the repo, or a value in the
-        git-ignored `.env` is invisible to it. deploy/run_fast_loop.sh's
+        git-ignored `.env` is invisible to it. deploy/run_slow_loop.sh's
         runtime guard is what covers the box.
       * the guard and teardown forms are deliberately silent: `${ANTHROPIC_API_KEY:-}`
         and `unset ANTHROPIC_API_KEY` are correct usage and have no `=` after
@@ -1182,7 +1182,7 @@ def check_settings_deny_secrets(root: pathlib.Path) -> list[str]:
 
     WHY THE DENIES ARE PATH-SCOPED AND NOT A BARE `Write`: see _REQUIRED_DENIES.
     A bare `Write` deny is unexemptable and breaks the loops in the dangerous
-    direction -- scripts/fast_loop.py still runs, marks.load() has no freshness
+    direction -- the sessions still run, marks.load() has no freshness
     check, so a refused positions.json write means planning against a STALE book
     with the place tools still allowed. Wrong orders, not zero orders.
 
@@ -1241,7 +1241,7 @@ def _exec_wildcard_reason(rule: str) -> str | None:
     arbitrary code execution, or None if it does not.
 
     The distinction is the wildcard, not the interpreter. `Bash(python3
-    scripts/fast_loop.py)` is an EXACT command and is exactly what the loops are
+    scripts/slow_loop.py)` is an EXACT command and is exactly what the jobs are
     supposed to have. `Bash(python3 -c ' *)` and `Bash(.venv/bin/python *)` mean
     "run any program you compose", which is the whole guardrail surface handed
     back. Both wildcard spellings are recognised: the trailing-space form used in
@@ -1644,7 +1644,7 @@ HOME=/root
     clean_cron = """\
 0 20 * * 0   /opt/agentic-trader/deploy/run_slow_loop.sh >> logs/slow.log 2>&1
 15 20 * * 0  cd /opt/agentic-trader && /usr/bin/python3 scripts/collect_signals.py >> logs/signals.log 2>&1
-0 10 * * 1-5 /opt/agentic-trader/deploy/run_fast_loop.sh >> logs/fast.log 2>&1
+0 10 * * 1-5 /opt/agentic-trader/deploy/run_slow_loop.sh >> logs/slow.log 2>&1
 0 12 * * 1-5 /opt/agentic-trader/deploy/run_risk_review.sh >> logs/risk_review.log 2>&1
 0 21 * * 0   /opt/agentic-trader/deploy/run_newsletter.sh >> logs/newsletter.log 2>&1
 30 22 * * *  cd /opt/agentic-trader && deploy/backup_ledger.sh >> logs/backup.log 2>&1
@@ -2064,7 +2064,7 @@ jobs:
     # -------------------- check 4: check_no_api_key ---------------------
     with tempfile.TemporaryDirectory() as td:
         root = pathlib.Path(td)
-        _write(root, "deploy/run_fast_loop.sh", """\
+        _write(root, "deploy/run_slow_loop.sh", """\
 #!/usr/bin/env bash
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   echo "REFUSING: ANTHROPIC_API_KEY is set" >&2
@@ -2282,7 +2282,7 @@ jobs:
 
     # a BLANKET `Write` deny does not satisfy the path-scoped requirement. It is
     # not merely weaker -- it is unexemptable, so it stops the loops writing
-    # research_store/ while leaving scripts/fast_loop.py and the RH place tools
+    # research_store/ while leaving the session scripts and the RH place tools
     # armed: stale book in, real orders out. It must still read as FAILING.
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
