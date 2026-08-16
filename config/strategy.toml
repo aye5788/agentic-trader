@@ -71,11 +71,16 @@ residual_factors  = "sector"     # "sector" (11 SPDR ETFs) | "market" (SPY) | "n
 
 # --- Portfolio construction (see docs/STRATEGY.md §4) -----------------------
 [portfolio]
-book_weight   = 0.70    # single-name book share of capital
-sleeve_weight = 0.30    # ETF sleeve share of capital
-book_hold     = 10      # names held in the book
-book_band     = 15      # banded exit: keep a held name until it drops below rank 15
-sleeve_hold   = 4       # ETFs held in the sleeve
+book_weight   = 1.0     # EQUITIES ONLY as of 2026-08-16 — the whole book
+sleeve_weight = 0.0     # ETF sleeve retired; see [etf_sleeve] below
+book_hold     = 14      # names held in the book. 14, not 10, so per-name size
+                        #   stays ~7.1% (1.0/14) instead of jumping to 10% —
+                        #   removing the sleeve should not silently concentrate
+                        #   the book. 14 also matches [risk] max_holdings.
+book_band     = 20      # banded exit: keep a held name until it drops below rank
+                        #   20. Scaled with book_hold (was 15 for 10 names) so the
+                        #   band stays the same shape and does not churn harder.
+sleeve_hold   = 0       # retired
 rebalance     = "weekly"  # full re-rank + rotate weekly; risk exits run nightly
 
 # --- Tradeable universe -----------------------------------------------------
@@ -98,14 +103,30 @@ size      = 150
 # trend. Defensive assets (bonds/gold) sit INSIDE the rank -> in risk-off they
 # win the ranking and become the destination automatically (built-in off-switch;
 # no separate cash-vs-bond rule). Members + roles: config/etf_universe.csv.
+# ⛔ RETIRED 2026-08-16. The sleeve was a second, parallel rotation engine taking
+# 30% of capital into 4 ETFs. Judged redundant with the single-name book and a
+# source of churn, so the strategy is EQUITIES ONLY.
+#
+# ⚠️ `enabled` IS NOW ACTUALLY READ by scripts/slow_loop.py. Until 2026-08-16 it
+# was decorative — nothing consumed it — so setting it false would have changed
+# nothing. Same defect class as `rebalance = "weekly"` and `no_chase`.
+#
+# THE FILE STAYS, and deleting it would break two things that are NOT the sleeve:
+#   1. the price panel (scripts/fetch_prices.py fetches these tickers), which the
+#      RESIDUAL MOMENTUM TILT needs — it regresses each name on the 11 SPDR
+#      sector ETFs. Lose the prices and the tilt silently falls back to plain
+#      rank, degrading the signal with only a printed note.
+#   2. the order-gate whitelist (governance.whitelist = universe ∪ etf_sleeve).
+#      ETFs stay whitelisted deliberately: four are HELD right now, and a
+#      whitelist that dropped them would not block a sell (it is buy-only) but
+#      would refuse the agent any judgement about re-entering one.
 [etf_sleeve]
-enabled  = true
+enabled  = false
 source   = "config/etf_universe.csv"
 members  = 18            # 11 SPDR sectors + 2 broad (SPY,IWM) + 2 intl (EFA,EEM)
                          #   + 3 asset/defensive (GLD,TLT,AGG)
-hold_top = 4             # concurrent ETF holdings (tune with the single-name book)
-# NOTE: capital split between this sleeve and the single-name book is a separate
-# open axis (portfolio construction) — not set here yet.
+hold_top = 0             # retired; kept at 0 rather than deleted so the shape of
+                         #   the config still shows what was turned off
 
 # --- Regime: AN OBSERVATION, NOT A GATE (changed 2026-08-14) -----------------
 # These define what is COMPUTED and recorded on the product, and reported by

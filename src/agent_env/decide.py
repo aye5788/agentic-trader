@@ -77,7 +77,8 @@ def _expiry(ts: str, days: int = LEVEL_TTL_DAYS) -> str:
 
 
 def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
-                         owned, current_stop, current_targets) -> dict:
+                         owned, current_stop, current_targets,
+                         verdict: str = "") -> dict:
     """Report what scripts/market_monitor.py's apply_overrides() will ACTUALLY do
     with this stop/target at the next poll. This does not enforce anything
     itself -- it mirrors the stop/target arithmetic of apply_overrides() AND
@@ -85,7 +86,8 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
     ever looks at this symbol at all, so the report can never drift from the
     real behaviour:
 
-        held = {t.symbol: t for t in prod.theses if t.target_weight > 0 and t.stop}
+        held = {t.symbol: t for t in prod.theses if in_book(t) and t.stop}
+        # ...where in_book(t) is `target_weight > 0 or verdict == "hold"`
         owned = owned_symbols(_load(RH_POSITIONS, None))
         if owned is not None:
             held = {s: t for s, t in held.items() if s in owned}
@@ -126,10 +128,22 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
                       {"enforced": False, "note": "no target was set"},
         }
 
-    if not (target_weight is not None and target_weight > 0):
-        note = ("thesis target_weight is not positive -- the monitor's book filter "
-                "(target_weight > 0 and stop) excludes this symbol from the watch-list "
-                "entirely, so overrides for it are never evaluated")
+    # ⛔ MIRRORS market_monitor.in_book() — `target_weight > 0 OR verdict ==
+    # "hold"`. It gated on the weight ALONE until 2026-08-16, which was correct
+    # only until protective theses existed. Those carry weight 0.0 and verdict
+    # "hold" (slow_loop.protective_theses) for names the AGENT holds that the
+    # ranking did not select, and the monitor DOES watch them. So this reported
+    # `enforced: false` for four live, genuinely-protected positions.
+    # prompts/charter.md tells the agent that `enforcement.stop.enforced: true`
+    # is the ONLY evidence the monitor will act — so a false negative here does
+    # not merely under-report, it invites the agent to exit or re-set a position
+    # that was already protected. Found by the independent audit, 2026-08-16.
+    watched = (target_weight is not None and target_weight > 0) or verdict == "hold"
+    if not watched:
+        note = ("this thesis is neither weighted nor a held-protective one "
+                "(verdict='hold'), so the monitor's book filter excludes the "
+                "symbol from the watch-list entirely and overrides for it are "
+                "never evaluated")
         return {
             "stop": {"enforced": False, "note": note},
             "target": {"enforced": False, "note": note} if target is not None else
@@ -342,6 +356,22 @@ def _selftest() -> None:
     assert "no thesis" in r["stop"]["note"] and "no thesis" in r["target"]["note"], r
 
     # 2) stop LOOSER than the thesis's current stop -> not enforced, reported.
+    # ⛔ REGRESSION GUARD (2026-08-16). A protective thesis — weight 0.0,
+    # verdict "hold", written by slow_loop for a name the AGENT holds that the
+    # ranking did not select — IS watched by market_monitor.in_book(). This
+    # reported enforced=False for four live positions until the verdict clause
+    # was added, and the charter tells the agent that flag is the only proof a
+    # stop is real.
+    r = evaluate_enforcement(stop=108.0, target=118.0, has_thesis=True,
+                             target_weight=0.0, verdict="hold", owned=True,
+                             current_stop=100.0, current_targets=[120.0, 140.0])
+    assert r["stop"]["enforced"] is True, r
+    # ...and an R:R-dropped thesis (weight 0, verdict "avoid") is NOT watched
+    r = evaluate_enforcement(stop=108.0, target=118.0, has_thesis=True,
+                             target_weight=0.0, verdict="avoid", owned=True,
+                             current_stop=100.0, current_targets=[120.0, 140.0])
+    assert r["stop"]["enforced"] is False, r
+
     r = evaluate_enforcement(stop=90.0, target=None, has_thesis=True,
                              target_weight=0.1, owned=True,
                              current_stop=100.0, current_targets=[120.0])

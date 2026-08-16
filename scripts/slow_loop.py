@@ -266,7 +266,8 @@ def protective_theses(owned: set, covered: set, scored, closes, asof, tm,
 
 
 def select_book(book_scored, etf_scored, held_book: set, held_etf: set,
-                P: dict, *, regime: bool, rotate: bool) -> tuple[list, list]:
+                P: dict, *, regime: bool, rotate: bool,
+                sleeve_enabled: bool = True) -> tuple[list, list]:
     """Choose the book and sleeve. -> (book_sel, etf_sel).
 
     ⛔ `regime` IS ACCEPTED AND DELIBERATELY UNUSED. It is a parameter so the
@@ -289,10 +290,24 @@ def select_book(book_scored, etf_scored, held_book: set, held_etf: set,
     """
     del regime                      # noqa: F841 — see docstring; never a filter
     book_sel = mom.select(book_scored, held_book, P["book_hold"], P["book_band"])
-    etf_sel = mom.select(etf_scored, held_etf, P["sleeve_hold"], P["sleeve_hold"])
+    # ⛔ SLEEVE RETIRED 2026-08-16 ([etf_sleeve] enabled = false). The ETF sleeve
+    # was a second rotation engine holding 4 ETFs at 30% of capital; judged
+    # redundant with the single-name book and a source of churn.
+    #
+    # ⚠️ ETFs ARE STILL SCORED, and must be. Four are HELD right now (XLE, XLK,
+    # IWM, XLV), and protective_theses() needs their scores to compute a stop for
+    # anything the agent holds. Skipping the SCORING rather than the SELECTION
+    # would leave four live positions with no enforced stop — the exact defect
+    # fixed on 2026-08-14. Selection is what stops; protection does not.
+    #
+    # Held ETFs therefore leave the weighted book, keep their stops, and the
+    # agent decides when to exit them. Nothing force-sells them.
+    etf_sel = (mom.select(etf_scored, held_etf, P["sleeve_hold"], P["sleeve_hold"])
+               if sleeve_enabled and P.get("sleeve_hold", 0) > 0 else [])
     if not rotate:
         book_sel = hold_selection(book_sel, book_scored, held_book)
-        etf_sel = hold_selection(etf_sel, etf_scored, held_etf)
+        if etf_sel:
+            etf_sel = hold_selection(etf_sel, etf_scored, held_etf)
     return book_sel, etf_sel
 
 
@@ -381,6 +396,25 @@ def _selftest() -> None:
             # doing its job on its author.
             if rotate:
                 assert off[0], "regime-off produced an empty book on a rotation night"
+
+    # ---- the sleeve switch must actually BIND ------------------------------
+    # ⚠️ `[etf_sleeve] enabled` was DECORATIVE until 2026-08-16 — nothing read
+    # it, so setting it false would have changed nothing while looking decisive.
+    # That is the same defect as `rebalance = "weekly"` (read by nothing while
+    # the book rotated nightly) and `no_chase`. So assert the switch changes the
+    # OUTPUT, not that the key exists.
+    PS = {"book_hold": 2, "book_band": 3, "sleeve_hold": 1}
+    on_b, on_e = select_book(scored, etfs, set(), set(), PS,
+                             regime=True, rotate=True, sleeve_enabled=True)
+    off_b, off_e = select_book(scored, etfs, set(), set(), PS,
+                               regime=True, rotate=True, sleeve_enabled=False)
+    assert on_e, "sleeve ON must still select ETFs"
+    assert off_e == [], f"sleeve OFF must select no ETFs, got {off_e}"
+    assert on_b == off_b, "the sleeve switch must not disturb the equity book"
+    # sleeve_hold=0 alone is enough to retire it, even if `enabled` is left true
+    _, zero_e = select_book(scored, etfs, set(), set(), {**PS, "sleeve_hold": 0},
+                            regime=True, rotate=True, sleeve_enabled=True)
+    assert zero_e == [], "sleeve_hold=0 must select nothing"
 
     # ⛔ ...AND THE REST OF THE PIPELINE CANNOT REINTRODUCE IT. The test above
     # proves select_book() ignores the regime; the reviewer pointed out that
@@ -567,8 +601,13 @@ def main() -> None:
     # ROTATE ONLY WHEN DUE. Geometry, stops, earnings and marks still refresh
     # below every night -- it is the SELECTION that is weekly. See rotation_due.
     rotate = rotation_due(cfg)
+    sleeve_on = bool(cfg.get("etf_sleeve", {}).get("enabled", True))
     book_sel, etf_sel = select_book(book_scored, etf_scored, held_book, held_etf,
-                                    P, regime=regime, rotate=rotate)
+                                    P, regime=regime, rotate=rotate,
+                                    sleeve_enabled=sleeve_on)
+    if not sleeve_on:
+        print("  sleeve: RETIRED ([etf_sleeve] enabled=false) — equities only. "
+              "Held ETFs keep their stops via protective geometry.")
     if not rotate:
         print("  rotation: not due (weekly) — holding the book, geometry refreshed")
     # ⛔ THE REGIME DOES NOT FILTER THE SELECTION. It is recorded on the product
@@ -589,7 +628,9 @@ def main() -> None:
     # party able to weigh them.
 
     per_book = P["book_weight"] / P["book_hold"]
-    per_etf = P["sleeve_weight"] / P["sleeve_hold"]
+    # sleeve_hold is 0 once the sleeve is retired — guard the division rather
+    # than letting a retired config crash the nightly run.
+    per_etf = (P["sleeve_weight"] / P["sleeve_hold"]) if P.get("sleeve_hold") else 0.0
     book_held, book_drop = build_theses(book_sel, book_scored, closes, asof, per_book, TM, 1)
     etf_held, etf_drop = build_theses(etf_sel, etf_scored, closes, asof, per_etf, TM, 100)
 
