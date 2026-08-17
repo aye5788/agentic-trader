@@ -132,6 +132,23 @@ def _selftest() -> None:
 
     print("monitor selftest OK: stricter-only override overlay")
 
+    # ---- SHARED TRUTH TABLE ------------------------------------------------
+    # src/agent_env/decide.py mirrors this function's arithmetic and cannot
+    # import it. Both sides assert against src/level_rules.py so a divergence
+    # fails a test instead of quietly misinforming the agent.
+    import level_rules                                        # noqa: PLC0415
+    for c in level_rules.CASES:
+        th = Thesis(symbol="AAA", rank=1, verdict="buy",
+                    stop=c["thesis_stop"], targets=list(c["thesis_targets"]),
+                    target_weight=0.07)
+        got = apply_overrides({"AAA": th}, {"AAA": c["ov"]})["AAA"]
+        assert got.stop == c["stop_after"], (c["name"], got.stop)
+        assert list(got.targets) == c["targets_after"], (c["name"], got.targets)
+        assert (got.stop != c["thesis_stop"]) == c["stop_enforced"], c["name"]
+        assert (list(got.targets) != c["thesis_targets"]) == c["target_enforced"], \
+            c["name"]
+    print("monitor selftest OK: apply_overrides pinned against src/level_rules.CASES")
+
     # ⛔ WEIGHT 0 MEANS TWO DIFFERENT THINGS. A protective thesis (verdict
     # "hold") is a name the AGENT holds that the ranking did not select --
     # geometry supplied precisely so it CAN be watched. An "avoid" thesis
