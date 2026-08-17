@@ -507,19 +507,24 @@ def set_levels(symbol: str, stop: float, targets=0.0,
     # advisory layer telling the agent something the enforcement layer does
     # not do.
     #
-    # SOURCE: reuse `px`, the SAME in-memory value the ceiling/floor guard
-    # above already read from marks.load() for this call -- not a second read
-    # of research_store/monitor/quotes.json (decide.load_price()), and not a
-    # network call. marks.load()'s own mark-priority rule (src/marks.py)
-    # already prefers that identical monitor quote whenever one is on file,
-    # and only falls back to the snapshot's `last` or `avg_cost` when no live
-    # quote exists -- so `px` is the freshest price already in hand, and a
-    # second, independently-read price here could only ever disagree with the
-    # one the ceiling guard just enforced against, not add information. Pass
-    # it EXPLICITLY (never omitted): an unusable px becomes explicit `None`,
-    # which evaluate_enforcement treats as "asked and unknown" -- fail closed,
-    # exactly like apply_overrides() -- rather than "the caller didn't ask".
-    _enf_price = float(px) if px and float(px) > 0 else None
+    # SOURCE: decide.load_price(sym), NOT `px`. `px` (above) is only good for
+    # the ceiling/floor REFUSAL guard, where it is correct either way --
+    # refusing a stop at or above the last known price cannot be wrong,
+    # whichever source that price came from. But `px` FALLS BACK to
+    # marks.load()'s avg_cost whenever no live monitor quote exists
+    # (src/marks.py's mark-priority chain), so a position bought long ago and
+    # never quoted by the monitor since -- or never quoted at all -- still
+    # produces a perfectly usable `px` from cost basis alone. apply_overrides()'s
+    # real call site never reads avg_cost; it reads ONLY
+    # research_store/monitor/quotes.json and fails closed when this symbol has
+    # no entry there. Reporting enforcement against `px` therefore could -- and
+    # did -- disagree with what the monitor will actually do: a symbol the
+    # monitor has never quoted (cost basis still usable) read `enforced: true`
+    # here and would be refused there. THE DISAGREEMENT IS THE INFORMATION --
+    # decide.load_price() reads the SAME file with the SAME "no entry -> None"
+    # fail-closed behaviour apply_overrides()'s call site has, so this report
+    # can never claim more than the monitor actually knows.
+    _enf_price = decide.load_price(sym)
 
     enforcement = decide.evaluate_enforcement(
         stop=merged[sym]["stop"], target=merged[sym].get("targets") or None,
@@ -2188,10 +2193,12 @@ def _selftest() -> None:
 
     orig_overrides = decide.OVERRIDES
     orig_rh_positions = decide.RH_POSITIONS
+    orig_quotes = decide.QUOTES
     orig_read_current = globals()["read_current"]
     with tempfile.TemporaryDirectory() as td:
         decide.OVERRIDES = Path(td) / "overrides.json"
         decide.RH_POSITIONS = Path(td) / "positions.json"
+        decide.QUOTES = Path(td) / "quotes.json"
         try:
             # 1) symbol with no thesis at all -> neither level enforced, and the
             #    response says so (the unprotected-position case).
@@ -2218,6 +2225,14 @@ def _selftest() -> None:
                 "account_value": 1000.0,
                 "positions": {"NVDA": {"qty": 10, "mark": 110.0},
                               "MU": {"qty": 5, "mark": 50.0}}}
+            # I2: the enforcement report now reads decide.load_price() (the
+            # monitor's OWN quotes.json), not marks.load()'s mark/avg_cost --
+            # so a monitor quote matching the mark above must exist here too,
+            # or every "stricter stop -> enforced: True" case below would
+            # regress to enforced: False (no known price) rather than testing
+            # what it names.
+            decide.QUOTES.write_text(json.dumps(
+                {"prices": {"NVDA": 110.0, "MU": 50.0}}))
 
             # thesis on file for NVDA: stop=100, one target=120, held (weight>0)
             th = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
@@ -2298,6 +2313,7 @@ def _selftest() -> None:
         finally:
             decide.OVERRIDES = orig_overrides
             decide.RH_POSITIONS = orig_rh_positions
+            decide.QUOTES = orig_quotes
             globals()["read_current"] = orig_read_current
     print("selftest OK: set_levels() reports actual enforcement (no-thesis, looser-stop, "
           "stricter-stop, target-count-mismatch, target-lowers) -- never a bare ok:true, "
@@ -2356,26 +2372,87 @@ def _selftest() -> None:
           "apply_overrides()'s fail-closed guard, not the pre-guard sentinel "
           "behaviour")
 
+    # --- Part 4C (final review, I2): the enforcement report must be built from
+    # the SAME price source apply_overrides()'s call site reads
+    # (research_store/monitor/quotes.json, via decide.load_price()), never
+    # from marks.load()'s `mark or avg_cost` -- which FALLS BACK to cost basis
+    # whenever no live monitor quote exists. A position bought long ago and
+    # never quoted by the monitor since (or never quoted at all) still
+    # produces a perfectly usable `px` from avg_cost alone, so the OLD code
+    # reported `enforced: true` for a stop the monitor's own fail-closed price
+    # guard would refuse outright -- the exact reachable case the review
+    # flagged. This is the REPORT-ONLY price; the ceiling/floor refusal guard
+    # above still uses `px` (marks-based) on purpose, since refusing a stop at
+    # or above the last known price is correct either way.
+    orig_overrides = decide.OVERRIDES
+    orig_rh_positions = decide.RH_POSITIONS
+    orig_quotes = decide.QUOTES
+    orig_read_current = globals()["read_current"]
+    with tempfile.TemporaryDirectory() as td:
+        decide.OVERRIDES = Path(td) / "overrides.json"
+        decide.RH_POSITIONS = Path(td) / "positions.json"
+        decide.QUOTES = Path(td) / "quotes.json"     # absent -> load_price() is None
+        try:
+            decide.RH_POSITIONS.write_text(json.dumps(
+                {"positions": {"NVDA": {"qty": 10}}}))
+            th_avgcost = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
+                                targets=[130.0], target_weight=0.1)
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th_avgcost])
+
+            # NO monitor quote at all -- only a cost basis. The set-time
+            # ceiling/floor guard still has a usable `px` (150.0, from
+            # avg_cost) and happily passes a stop of 120 (raises 100, sits
+            # below 150). The monitor, though, has NEVER quoted this symbol
+            # -- decide.QUOTES is empty -- so apply_overrides() would refuse
+            # this override for lack of a known live price.
+            _real_marks_load4 = marks.load
+            marks.load = lambda *a, **k: {
+                "account_value": 1000.0,
+                "positions": {"NVDA": {"qty": 10, "avg_cost": 150.0, "mark": None}}}
+            try:
+                r = json.loads(set_levels("NVDA", 120.0, 0.0,
+                                          "test: avg_cost usable, no monitor quote"))
+                assert r["ok"] is True, r
+                assert r["enforcement"]["stop"]["enforced"] is False, r
+                assert "no live price is currently known" in r["enforcement"]["stop"]["note"], r
+            finally:
+                marks.load = _real_marks_load4
+        finally:
+            decide.OVERRIDES = orig_overrides
+            decide.RH_POSITIONS = orig_rh_positions
+            decide.QUOTES = orig_quotes
+            globals()["read_current"] = orig_read_current
+    print("selftest OK: set_levels()'s enforcement report reads the monitor's OWN "
+          "quotes.json (decide.load_price()), not marks.load()'s avg_cost fallback "
+          "-- a symbol with a cost basis but no live monitor quote reports "
+          "enforced: false, matching what apply_overrides() will actually refuse")
+
     # --- coverage for the finding this fix closes: set_levels() must consult
     # broker ownership too, not just the thesis, or it falsely claims
     # enforcement for a symbol the monitor never looks at ---
     orig_overrides = decide.OVERRIDES
     orig_rh_positions = decide.RH_POSITIONS
+    orig_quotes = decide.QUOTES
     orig_read_current = globals()["read_current"]
     with tempfile.TemporaryDirectory() as td:
         decide.OVERRIDES = Path(td) / "overrides.json"
         decide.RH_POSITIONS = Path(td) / "positions.json"
+        decide.QUOTES = Path(td) / "quotes.json"
         # Stub the MARK snapshot for the whole block (Part 4B wires this
         # price through to evaluate_enforcement, so an unmocked marks.load()
         # would read the REAL live positions.json here -- flaky and wrong for
         # a unit test). Only NVDA needs a real number: it is the only symbol
         # below whose stop RAISES the thesis's current stop AND reaches the
         # price-guard branch (cases 6/7/8 all return earlier, on ownership /
-        # weight / missing-stop, before price is ever consulted).
+        # weight / missing-stop, before price is ever consulted). I2: the
+        # enforcement report reads decide.load_price(), not marks.load(), so
+        # the SAME number needs a matching entry in the monitor's own
+        # quotes.json too.
         _real_marks_load3 = marks.load
         marks.load = lambda *a, **k: {
             "account_value": 1000.0,
             "positions": {"NVDA": {"qty": 10, "mark": 110.0}}}
+        decide.QUOTES.write_text(json.dumps({"prices": {"NVDA": 110.0}}))
         try:
             # snapshot only lists NVDA as held -- TSLA is confirmed NOT held.
             decide.RH_POSITIONS.write_text(json.dumps(
@@ -2439,6 +2516,7 @@ def _selftest() -> None:
             marks.load = _real_marks_load3
             decide.OVERRIDES = orig_overrides
             decide.RH_POSITIONS = orig_rh_positions
+            decide.QUOTES = orig_quotes
             globals()["read_current"] = orig_read_current
     print("selftest OK: set_levels() also consults broker ownership, not just the "
           "thesis (not-held, zero-weight, no-stop, ownership-indeterminate, "
