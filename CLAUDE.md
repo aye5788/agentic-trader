@@ -451,8 +451,13 @@ src/agent_env/          THE AGENT'S ENVIRONMENT (Plan 2 of the inversion) — a
                         FastMCP server exposing what the agent can SEE and DO:
                         brief(), positions(), account(), mandate_status(),
                         candidates(n)/universe(), terrain(symbol),
-                        set_levels(sym,stop,target,reason), record_decision(),
-                        check_order(). Runs under .venv (3.12) with mcp==1.28.1;
+                        history(symbol,days), set_levels(symbol,stop,targets,reason)
+                        (targets: one number, a list, or 0/None/""/"0" for no
+                        target — a stop with no target is legal), clear_levels
+                        (symbol,reason) (call on every exit — levels do not
+                        expire and outlive a closed position otherwise),
+                        record_decision(), check_order(). Runs under .venv
+                        (3.12) with mcp==1.28.1;
                         needs NO moomoo (quotes reach disk via the monitor).
                         Registered in .mcp.json. NOT yet used by any cron job —
                         the live loops still run the old procedural prompts.
