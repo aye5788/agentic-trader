@@ -403,7 +403,17 @@ def _selftest() -> None:
     assert "cannot currently BUY what it" in out
     assert "reachable only if the" in out
     assert "in either direction" in out, "level adjustment must not read one-way"
-    assert "needs saying out loud" in out, "loosening must stay the deliberate one"
+    # ⚠️ THIS ASSERTION WAS INVERTED ON 2026-08-17, deliberately. It used to pin
+    # "needs saying out loud" -- the charter's old promise that a stop COULD be
+    # loosened when marked deliberately. apply_overrides honours such a widen,
+    # but nothing in the agent's path ever wrote one: set_levels, merge_levels
+    # and write_levels have no widen parameter, so every loosening was silently
+    # ignored. The principal decided the agent will NOT be given the capability,
+    # so the charter now states the limit instead of promising the power. Pin the
+    # LIMIT, or the old fiction can come back unnoticed.
+    assert "never loosened" in out, "the charter must state the stop-loosening limit"
+    assert "needs saying out loud" not in out, \
+        "the charter must not re-promise a loosening the tools cannot express"
     assert "NOTHING ACTS ON THEM" in out, "the mandate is advisory; do not reclaim it"
     assert "You are the enforcement" in out
     assert "never\nthe resulting POSITION" in out or "never the resulting POSITION" in out.replace("\n"," ")

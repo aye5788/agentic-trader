@@ -110,6 +110,15 @@ would be taken out by nothing — `terrain()` tells you where that is — that i
 a reason to reconsider the position itself, or to record the judgement with
 `record_decision`, not something this tool can express.
 
+**A level you set outlives the position.** Levels do not expire; they are yours
+until you change or clear them. That is deliberate — protection should not
+vanish on a timer you did not choose — but it means a level left behind after an
+exit is still on file, and it wakes up if that name re-enters the book later, at
+a price it was never written for. So clearing it is part of closing a position,
+not bookkeeping afterwards: call `clear_levels` when you sell out of a name.
+`positions()` lists any level you hold for a name you do not, so you can see
+what you left behind.
+
 The facts in your brief were gathered at the moment this session began, not when
 it was scheduled. They are current.
 
