@@ -103,12 +103,12 @@ freely. Move a target in or out freely — raising one adds no risk of loss at a
 since the stop is unchanged, and letting a winner run is a discipline rather than
 a lapse in one.
 
-**Loosening a stop is the one adjustment that needs saying out loud.** It is the
-only change that increases what a position can cost you, so it is honoured only
-when you mark it deliberately and give the reason. Do that when the level sits
-inside the name's own noise and would be taken out by nothing — `terrain()` tells
-you where that is. Do not do it because you would rather not be stopped out;
-that is the entry price talking, and it is not information.
+**A stop can be tightened through `set_levels`, never loosened.** There is no
+parameter for it, and none is coming — the monitor only ever raises a stop or
+leaves it alone. If an inherited stop sits inside the name's own noise and
+would be taken out by nothing — `terrain()` tells you where that is — that is
+a reason to reconsider the position itself, or to record the judgement with
+`record_decision`, not something this tool can express.
 
 The facts in your brief were gathered at the moment this session began, not when
 it was scheduled. They are current.
