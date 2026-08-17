@@ -548,6 +548,16 @@ def set_levels(symbol: str, stop: float,
     except ValueError as e:
         return json.dumps({"ok": False, "error": str(e)}, indent=2)
 
+    # M-b (final review): clear_levels() journals its decision; set_levels()
+    # did not -- so the ledger recorded a level's REMOVAL and reason but never
+    # its CREATION, and a level's original reason lived only inside
+    # overrides.json, meaning clearing it erased the only record of why it was
+    # ever set. Mirror clear_levels()'s exact journalling path
+    # (decide.decision_entry + store.append_journal) -- reason is already
+    # guaranteed non-blank here, since write_levels()/merge_levels() would
+    # have raised ValueError above otherwise.
+    store.append_journal(decide.decision_entry(sym, "set_level", reason.strip(), ts))
+
     prod = read_current()
     thesis = None
     if prod:
@@ -2310,6 +2320,12 @@ def _selftest() -> None:
     orig_rh_positions = decide.RH_POSITIONS
     orig_quotes = decide.QUOTES
     orig_read_current = globals()["read_current"]
+    # M-b: set_levels() now journals every write (mirrors clear_levels()) --
+    # redirect store.append_journal for this whole block too, or every
+    # set_levels() call below spams the LIVE research_store/journal.jsonl.
+    orig_append_journal = store.append_journal
+    _journalled_setlevels: list = []
+    store.append_journal = lambda ev: _journalled_setlevels.append(ev)
     with tempfile.TemporaryDirectory() as td:
         decide.OVERRIDES = Path(td) / "overrides.json"
         decide.RH_POSITIONS = Path(td) / "positions.json"
@@ -2467,9 +2483,10 @@ def _selftest() -> None:
             decide.RH_POSITIONS = orig_rh_positions
             decide.QUOTES = orig_quotes
             globals()["read_current"] = orig_read_current
+            store.append_journal = orig_append_journal
     print("selftest OK: set_levels() reports actual enforcement (no-thesis, looser-stop, "
           "stricter-stop, target-count-mismatch, target-lowers) -- never a bare ok:true, "
-          "and never touched the live overrides.json")
+          "and never touched the live overrides.json or journal.jsonl")
 
     # --- Part 4B: set_levels() must not claim enforcement the monitor will
     # refuse. scripts/market_monitor.py:apply_overrides() (Part 3, 2026-08-17)
@@ -2487,6 +2504,8 @@ def _selftest() -> None:
     orig_overrides = decide.OVERRIDES
     orig_rh_positions = decide.RH_POSITIONS
     orig_read_current = globals()["read_current"]
+    orig_append_journal = store.append_journal   # M-b: set_levels() now journals
+    store.append_journal = lambda ev: None
     with tempfile.TemporaryDirectory() as td:
         decide.OVERRIDES = Path(td) / "overrides.json"
         decide.RH_POSITIONS = Path(td) / "positions.json"
@@ -2518,6 +2537,7 @@ def _selftest() -> None:
             decide.OVERRIDES = orig_overrides
             decide.RH_POSITIONS = orig_rh_positions
             globals()["read_current"] = orig_read_current
+            store.append_journal = orig_append_journal
     print("selftest OK: set_levels() passes its own live-price read through to "
           "evaluate_enforcement(), so a stop the monitor cannot verify against a "
           "known price is reported enforced: false -- consistent with "
@@ -2540,6 +2560,8 @@ def _selftest() -> None:
     orig_rh_positions = decide.RH_POSITIONS
     orig_quotes = decide.QUOTES
     orig_read_current = globals()["read_current"]
+    orig_append_journal = store.append_journal   # M-b: set_levels() now journals
+    store.append_journal = lambda ev: None
     with tempfile.TemporaryDirectory() as td:
         decide.OVERRIDES = Path(td) / "overrides.json"
         decide.RH_POSITIONS = Path(td) / "positions.json"
@@ -2574,6 +2596,7 @@ def _selftest() -> None:
             decide.RH_POSITIONS = orig_rh_positions
             decide.QUOTES = orig_quotes
             globals()["read_current"] = orig_read_current
+            store.append_journal = orig_append_journal
     print("selftest OK: set_levels()'s enforcement report reads the monitor's OWN "
           "quotes.json (decide.load_price()), not marks.load()'s avg_cost fallback "
           "-- a symbol with a cost basis but no live monitor quote reports "
@@ -2586,6 +2609,8 @@ def _selftest() -> None:
     orig_rh_positions = decide.RH_POSITIONS
     orig_quotes = decide.QUOTES
     orig_read_current = globals()["read_current"]
+    orig_append_journal = store.append_journal   # M-b: set_levels() now journals
+    store.append_journal = lambda ev: None
     with tempfile.TemporaryDirectory() as td:
         decide.OVERRIDES = Path(td) / "overrides.json"
         decide.RH_POSITIONS = Path(td) / "positions.json"
@@ -2670,6 +2695,7 @@ def _selftest() -> None:
             decide.RH_POSITIONS = orig_rh_positions
             decide.QUOTES = orig_quotes
             globals()["read_current"] = orig_read_current
+            store.append_journal = orig_append_journal
     print("selftest OK: set_levels() also consults broker ownership, not just the "
           "thesis (not-held, zero-weight, no-stop, ownership-indeterminate, "
           "genuinely-held-and-watched) -- and never touched the live "
@@ -2693,14 +2719,26 @@ def _selftest() -> None:
             r2 = json.loads(set_levels("BBB", 2.0, None, "test: level two"))
             assert r2["ok"] is True, r2
 
+            # M-b: set_levels() now journals its own decision too, the same
+            # way clear_levels() always has -- otherwise the ledger recorded a
+            # level's removal and reason but never its creation, and clearing
+            # a level erased the only record of why it was ever set.
+            assert len(journalled_clears) == 2, journalled_clears
+            assert journalled_clears[0]["action"] == "set_level", journalled_clears[0]
+            assert journalled_clears[0]["symbol"] == "AAA", journalled_clears[0]
+            assert journalled_clears[0]["reason"] == "test: level one", journalled_clears[0]
+            assert journalled_clears[1]["symbol"] == "BBB", journalled_clears[1]
+
             # refuses an empty reason -- and must not touch the file or journal
             before = json.loads(decide.OVERRIDES.read_text())
+            _journalled_before_refusal = len(journalled_clears)
             r = json.loads(clear_levels("AAA", ""))
             assert r["ok"] is False, r
             assert "reason is required" in r["error"], r
             after = json.loads(decide.OVERRIDES.read_text())
             assert after == before, "a refused clear must not touch the file"
-            assert journalled_clears == [], "a refused clear must not journal"
+            assert len(journalled_clears) == _journalled_before_refusal, \
+                "a refused clear must not journal"
 
             r = json.loads(clear_levels("AAA", "closed the position"))
             assert r["ok"] is True, r
@@ -2716,8 +2754,8 @@ def _selftest() -> None:
             # store.append_journal path record_decision uses, so a clear
             # appears in research_log's recent_decisions beside every other
             # decision (memory._reasoned_events reads "agent_decision" events).
-            assert len(journalled_clears) == 1, journalled_clears
-            entry = journalled_clears[0]
+            assert len(journalled_clears) == 3, journalled_clears
+            entry = journalled_clears[-1]
             assert entry["event"] == "agent_decision", entry
             assert entry["symbol"] == "AAA", entry
             assert entry["action"] == "clear_level", entry
@@ -2739,7 +2777,8 @@ def _selftest() -> None:
           "unrelated symbol intact, refuses an empty reason without touching "
           "the file or journal, is a no-op on an absent symbol, journals "
           "exactly the way record_decision does, and never touched the live "
-          "overrides.json or journal.jsonl")
+          "overrides.json or journal.jsonl -- and set_levels() now journals "
+          "its own creation the same way")
 
     # --- check_order(): a SELL must never be refused for a buy-only reason.
     # Proven BY CONSTRUCTION: build a scratch config/state where EVERY buy-
