@@ -71,6 +71,14 @@ VENV_SELFTESTS=(
     # not pinned. Both are cheap: --selftest returns before any I/O.
     "scripts/slow_loop.py"
     "scripts/hooks/pretooluse_order_gate.py"
+    # The remedy paired to src/deployed.py's detector. Its selftest pins the one
+    # rule that matters: the stop watcher is refused mid-sale and ONLY mid-sale.
+    "scripts/reload_stale.py"
+    # ⚠️ Same omission as slow_loop above: letter_facts has had a _selftest()
+    # and was never listed, so it ran only by hand. It is the sole producer of
+    # every number in the investor letter — the one artifact that reaches the
+    # account owner as fact.
+    "scripts/letter_facts.py"
 )
 
 # Scripts that `import moomoo` at module scope — MUST run under system python3.

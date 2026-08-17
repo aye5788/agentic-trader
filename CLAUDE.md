@@ -72,6 +72,37 @@ architecture in `docs/DESIGN.md` (Layer 1). Summary:
   runs (~500 MB each) across all these. Keep new on-box work pure-Python and off
   the weekday market-hours pileup — prefer off-box (GitHub Actions).
 
+## ♻️ CHANGING CODE IS NOT DONE UNTIL THE SERVICES RELOAD  (agents: do this)
+
+A long-running process holds whatever it imported at start. Editing a file — or
+`git pull`, or merging an auto-fix PR — changes DISK, not the running process.
+Two services on this box therefore keep running last week's logic while every
+other check reads green: **`agentic-monitor`** (which IS the stop, since
+Robinhood has no native stop for fractional shares) and **`agentic-dashboard`**.
+
+**So: after ANY edit to repo Python, before you report the work finished, run**
+
+```bash
+.venv/bin/python scripts/reload_stale.py        # --dry-run to look first
+```
+
+It asks `src/deployed.py` which units are actually stale (transitive import
+walk, so a file you have never heard of still counts) and restarts exactly
+those — never a blanket restart. It refuses to bounce the stop watcher while a
+sale is in flight and says so. Exit 1 = something stale was NOT restarted.
+
+⚠️ **Do not decide by eye whether your edit "affects" a service.** The closure
+is transitive: `src/marks.py` reaches the dashboard, `src/governance.py`
+reaches the monitor. Run it and let it answer; it is a no-op when nothing is
+stale.
+
+`agentic-reload.timer` runs the same script every 10 minutes as a BACKSTOP, and
+the 08:00 health check still reports drift that somehow survives both. The
+backstop exists because remembering is not a mechanism — the same reasoning
+that moved the order gate into a PreToolUse hook. Do not treat it as a reason
+to skip the command: between your edit and the next tick, the stop watcher is
+running code you have already replaced.
+
 ## Adaptive-input layer (self-tuning strategy knobs)
 
 An **off-box** background learner tunes `strategy.toml` knobs from the Decision→
@@ -315,6 +346,17 @@ scripts/health_check.py THE UPKEEP REMINDER (daily 08:00). Runs health.checks() 
                         "did this job leave evidence it ran".
                         `--open-issue` also routes findings into the oversight
                         loop below (deduped `bug`+`auto-fix` GitHub issue).
+scripts/reload_stale.py RUN THIS AFTER EDITING REPO PYTHON (see "CHANGING CODE
+                        IS NOT DONE UNTIL THE SERVICES RELOAD" above). Restarts
+                        exactly the long-running services whose code no longer
+                        matches disk, per src/deployed.py's transitive import
+                        walk. Refuses to bounce agentic-monitor while an exit is
+                        in flight (exit_request.json with no exit_result.json).
+                        Backstopped every 10 min by agentic-reload.timer. Built
+                        2026-08-17 because the detector had always computed the
+                        remedy — the unit name is literally in its alert text —
+                        and then paged a human instead of applying it, making
+                        "stale code" the most frequent alert the system produced.
 src/repo_checks.py      Static repo-state validator — FIVE filesystem-only checks
                         (cron paths, scheduled-jobs-armed, workflow exit-0,
                         workflow swallowed-failures, no-api-key) that catch

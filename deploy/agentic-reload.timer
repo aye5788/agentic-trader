@@ -1,0 +1,30 @@
+# THE BACKSTOP that makes stale code self-heal instead of becoming a chore.
+#
+# The intended path is that whoever changed the code runs
+# `.venv/bin/python scripts/reload_stale.py` immediately (CLAUDE.md makes this
+# part of "changing code", so an agent does it without being told). This timer
+# exists because that depends on remembering, and this repo has already learned
+# where that leads: the order gate was moved into a PreToolUse hook precisely so
+# it no longer depended on the agent remembering to call check_order().
+#
+# Cadence: 10 minutes. Drift used to persist until the 08:00 health check — up
+# to ~24h of a stop watcher enforcing last week's logic. Ten minutes is short
+# enough that the window stops mattering and long enough that a multi-file edit
+# is not restarted halfway through. The run is a no-op when nothing is stale.
+[Unit]
+Description=agentic-trader stale-code reload schedule (every 10 min)
+Documentation=file:/opt/agentic-trader/scripts/reload_stale.py
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+AccuracySec=30s
+
+# ⛔ Persistent=false. There is nothing to catch up on: staleness is a CURRENT
+# comparison of process start time against file mtime, so a missed run is fully
+# answered by the next one. Replaying it after a boot would restart services
+# for a condition that no longer exists.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

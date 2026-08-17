@@ -1,0 +1,32 @@
+# Restart whichever long-running services are running code that no longer
+# matches disk. The DETECTOR (src/deployed.py) always knew the answer and only
+# ever paged a human with it; this is the paired remedy.
+# install:
+#   cp deploy/agentic-reload.service deploy/agentic-reload.timer /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now agentic-reload.timer
+[Unit]
+Description=agentic-trader restart services running stale code
+Documentation=file:/opt/agentic-trader/scripts/reload_stale.py
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/agentic-trader
+Environment=HOME=/root
+
+# ⛔ .venv python (3.12): reload_stale imports src/deployed.py. It never imports
+# moomoo, so it must NOT use the system 3.10 interpreter.
+ExecStart=/opt/agentic-trader/.venv/bin/python scripts/reload_stale.py
+
+# Exit 1 means "something stale was NOT restarted" — normally the stop watcher
+# deferred because a sale is in flight, which is correct behaviour and resolves
+# itself on the next tick. It must not spam a failed-unit alert, and the daily
+# health check still reports genuine, persistent drift.
+SuccessExitStatus=1
+
+# A pure AST walk over the repo plus at most two systemctl calls: ~0.2s. The
+# bound is a wedge-catcher, not a budget.
+TimeoutStartSec=120
+MemoryAccounting=yes
+MemoryMax=200M
+Nice=10
