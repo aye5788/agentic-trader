@@ -20,6 +20,7 @@ morning (stop-vs-momentum churn guard).
 """
 import argparse
 import json
+import math
 import subprocess
 import sys
 import time
@@ -131,6 +132,23 @@ def _selftest() -> None:
           "targets move both ways (letting a winner run needs no permission)")
 
     print("monitor selftest OK: stricter-only override overlay")
+
+    # ---- SHARED TRUTH TABLE ------------------------------------------------
+    # src/agent_env/decide.py mirrors this function's arithmetic and cannot
+    # import it. Both sides assert against src/level_rules.py so a divergence
+    # fails a test instead of quietly misinforming the agent.
+    import level_rules                                        # noqa: PLC0415
+    for c in level_rules.CASES:
+        th = Thesis(symbol="AAA", rank=1, verdict="buy",
+                    stop=c["thesis_stop"], targets=list(c["thesis_targets"]),
+                    target_weight=0.07)
+        got = apply_overrides({"AAA": th}, {"AAA": c["ov"]}, c.get("prices"))["AAA"]
+        assert got.stop == c["stop_after"], (c["name"], got.stop)
+        assert list(got.targets) == c["targets_after"], (c["name"], got.targets)
+        assert (got.stop != c["thesis_stop"]) == c["stop_enforced"], c["name"]
+        assert (list(got.targets) != c["thesis_targets"]) == c["target_enforced"], \
+            c["name"]
+    print("monitor selftest OK: apply_overrides pinned against src/level_rules.CASES")
 
     # ⛔ WEIGHT 0 MEANS TWO DIFFERENT THINGS. A protective thesis (verdict
     # "hold") is a name the AGENT holds that the ranking did not select --
@@ -386,12 +404,19 @@ def _last_price(block: dict):
 import copy
 
 
-def apply_overrides(held: dict, overrides: dict) -> dict:
+def apply_overrides(held: dict, overrides: dict, prices: dict | None = None) -> dict:
     """Overlay stricter-only risk-review geometry onto held theses (copies).
     Stop may only be raised; each target may only be lowered. Looser or malformed
     overrides are ignored — a bad file can never loosen a live stop, and can never
     abort the whole tick (a malformed entry degrades to "no override" for that
-    symbol, or for the whole book if `overrides` itself isn't a dict)."""
+    symbol, or for the whole book if `overrides` itself isn't a dict).
+
+    `prices` is `{symbol: last_known_price}` -- see the guard inline below. It
+    defaults to None for backward compatibility with callers that predate the
+    apply-time price guard (Part 3, 2026-08-17) and are not exercising it; the
+    ONE live production call site (this module's poll loop) always passes an
+    actual dict, possibly empty on a torn read, which is exactly what makes the
+    guard fail closed there."""
     if not isinstance(overrides, dict):
         return dict(held)
     out = {}
@@ -416,6 +441,42 @@ def apply_overrides(held: dict, overrides: dict) -> dict:
             # Deliberate, attributable, and announced by the caller; never a
             # silent side effect of a stray number.
             ov_stop = ov.get("stop")
+            # ⛔ A STOP AT OR ABOVE THE CURRENT PRICE IS NOT A STOP -- it is
+            # already breached, and this process sells the whole position at
+            # market within one poll. set_levels refuses exactly this when a
+            # level is SET; an override that outlives its position and wakes on
+            # RE-ENTRY never passes through that check, so the same invariant
+            # has to hold here. Levels no longer expire (principal, 2026-08-17),
+            # which makes a stale override a permanent possibility rather than a
+            # transient one.
+            #
+            # FAIL CLOSED: with no price we refuse the override and keep the
+            # thesis stop -- the position stays protected, just less tightly.
+            # Applying a stale stop instead would liquidate it. Refusing can
+            # never unprotect; applying wrongly can.
+            #
+            # `prices is None` (the default) means the CALLER passed no price
+            # information at all -- backward compatibility for callers that
+            # predate this guard. The live call site (below, in the poll loop)
+            # always passes a real dict, possibly empty on a torn read, so THIS
+            # tick's guard is always active there: a symbol absent from that
+            # dict is exactly "no usable price" and is refused just like an
+            # unfavourable one.
+            if isinstance(ov_stop, (int, float)) and prices is not None:
+                px = prices.get(sym) if isinstance(prices, dict) else None
+                # ⛔ NaN IS NOT A USABLE PRICE. `px <= 0` and `stop >= px` are
+                # BOTH False for a NaN px -- every comparison against NaN is
+                # False in Python -- so a bare isinstance+<=0 guard let a
+                # corrupt quote sail straight through and the stale override
+                # was APPLIED. src/marks.py already treats a NaN/inf mark as
+                # "a corrupt monitor quote" and refuses to use it (FIX B,
+                # 2026-08-10); this mirrors that reasoning for the same
+                # failure mode reaching the stop guard instead of the
+                # valuation path. Found by the reviewer: price NaN -> stop
+                # 120.0 applied over a thesis stop of 100.0.
+                if (not isinstance(px, (int, float)) or not math.isfinite(px)
+                        or px <= 0 or float(ov_stop) >= float(px)):
+                    ov_stop = None
             if isinstance(ov_stop, (int, float)) and t.stop is not None:
                 widen = bool(ov.get("widen")) and str(ov.get("reason") or "").strip()
                 if ov_stop > t.stop or widen:
@@ -928,7 +989,17 @@ def check_once(cfg, client) -> int:
         _ov = {}   # absent OR a torn read → ignore ALL overrides this tick (self-heals next tick;
                    # risk_review.py writes atomically via os.replace, so torn reads are rare)
     if _ov:
-        held = apply_overrides(held, _ov)
+        # apply_overrides is called BEFORE this tick's own quotes are fetched
+        # (below), so it has no live price yet -- read the monitor's OWN last
+        # write of quotes.json (its own poll, ~15s old) instead. A missing or
+        # torn read degrades to {}, which the guard inside apply_overrides
+        # treats as "no usable price for any symbol" -- every stop override is
+        # refused (fail closed), never applied on a guess.
+        try:
+            _px = (json.loads(QUOTES.read_text()) or {}).get("prices", {})
+        except Exception:                                       # noqa: BLE001
+            _px = {}        # no quotes -> every stop override is refused (fail closed)
+        held = apply_overrides(held, _ov, _px)
     # ⚠️ NOT a bare `return 0`. An all-cash book still has wakes to watch, and
     # that is exactly when a wake matters most: "tell me if NVDA reaches X so I
     # can re-enter" is registered precisely when the name is NOT held. Returning

@@ -79,6 +79,9 @@ VENV_SELFTESTS=(
     # every number in the investor letter — the one artifact that reaches the
     # account owner as fact.
     "scripts/letter_facts.py"
+    "src/level_rules.py"
+    "src/excursion.py"
+    "src/history.py"
 )
 
 # Scripts that `import moomoo` at module scope — MUST run under system python3.
