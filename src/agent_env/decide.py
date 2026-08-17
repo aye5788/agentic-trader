@@ -272,6 +272,42 @@ def load_owned(path: Path | None = None) -> set | None:
 OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
 
 
+def clear_level(existing: dict, symbol: str) -> dict:
+    """Return a NEW overrides dict with `symbol` removed. Never mutates.
+
+    Clearing an absent symbol is a NO-OP, deliberately: the agent calling this
+    after an exit should not have to know whether a level was ever set, and an
+    error there would train it to skip the call.
+    """
+    sym = str(symbol).strip().upper()
+    return {k: v for k, v in (existing or {}).items() if k != sym}
+
+
+def clear_levels_file(symbol: str, path: Path | None = None) -> dict:
+    """Remove one symbol's levels from overrides.json ATOMICALLY.
+
+    Same os.replace discipline as write_levels: the monitor reads this file every
+    poll and a torn read makes it drop ALL overrides for that tick.
+
+    `path` defaults to the live module-level OVERRIDES, looked up at CALL time
+    (not bound as a default argument) so tests can redirect writes by patching
+    `decide.OVERRIDES` -- same pattern as write_levels.
+    """
+    path = path or OVERRIDES
+    existing = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text())
+        except Exception:                                   # noqa: BLE001
+            existing = {}
+    remaining = clear_level(existing, symbol)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(remaining, indent=2))
+    os.replace(tmp, path)
+    return remaining
+
+
 def write_levels(symbol: str, stop, targets, reason: str, ts: str,
                  path: Path | None = None) -> dict:
     """Merge one symbol's levels into overrides.json ATOMICALLY.
@@ -379,6 +415,18 @@ def _selftest() -> None:
     except ValueError as e:
         assert "at or below stop" in str(e), e
     print("selftest OK: merge_levels expresses a two-target thesis (the levels-mechanism blocker)")
+
+    # A level must be removable: with no expiry, an override outlives its
+    # position and wakes up on re-entry at a price it was never written for.
+    ov = {"AAA": {"stop": 1.0, "reason": "x"}, "BBB": {"stop": 2.0, "reason": "y"}}
+    out = clear_level(ov, "AAA")
+    assert set(out) == {"BBB"}, out
+    assert ov == {"AAA": {"stop": 1.0, "reason": "x"}, "BBB": {"stop": 2.0, "reason": "y"}}, \
+        "clear_level must not mutate its input"
+    assert clear_level(ov, "ZZZ") == ov, "clearing an absent symbol is a no-op, not an error"
+    assert clear_level({}, "AAA") == {}, "clearing from an empty file is a no-op"
+    assert clear_level(ov, "aaa") == clear_level(ov, "AAA"), "symbol match is case-insensitive"
+    print("selftest OK: clear_level removes one symbol, pure, no-op on absent/empty")
 
     # evaluate_enforcement: report what apply_overrides() will ACTUALLY do,
     # mirroring its stricter-only-stop / count-matched-lower-only-target logic

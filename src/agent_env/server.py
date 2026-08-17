@@ -497,6 +497,32 @@ def set_levels(symbol: str, stop: float, targets=0.0,
 
 
 @mcp.tool()
+def clear_levels(symbol: str, reason: str = "") -> str:
+    """Remove YOUR stop/target for a symbol. Do this when you close a position.
+
+    Levels do not expire. An override you leave behind is inert while the name
+    is not held, but it WAKES UP if the name re-enters the book later -- at a
+    price it was never written for. Clearing is part of closing a position, not
+    bookkeeping after it.
+
+    `reason` is required, and is journalled like any other decision. Clearing a
+    symbol with no level on file is a NO-OP, not an error -- you should not need
+    to know whether one was ever set before calling this after an exit.
+    """
+    sym = symbol.strip().upper()
+    if not reason or not reason.strip():
+        return json.dumps({"ok": False,
+                           "error": "reason is required: a level cleared for no "
+                                    "recorded reason cannot be judged later"}, indent=2)
+    remaining = decide.clear_levels_file(sym)
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    entry = decide.decision_entry(sym, "clear_level", reason.strip(), ts)
+    store.append_journal(entry)
+    return json.dumps({"ok": True, "symbol": sym, "cleared": True,
+                       "remaining_symbols": sorted(remaining)}, indent=2)
+
+
+@mcp.tool()
 def record_fills(orders: str, broker_positions: str = "", portfolio: str = "") -> str:
     """Journal the orders you PLACED, so the fill is on the permanent record.
 
@@ -2272,6 +2298,72 @@ def _selftest() -> None:
           "thesis (not-held, zero-weight, no-stop, ownership-indeterminate, "
           "genuinely-held-and-watched) -- and never touched the live "
           "overrides.json or positions.json")
+
+    # --- clear_levels(): the mechanism to remove a level, not only set one.
+    # With no expiry, an override outlives its position and wakes up on
+    # re-entry at a price it was never written for -- this is what closes
+    # that hazard. Redirect decide.OVERRIDES to a scratch file so this NEVER
+    # touches the live overrides.json, and mock store.append_journal so it
+    # NEVER touches the live journal.jsonl either.
+    orig_overrides = decide.OVERRIDES
+    real_append_journal = store.append_journal
+    journalled_clears: list = []
+    store.append_journal = lambda ev: journalled_clears.append(ev)
+    with tempfile.TemporaryDirectory() as td:
+        decide.OVERRIDES = Path(td) / "overrides.json"
+        try:
+            r1 = json.loads(set_levels("AAA", 1.0, None, "test: level one"))
+            assert r1["ok"] is True, r1
+            r2 = json.loads(set_levels("BBB", 2.0, None, "test: level two"))
+            assert r2["ok"] is True, r2
+
+            # refuses an empty reason -- and must not touch the file or journal
+            before = json.loads(decide.OVERRIDES.read_text())
+            r = json.loads(clear_levels("AAA", ""))
+            assert r["ok"] is False, r
+            assert "reason is required" in r["error"], r
+            after = json.loads(decide.OVERRIDES.read_text())
+            assert after == before, "a refused clear must not touch the file"
+            assert journalled_clears == [], "a refused clear must not journal"
+
+            r = json.loads(clear_levels("AAA", "closed the position"))
+            assert r["ok"] is True, r
+            assert r["symbol"] == "AAA" and r["cleared"] is True, r
+            assert r["remaining_symbols"] == ["BBB"], r
+
+            # the OTHER symbol survives intact -- this is the whole point
+            written = json.loads(decide.OVERRIDES.read_text())
+            assert set(written) == {"BBB"}, written
+            assert written["BBB"]["stop"] == 2.0, written
+
+            # journalled through the same decide.decision_entry ->
+            # store.append_journal path record_decision uses, so a clear
+            # appears in research_log's recent_decisions beside every other
+            # decision (memory._reasoned_events reads "agent_decision" events).
+            assert len(journalled_clears) == 1, journalled_clears
+            entry = journalled_clears[0]
+            assert entry["event"] == "agent_decision", entry
+            assert entry["symbol"] == "AAA", entry
+            assert entry["action"] == "clear_level", entry
+            assert entry["reason"] == "closed the position", entry
+
+            # clearing an absent symbol is a no-op, not an error -- the agent
+            # calling this after an exit should not need to know whether a
+            # level was ever set for it.
+            journalled_clears.clear()
+            r = json.loads(clear_levels("ZZZ", "no-op check"))
+            assert r["ok"] is True, r
+            assert r["remaining_symbols"] == ["BBB"], r
+            still = json.loads(decide.OVERRIDES.read_text())
+            assert set(still) == {"BBB"}, still
+        finally:
+            decide.OVERRIDES = orig_overrides
+            store.append_journal = real_append_journal
+    print("selftest OK: clear_levels() removes one symbol atomically, leaves an "
+          "unrelated symbol intact, refuses an empty reason without touching "
+          "the file or journal, is a no-op on an absent symbol, journals "
+          "exactly the way record_decision does, and never touched the live "
+          "overrides.json or journal.jsonl")
 
     # --- check_order(): a SELL must never be refused for a buy-only reason.
     # Proven BY CONSTRUCTION: build a scratch config/state where EVERY buy-
