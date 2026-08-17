@@ -28,6 +28,7 @@ from research_store import store                # noqa: E402
 from agent_env import state                           # noqa: E402  sibling module
 from agent_env import screen                          # noqa: E402  sibling module
 from agent_env import terrain as terrain_mod          # noqa: E402  sibling module
+import history as history_mod                   # noqa: E402
 from agent_env import decide                          # noqa: E402  sibling module
 from agent_env import live as live_mod                # noqa: E402  sibling module
 from agent_env import memory                          # noqa: E402  sibling module
@@ -49,6 +50,7 @@ RH_POSITIONS = REPO / "research_store" / "rh" / "positions.json"
 CLOSES = REPO / "research_store" / "prices" / "closes.parquet"
 HIGHS = REPO / "research_store" / "prices" / "highs.parquet"
 LOWS = REPO / "research_store" / "prices" / "lows.parquet"
+OPENS = REPO / "research_store" / "prices" / "opens.parquet"
 UNIVERSE = REPO / "config" / "universe.csv"
 ETF_UNIVERSE = REPO / "config" / "etf_universe.csv"
 
@@ -333,6 +335,40 @@ def terrain(symbol: str) -> str:
     return json.dumps(terrain_mod.excursions(
         pd.read_parquet(CLOSES), pd.read_parquet(HIGHS), pd.read_parquet(LOWS),
         symbol.strip().upper()), indent=2, default=str)
+
+
+# `days` is clamped to a sane request range, never trusted as-is: a caller
+# asking for 5000 would otherwise load and serialize the whole panel on every
+# call, and 0 or a negative number would silently return no bars at all. This
+# is a payload-shape guard, not a trading rule -- it bounds what history()
+# hands back, not what the agent may do with it.
+HISTORY_DAYS_MIN = 5
+HISTORY_DAYS_MAX = 252
+
+
+@mcp.tool()
+def history(symbol: str, days: int = 60) -> str:
+    """Daily bars and the levels derived from them — where this name has actually traded.
+
+    Use this to decide WHERE a level belongs. `terrain()` tells you how far this
+    name travels in its own volatility; this tells you where it has been, so a
+    stop can sit under a prior low or a base rather than at an arbitrary distance.
+
+    ⚠️ Ends at the last COMPLETED session, not today — today's bar is still
+    forming. Use `quote()` for the live price and combine the two.
+
+    `days` is capped; ask for what you need rather than the maximum.
+    """
+    sym = symbol.strip().upper()
+    try:
+        clamped = max(HISTORY_DAYS_MIN, min(HISTORY_DAYS_MAX, int(days)))
+        result = history_mod.series(
+            pd.read_parquet(OPENS), pd.read_parquet(HIGHS), pd.read_parquet(LOWS),
+            pd.read_parquet(CLOSES), sym, clamped)
+    except Exception as e:      # noqa: BLE001 — never raise, never an empty success
+        return json.dumps({"error": f"could not load price history for {sym}: {e}"},
+                          indent=2)
+    return json.dumps(result, indent=2, default=str)
 
 
 @mcp.tool()
@@ -2390,7 +2426,7 @@ def _selftest() -> None:
 # reviewer: it would be a second actor with write access to a live book.
 READ_ONLY_TOOLS = {
     "ping", "brief", "account", "positions", "halt_status", "mandate_status",
-    "universe", "candidates", "terrain", "quote", "sectors", "leaders",
+    "universe", "candidates", "terrain", "history", "quote", "sectors", "leaders",
     "macro", "macro_calendar", "earnings", "news", "depth",
     "performance", "research_log", "check_order",
 }

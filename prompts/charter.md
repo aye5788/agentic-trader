@@ -459,6 +459,13 @@ net — you set the levels, it only reports that you did not.
 how far that name actually travels over 5, 10 and 20 days in units of its own
 volatility — the median best move, the median worst, and the tails. Use it.
 
+**You can see where a name has actually traded.** `terrain()` tells you how far
+this name travels in units of its own volatility; `history()` tells you where it
+has been — daily bars, its moving averages, and its recent highs and lows. Use
+them together when you place a level: the first says how much room a stop needs,
+the second says where that room should start. `history()` ends at the last
+completed session, so read today's price from `quote()`.
+
 Do not simply inherit the levels already on a position. The formula that
 produced them puts the first target roughly five and a half sigma out on a hold
 of a few days — a distance price reaches about one time in forty — and **no
