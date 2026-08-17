@@ -312,9 +312,9 @@ def terrain(symbol: str) -> str:
 
 
 @mcp.tool()
-def set_levels(symbol: str, stop: float, target: float = 0.0,
+def set_levels(symbol: str, stop: float, targets=0.0,
                reason: str = "") -> str:
-    """Set YOUR stop and take-profit for a position. `reason` is required.
+    """Set YOUR stop and take-profit(s) for a position. `reason` is required.
 
     This WRITES to the override file the monitor merges every poll -- it does
     NOT force the monitor to act on it. scripts/market_monitor.py only ever
@@ -323,17 +323,32 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
     AND that the position is actually owned per the broker snapshot (the
     OWNERSHIP filter) -- a name in tonight's book whose buy has not filled yet
     is invisible to the monitor no matter what levels you set here. Within
-    that set, apply_overrides() is stricter-only: your stop is applied only if
-    it RAISES the thesis's current stop, and your target is applied only if
-    its count matches the thesis's existing targets and it LOWERS every one.
+    that set, your stop is applied only if it RAISES the thesis's current
+    stop, and your targets are applied only if the COUNT matches the thesis's
+    existing targets -- apply_overrides then moves them in EITHER direction,
+    so a raise is applied exactly like a lower.
+
+    `targets` accepts a single number or a list -- pass ALL of a multi-target
+    thesis's targets together. `positions()` shows you the current list; a
+    thesis with two targets requires two here, or the whole set is ignored.
 
     Read the `enforcement` object in the response before assuming a position is
     protected -- `ok: true` only means the write succeeded, not that either
-    level will actually be acted on. Pass target=0 to set a stop with no
+    level will actually be acted on. Pass targets=0 to set a stop with no
     take-profit. Use `terrain()` first so the levels sit where price actually
     goes.
     """
     sym = symbol.strip().upper()
+    # Accept 0/None (no target), one number, or the full list. A thesis with
+    # two targets REQUIRES two here -- the monitor applies a target list only
+    # when the count matches, so a single value on a two-target thesis is
+    # silently ignored. positions() shows you the current list.
+    if targets in (0, 0.0, None, ""):
+        _targets = None
+    elif isinstance(targets, (list, tuple)):
+        _targets = list(targets)
+    else:
+        _targets = [targets]
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     # ⚠️ A STOP THAT CANNOT TRIGGER IS NOT A STOP. Without this, set_levels(sym,
     # stop=0.01) satisfies the `watched: true` flag and clears the
@@ -389,7 +404,11 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
             }, indent=2)
 
     try:
-        merged = decide.write_levels(symbol, stop, target or None, reason, ts)
+        # An empty list must become None (a populated one passes through
+        # intact) -- merge_levels/write_levels treat "no targets supplied"
+        # and "an explicit empty list" identically, but keeping the `or None`
+        # normalisation here matches the prior singular-value contract.
+        merged = decide.write_levels(symbol, stop, _targets or None, reason, ts)
     except ValueError as e:
         return json.dumps({"ok": False, "error": str(e)}, indent=2)
 
@@ -405,7 +424,7 @@ def set_levels(symbol: str, stop: float, target: float = 0.0,
     owned = None if owned_set is None else (sym in owned_set)
 
     enforcement = decide.evaluate_enforcement(
-        stop=merged[sym]["stop"], target=merged[sym].get("target"),
+        stop=merged[sym]["stop"], target=merged[sym].get("targets") or None,
         has_thesis=thesis is not None,
         target_weight=getattr(thesis, "target_weight", None),
         verdict=getattr(thesis, "verdict", "") or "",
@@ -2054,6 +2073,23 @@ def _selftest() -> None:
             r = json.loads(set_levels("MU", 45.0, 55.0, "test: target count mismatch"))
             assert r["enforcement"]["target"]["enforced"] is False, r
             assert "2 target" in r["enforcement"]["target"]["note"], r
+
+            # 4b) THE BLOCKER, FIXED: supply BOTH of the thesis's targets as a
+            # list -> count matches -> enforced. Every live thesis carries two
+            # targets; before this fix a single value was refused every time.
+            r = json.loads(set_levels("MU", 45.0, [65.0, 75.0], "test: full target list"))
+            assert r["ok"] is True, r
+            assert r["enforcement"]["target"]["enforced"] is True, r
+            assert r["written"]["targets"] == [65.0, 75.0], r
+
+            # 4c) targets=[] (an explicit empty list) must normalise to "no
+            # target supplied", exactly like targets=0 -- the `_targets or
+            # None` guard in set_levels() covers a populated list passing
+            # through intact (4b, above) as well as an empty one becoming None.
+            r = json.loads(set_levels("MU", 46.0, [], "test: explicit empty list"))
+            assert r["ok"] is True, r
+            assert r["enforcement"]["target"]["note"] == "no target was set", r
+            assert r["written"]["targets"] == [], r
 
             # 5) ⚠️ A STOP THAT CANNOT TRIGGER IS NOT A STOP. Without this,
             # set_levels(sym, stop=0.01) satisfies `watched: true` and clears the

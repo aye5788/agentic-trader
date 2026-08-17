@@ -87,8 +87,10 @@ decision was already made — by you, earlier.
 `enforcement` object. Read it. `ok: true` means only that the write succeeded;
 `enforcement.stop.enforced: true` is the only evidence the monitor will act. It
 will be **false** — and the position unprotected overnight — whenever the name
-has no thesis in tonight's book, is not yet confirmed owned by the broker, or
-your stop is looser than the one already set.
+has no thesis in tonight's book, is not yet confirmed owned by the broker, your
+stop is looser than the one already set, or the target list you supplied does
+not match the number of targets the thesis carries. `positions()` shows you
+that list; supply all of them.
 
 **And a name outside the configured universe could not be given an enforced stop
 even if you held one** — no thesis, nothing watching. The gate refuses those buys

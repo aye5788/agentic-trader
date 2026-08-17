@@ -20,11 +20,16 @@ LEVEL_TTL_DAYS = 5
 sys.path.insert(0, str(REPO / "src"))
 
 
-def merge_levels(existing: dict, symbol: str, stop, target, reason: str, ts: str) -> dict:
+def merge_levels(existing: dict, symbol: str, stop, targets, reason: str, ts: str) -> dict:
     """Return a NEW overrides dict with `symbol` set. Never mutates `existing`.
 
+    `targets` accepts None, a single number, or a list of numbers -- the list
+    form is the one that matters: every live thesis carries two, and the
+    single form was refused by the monitor every time (apply_overrides only
+    applies a target list when its length matches the thesis's existing one).
+
     Raises ValueError on: a blank reason, a non-finite or non-positive level, or
-    a target at or below the stop (which would be immediately self-triggering).
+    any target at or below the stop (which would be immediately self-triggering).
     """
     if not reason or not str(reason).strip():
         raise ValueError("reason is required: a level nobody can review is a level "
@@ -35,25 +40,33 @@ def merge_levels(existing: dict, symbol: str, stop, target, reason: str, ts: str
         raise ValueError(f"stop {stop!r} is not a number")
     if not math.isfinite(s) or s <= 0:
         raise ValueError(f"stop {stop!r} must be a finite positive price")
-    t = None
-    if target is not None:
+    # `targets` accepts None, a single number, or a list matching the thesis's
+    # target count. The list form is the one that matters: every live thesis
+    # carries two, and the single form was refused by the monitor every time.
+    if targets is None:
+        ts_list = []
+    elif isinstance(targets, (list, tuple)):
+        ts_list = list(targets)
+    else:
+        ts_list = [targets]
+    parsed = []
+    for raw in ts_list:
         try:
-            t = float(target)
+            t = float(raw)
         except (TypeError, ValueError):
-            raise ValueError(f"target {target!r} is not a number")
+            raise ValueError(f"target {raw!r} is not a number")
         if not math.isfinite(t) or t <= 0:
-            raise ValueError(f"target {target!r} must be a finite positive price")
+            raise ValueError(f"target {raw!r} must be a finite positive price")
         if t <= s:
             raise ValueError(f"target {t} is at or below stop {s}; it would trigger "
                              "immediately")
+        parsed.append(t)
     out = {k: dict(v) for k, v in (existing or {}).items()}
     out[str(symbol).strip().upper()] = {
         "stop": s,
-        "target": t,                          # kept for future use; the monitor
-                                               # does NOT read this singular key
-        "targets": [t] if t is not None else [],  # the shape apply_overrides()
-                                                   # in scripts/market_monitor.py
-                                                   # actually reads
+        "target": parsed[0] if parsed else None,   # legacy singular; the monitor
+                                                    # does NOT read this key
+        "targets": parsed,                          # the shape apply_overrides reads
         "reason": str(reason).strip(), "ts": ts,
         # ⚠️ EXPIRY IS MANDATORY. risk_review.read_overrides prunes on
         # `o.get("expires", "9999") >= today`, so an entry written WITHOUT this
@@ -271,9 +284,12 @@ def load_owned(path: Path | None = None) -> set | None:
 OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
 
 
-def write_levels(symbol: str, stop, target, reason: str, ts: str,
+def write_levels(symbol: str, stop, targets, reason: str, ts: str,
                  path: Path | None = None) -> dict:
     """Merge one symbol's levels into overrides.json ATOMICALLY.
+
+    `targets` accepts None, a single number, or a list of numbers -- see
+    merge_levels().
 
     os.replace mirrors scripts/risk_review.py: the monitor reads this file every
     poll and a torn read makes it drop ALL overrides for that tick.
@@ -290,7 +306,7 @@ def write_levels(symbol: str, stop, target, reason: str, ts: str,
             existing = json.loads(path.read_text())
         except Exception:
             existing = {}
-    merged = merge_levels(existing, symbol, stop, target, reason, ts)
+    merged = merge_levels(existing, symbol, stop, targets, reason, ts)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(merged, indent=2))
@@ -356,6 +372,25 @@ def _selftest() -> None:
     out4 = merge_levels({}, "FFF", 5.0, None, "stop only", "t")
     assert out4["FFF"]["targets"] == [], out4["FFF"]
     print("selftest OK: merge_levels writes targets as a list (monitor-consumable shape)")
+
+    # A two-target thesis must be expressible. This is the blocker: every live
+    # thesis has two targets, and set_levels only ever accepted one, so a
+    # target change was refused 100% of the time.
+    out = merge_levels({}, "AAA", 100.0, [140.0, 170.0], "both", "2026-08-17T00:00:00+00:00")
+    assert out["AAA"]["targets"] == [140.0, 170.0], out
+    # a bare number still works for a one-target thesis
+    out = merge_levels({}, "AAA", 100.0, 140.0, "one", "2026-08-17T00:00:00+00:00")
+    assert out["AAA"]["targets"] == [140.0], out
+    # no target at all
+    out = merge_levels({}, "AAA", 100.0, None, "stop only", "2026-08-17T00:00:00+00:00")
+    assert out["AAA"]["targets"] == [], out
+    # EVERY target must clear the stop, not just the first
+    try:
+        merge_levels({}, "AAA", 100.0, [140.0, 90.0], "bad", "2026-08-17T00:00:00+00:00")
+        raise AssertionError("a target below the stop must be refused")
+    except ValueError as e:
+        assert "at or below stop" in str(e), e
+    print("selftest OK: merge_levels expresses a two-target thesis (the levels-mechanism blocker)")
 
     # evaluate_enforcement: report what apply_overrides() will ACTUALLY do,
     # mirroring its stricter-only-stop / count-matched-lower-only-target logic
