@@ -161,7 +161,8 @@ def positions() -> str:
     """
     prod = read_current()
     v = marks.load()
-    out = state.holdings(v, prod.theses if prod else [], _overrides())
+    ov = _overrides()
+    out = state.holdings(v, prod.theses if prod else [], ov)
     # Excursion facts: what the path looked like, not just where it stands.
     # I/O lives here; the arithmetic is pure in src/excursion.py.
     try:
@@ -186,6 +187,20 @@ def positions() -> str:
             if _ent is None:
                 _p["excursion_note"] = ("entry ambiguous (this name was exited and "
                                         "re-entered) — peak not computed")
+    # A level does not expire (2026-08-17) and can outlive the position it was
+    # written for -- clear_levels() is the remedy, but a session that forgets
+    # to call it needs to be able to SEE what it left behind, or a cleared
+    # level is not reliably known to be gone (see docs/superpowers/plans/
+    # 2026-08-17-levels-persistence.md, "the hazard part 3/4 close"). Any
+    # override symbol not in `out` (the held set state.holdings() just built
+    # from the SAME `ov`) is surfaced here, under its own key rather than
+    # folded into a symbol's own record -- there is no held record for it.
+    # Present ONLY when at least one exists, so a clean book (every override
+    # matches a held name) never carries an empty, meaningless key.
+    orphaned = {sym: {"reason": o.get("reason")} for sym, o in (ov or {}).items()
+                if sym not in out}
+    if orphaned:
+        out["levels_without_positions"] = orphaned
     # The staleness banner rides with the HOLDINGS too, not only account(). An
     # agent that reads positions() and never calls account() would otherwise act
     # on a stale book with nothing telling it so.
@@ -483,6 +498,29 @@ def set_levels(symbol: str, stop: float, targets=0.0,
     owned_set = decide.load_owned()
     owned = None if owned_set is None else (sym in owned_set)
 
+    # ⛔ THE REPORT MUST NOT CLAIM ENFORCEMENT THE MONITOR WILL REFUSE.
+    # scripts/market_monitor.py:apply_overrides() (Part 3, 2026-08-17) fails
+    # CLOSED on a stop it has no live price for -- this call used to omit
+    # `price` entirely, which falls back to evaluate_enforcement()'s sentinel
+    # (pre-guard) behaviour and reports `enforced: true` regardless of price.
+    # That is the exact defect this whole project exists to remove: the
+    # advisory layer telling the agent something the enforcement layer does
+    # not do.
+    #
+    # SOURCE: reuse `px`, the SAME in-memory value the ceiling/floor guard
+    # above already read from marks.load() for this call -- not a second read
+    # of research_store/monitor/quotes.json (decide.load_price()), and not a
+    # network call. marks.load()'s own mark-priority rule (src/marks.py)
+    # already prefers that identical monitor quote whenever one is on file,
+    # and only falls back to the snapshot's `last` or `avg_cost` when no live
+    # quote exists -- so `px` is the freshest price already in hand, and a
+    # second, independently-read price here could only ever disagree with the
+    # one the ceiling guard just enforced against, not add information. Pass
+    # it EXPLICITLY (never omitted): an unusable px becomes explicit `None`,
+    # which evaluate_enforcement treats as "asked and unknown" -- fail closed,
+    # exactly like apply_overrides() -- rather than "the caller didn't ask".
+    _enf_price = float(px) if px and float(px) > 0 else None
+
     enforcement = decide.evaluate_enforcement(
         stop=merged[sym]["stop"], target=merged[sym].get("targets") or None,
         has_thesis=thesis is not None,
@@ -491,6 +529,7 @@ def set_levels(symbol: str, stop: float, targets=0.0,
         owned=owned,
         current_stop=getattr(thesis, "stop", None),
         current_targets=list(getattr(thesis, "targets", []) or []) if thesis else None,
+        price=_enf_price,
     )
     return json.dumps({"ok": True, "symbol": sym, "written": merged[sym],
                        "enforcement": enforcement}, indent=2)
@@ -1741,6 +1780,48 @@ def _selftest() -> None:
     print("selftest OK: a stale/undateable snapshot announces itself in BOTH "
           "account() and positions(); a fresh one stays silent")
 
+    # ---- Part 4: a level can outlive its position --------------------------
+    # Levels no longer expire (2026-08-17): an override the agent forgot to
+    # clear stays on file after the position closes, and WAKES UP if the name
+    # re-enters the book later, at a price it was never written for. A
+    # cleared level is only reliable if the agent can see what it left
+    # behind, so positions() must surface any override whose symbol is not
+    # currently held -- under its own key, distinct from a held position's
+    # own record (there is no held record to fold an orphaned one into).
+    # Redirect via `_overrides` itself (never OVERRIDES/the live file) --
+    # same pattern as read_current elsewhere in this selftest.
+    orig_overrides_fn = globals()["_overrides"]
+    _real_load3 = marks.load
+    _fresh_ts = _dt.now(_tz.utc).isoformat()
+    try:
+        marks.load = lambda *a, **k: {
+            "account_value": 1000.0, "ts": _fresh_ts,
+            "positions": {"NVDA": {"qty": 10, "avg_cost": 100.0, "mark": 110.0}}}
+        # NVDA is held; ZOMBIE is not -- an override left behind after an exit.
+        globals()["_overrides"] = lambda: {
+            "NVDA": {"stop": 105.0, "reason": "held, tightened"},
+            "ZOMBIE": {"stop": 50.0, "reason": "stale from a previous holding"}}
+        p = json.loads(positions())
+        assert "levels_without_positions" in p, p
+        assert set(p["levels_without_positions"]) == {"ZOMBIE"}, p
+        assert p["levels_without_positions"]["ZOMBIE"]["reason"] == \
+            "stale from a previous holding", p
+        assert "NVDA" not in p["levels_without_positions"], \
+            "a held symbol's override belongs in its own record, not here"
+
+        # every override corresponds to a held name -> the key is ABSENT, not
+        # present-and-empty: an agent scanning for it should not have to
+        # distinguish "nothing to see" from "the field always exists".
+        globals()["_overrides"] = lambda: {"NVDA": {"stop": 105.0, "reason": "held"}}
+        p2 = json.loads(positions())
+        assert "levels_without_positions" not in p2, p2
+    finally:
+        globals()["_overrides"] = orig_overrides_fn
+        marks.load = _real_load3
+    print("selftest OK: positions() surfaces a level held for a name that is not "
+          "(levels_without_positions: symbol -> stored reason), and omits the "
+          "key entirely when every override matches a held name")
+
     # ---- liquidity: the SOURCE must ride with the number -------------------
     # The floor is $50M of CONSOLIDATED volume, but the only reading was Alpaca
     # IEX -- one venue, a fraction of the tape. Measured live, it put SOC, HTZ,
@@ -2222,6 +2303,59 @@ def _selftest() -> None:
           "stricter-stop, target-count-mismatch, target-lowers) -- never a bare ok:true, "
           "and never touched the live overrides.json")
 
+    # --- Part 4B: set_levels() must not claim enforcement the monitor will
+    # refuse. scripts/market_monitor.py:apply_overrides() (Part 3, 2026-08-17)
+    # fails CLOSED on a stop it has no live price for -- but set_levels()
+    # never passed a price to evaluate_enforcement() at all (the sentinel
+    # default), so it kept answering `enforced: true` regardless. Whenever
+    # marks.load() DOES have a usable price for this symbol, the set-time
+    # ceiling guard above already refuses (ok: false) any stop at or above it
+    # before evaluate_enforcement is ever called -- the two checks share the
+    # same in-memory value by construction and can never disagree there. The
+    # reachable gap is the OTHER case: no usable price at all. marks.py's own
+    # legacy-schema path (a bare {"SYM": <dollars>} row) produces exactly
+    # that -- avg_cost=None, mark=None -- a real, supported degraded state,
+    # not a contrived one. That is what this fixture reproduces.
+    orig_overrides = decide.OVERRIDES
+    orig_rh_positions = decide.RH_POSITIONS
+    orig_read_current = globals()["read_current"]
+    with tempfile.TemporaryDirectory() as td:
+        decide.OVERRIDES = Path(td) / "overrides.json"
+        decide.RH_POSITIONS = Path(td) / "positions.json"
+        try:
+            decide.RH_POSITIONS.write_text(json.dumps(
+                {"positions": {"NVDA": {"qty": 10}}}))
+            th_px = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
+                           targets=[130.0], target_weight=0.1)
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th_px])
+
+            _real_marks_load2 = marks.load
+            # No usable mark AND no avg_cost -- the set-time ceiling guard
+            # (`if px and stop ...`) is skipped entirely since px is falsy, so
+            # nothing else in set_levels refuses this write; the price guard
+            # inside evaluate_enforcement is the only thing left that can
+            # catch it.
+            marks.load = lambda *a, **k: {
+                "account_value": 1000.0,
+                "positions": {"NVDA": {"qty": 10, "avg_cost": None, "mark": None}}}
+            try:
+                r = json.loads(set_levels("NVDA", 108.0, 0.0,
+                                          "test: raises stop, no live price known"))
+                assert r["ok"] is True, r
+                assert r["enforcement"]["stop"]["enforced"] is False, r
+                assert "no live price is currently known" in r["enforcement"]["stop"]["note"], r
+            finally:
+                marks.load = _real_marks_load2
+        finally:
+            decide.OVERRIDES = orig_overrides
+            decide.RH_POSITIONS = orig_rh_positions
+            globals()["read_current"] = orig_read_current
+    print("selftest OK: set_levels() passes its own live-price read through to "
+          "evaluate_enforcement(), so a stop the monitor cannot verify against a "
+          "known price is reported enforced: false -- consistent with "
+          "apply_overrides()'s fail-closed guard, not the pre-guard sentinel "
+          "behaviour")
+
     # --- coverage for the finding this fix closes: set_levels() must consult
     # broker ownership too, not just the thesis, or it falsely claims
     # enforcement for a symbol the monitor never looks at ---
@@ -2231,6 +2365,17 @@ def _selftest() -> None:
     with tempfile.TemporaryDirectory() as td:
         decide.OVERRIDES = Path(td) / "overrides.json"
         decide.RH_POSITIONS = Path(td) / "positions.json"
+        # Stub the MARK snapshot for the whole block (Part 4B wires this
+        # price through to evaluate_enforcement, so an unmocked marks.load()
+        # would read the REAL live positions.json here -- flaky and wrong for
+        # a unit test). Only NVDA needs a real number: it is the only symbol
+        # below whose stop RAISES the thesis's current stop AND reaches the
+        # price-guard branch (cases 6/7/8 all return earlier, on ownership /
+        # weight / missing-stop, before price is ever consulted).
+        _real_marks_load3 = marks.load
+        marks.load = lambda *a, **k: {
+            "account_value": 1000.0,
+            "positions": {"NVDA": {"qty": 10, "mark": 110.0}}}
         try:
             # snapshot only lists NVDA as held -- TSLA is confirmed NOT held.
             decide.RH_POSITIONS.write_text(json.dumps(
@@ -2291,6 +2436,7 @@ def _selftest() -> None:
             assert r["enforcement"]["stop"]["enforced"] is True, r
             assert "could not be verified" in r["enforcement"]["stop"]["note"], r
         finally:
+            marks.load = _real_marks_load3
             decide.OVERRIDES = orig_overrides
             decide.RH_POSITIONS = orig_rh_positions
             globals()["read_current"] = orig_read_current
