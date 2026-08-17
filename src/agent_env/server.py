@@ -429,7 +429,8 @@ def history(symbol: str, days: int = 60) -> str:
 
 
 @mcp.tool()
-def set_levels(symbol: str, stop: float, targets=0.0,
+def set_levels(symbol: str, stop: float,
+               targets: float | list[float] | None = 0.0,
                reason: str = "") -> str:
     """Set YOUR stop and take-profit(s) for a position. `reason` is required.
 
@@ -460,7 +461,25 @@ def set_levels(symbol: str, stop: float, targets=0.0,
     # two targets REQUIRES two here -- the monitor applies a target list only
     # when the count matches, so a single value on a two-target thesis is
     # silently ignored. positions() shows you the current list.
-    if targets in (0, 0.0, None, ""):
+    #
+    # ⚠️ EVERY SPELLING OF "NO TARGET" MUST BE ACCEPTED, NOT JUST THE
+    # NUMERIC ONES. `targets` used to carry no type annotation at all, which
+    # left FastMCP no type to build a real MCP schema from -- it fell back to
+    # advertising `targets` as a plain STRING. A well-behaved client follows
+    # this docstring's own instruction ("Pass targets=0 to set a stop with no
+    # take-profit") and, under a string schema, sends the STRING "0". That
+    # matched none of `(0, 0.0, None, "")` below, fell through to `[targets]`
+    # = `["0"]`, and merge_levels() raised ValueError on a non-positive
+    # target price BEFORE it ever wrote anything -- discarding the STOP too,
+    # which is the real damage: a single malformed target silently vetoed a
+    # protective stop the agent had every intention of setting. The type
+    # annotation above fixes the schema (FastMCP/pydantic now advertise and
+    # coerce number/array/null, so a real MCP client won't send a string at
+    # all); this widened check is defense-in-depth for any caller that still
+    # does -- every stringy/zero/blank spelling degrades to "no target",
+    # never to a malformed one that aborts the whole write.
+    if (targets in (0, 0.0, None, "")
+            or (isinstance(targets, str) and targets.strip() in ("", "0", "0.0"))):
         _targets = None
     elif isinstance(targets, (list, tuple)):
         _targets = list(targets)
@@ -2304,6 +2323,43 @@ def _selftest() -> None:
             assert r["enforcement"]["stop"]["enforced"] is False, r
             assert r["enforcement"]["target"]["enforced"] is False, r
             assert "no thesis" in r["enforcement"]["stop"]["note"], r
+
+            # I6 (final review): `targets` was unannotated, so the generated
+            # MCP schema advertised it as a STRING (checked directly against
+            # list_tools() when this was found) -- under that schema a
+            # well-behaved MCP client sends targets="0" for "no take-profit"
+            # (exactly what the docstring tells it to do), and the string "0"
+            # discarded the STOP write too: merge_levels() raises ValueError
+            # on a non-positive target price before it ever writes anything,
+            # and set_levels()'s except-ValueError branch returns ok:false
+            # with NOTHING written. Every stringy/zero/blank spelling of "no
+            # target" must degrade to None, never reach merge_levels() as a
+            # target at all.
+            for _no_target in ("0", "0.0", 0, 0.0, "", None):
+                r = json.loads(set_levels("ZZZ", 108.0, _no_target,
+                                          f"test: no-target spelling {_no_target!r}"))
+                assert r["ok"] is True, (_no_target, r)
+                assert r["written"]["targets"] == [], (_no_target, r)
+            print("selftest OK: set_levels() treats every stringy/zero/blank "
+                  "spelling of 'no target' identically -- none of them can "
+                  "discard the stop write")
+
+            # ...and the ROOT CAUSE, not just its symptom: the generated MCP
+            # schema itself must not advertise `targets` as a string. An
+            # unannotated parameter left FastMCP no type to build a real
+            # schema from and it fell back to "string" -- this is what
+            # induced a well-behaved client into sending "0" in the first
+            # place.
+            import asyncio                                      # noqa: PLC0415
+            _tools = asyncio.run(mcp.list_tools())
+            _sl_schema = next(t for t in _tools if t.name == "set_levels").inputSchema
+            _tgt_schema = _sl_schema["properties"]["targets"]
+            _tgt_types = ({_tgt_schema["type"]} if "type" in _tgt_schema else
+                          {opt.get("type") for opt in _tgt_schema.get("anyOf", [])})
+            assert "string" not in _tgt_types, _tgt_schema
+            assert {"number", "array", "null"} <= _tgt_types, _tgt_schema
+            print("selftest OK: set_levels()'s MCP schema advertises `targets` as "
+                  "number/array/null, never string")
 
             # broker snapshot: NVDA and MU actually held (qty > 0). Every
             # scenario below that should reach the enforced/not-enforced
