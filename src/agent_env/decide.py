@@ -17,13 +17,26 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
 
-def merge_levels(existing: dict, symbol: str, stop, targets, reason: str, ts: str) -> dict:
+def merge_levels(existing: dict, symbol: str, stop, targets, reason: str, ts: str,
+                 widen: bool = False) -> dict:
     """Return a NEW overrides dict with `symbol` set. Never mutates `existing`.
 
     `targets` accepts None, a single number, or a list of numbers -- the list
     form is the one that matters: every live thesis carries two, and the
     single form was refused by the monitor every time (apply_overrides only
     applies a target list when its length matches the thesis's existing one).
+
+    `widen`: mark this stop as a DELIBERATE loosening. scripts/market_monitor.py:
+    apply_overrides() only ever RAISES a stop -- except when the override
+    carries a truthy `widen` key AND a non-empty `reason`, which is the ONE
+    compliant way to loosen a live stop instead of being forced to close the
+    position outright. `reason` is already mandatory on every write (see
+    above); a widen with no reason is not merely undocumented, it is REFUSED
+    by the monitor and therefore pointless -- apply_overrides checks
+    `bool(ov.get("widen")) and str(ov.get("reason") or "").strip()`.
+    When `widen` is False (the default), the "widen" key is not written into
+    the override AT ALL -- an absent key must keep meaning "not a widen", the
+    same thing apply_overrides() reads it as, never a stray falsy value.
 
     Raises ValueError on: a blank reason, a non-finite or non-positive level, or
     any target at or below the stop (which would be immediately self-triggering).
@@ -59,7 +72,8 @@ def merge_levels(existing: dict, symbol: str, stop, targets, reason: str, ts: st
                              "immediately")
         parsed.append(t)
     out = {k: dict(v) for k, v in (existing or {}).items()}
-    out[str(symbol).strip().upper()] = {
+    sym = str(symbol).strip().upper()
+    out[sym] = {
         "stop": s,
         "target": parsed[0] if parsed else None,   # legacy singular; the monitor
                                                     # does NOT read this key
@@ -74,6 +88,11 @@ def merge_levels(existing: dict, symbol: str, stop, targets, reason: str, ts: st
         # exit, and by apply_overrides refusing a stop at or above the current
         # price. Decision: principal, 2026-08-17.
     }
+    # ONLY written when True -- see the widen paragraph above. Absent means
+    # "not a widen", exactly like apply_overrides()'s own `ov.get("widen")`
+    # default.
+    if widen:
+        out[sym]["widen"] = True
     return out
 
 
@@ -82,7 +101,8 @@ _PRICE_UNSET = object()   # sentinel, distinct from None -- see `price` below.
 
 def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
                          owned, current_stop, current_targets,
-                         verdict: str = "", price=_PRICE_UNSET) -> dict:
+                         verdict: str = "", price=_PRICE_UNSET,
+                         widen: bool = False) -> dict:
     """Report what scripts/market_monitor.py's apply_overrides() will ACTUALLY do
     with this stop/target at the next poll. This does not enforce anything
     itself -- it mirrors the stop/target arithmetic of apply_overrides() AND
@@ -121,6 +141,15 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
         does -- this reports `enforced: false`, never `true`, because a stop
         the monitor will refuse must never be reported as applied. A looser
         stop, or a stop with no known price, is reported not-enforced.
+      - `widen=True` opts a stop OUT of the stricter-only rule -- mirrors
+        apply_overrides()'s own `bool(ov.get("widen")) and reason` check. It
+        is honoured ONLY together with a reason, which is already guaranteed
+        non-blank by the time this is called (merge_levels/write_levels raise
+        ValueError on a blank one before a widen could ever reach here). A
+        widened stop still has to clear the SAME price guard as any other --
+        widen bypasses "must be stricter", never "must be below spot". Without
+        `widen` (the default), a looser stop is reported exactly as before:
+        not enforced, "not stricter" note.
       - target: `target` is not None, every supplied value is a number, and the
         resulting list matches the LENGTH of the thesis's existing targets list
         -- apply_overrides moves targets in EITHER direction (raising a target
@@ -208,7 +237,11 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
                  "unreadable); the monitor FAILS OPEN in that state and watches this "
                  "thesis anyway, but confirm the position is really held")
 
-    if isinstance(stop, (int, float)) and stop > current_stop:
+    raises = isinstance(stop, (int, float)) and stop > current_stop
+    is_widen = isinstance(stop, (int, float)) and bool(widen) and not raises
+    if raises or is_widen:
+        verb = ("raises" if raises else
+                "widens (a deliberate loosening, marked and reasoned)")
         # ⛔ MIRRORS apply_overrides()'s apply-time price guard (Part 3,
         # 2026-08-17). A stop at or above the current price is not a stop --
         # it is breached the instant it is applied, and the monitor sells the
@@ -217,14 +250,16 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
         # cannot verify -- but `enforced` is still `false`, because that much
         # IS known: the monitor requires a known price to apply ANY stop
         # override and fails closed without one, so this one will not be
-        # applied at the next poll either way.
+        # applied at the next poll either way. THIS GUARD APPLIES EQUALLY TO
+        # A WIDEN -- widen opts out of "must be stricter", never "must be
+        # below spot".
         if price is _PRICE_UNSET:
             stop_result = {"enforced": True,
-                           "note": f"raises the thesis's current stop ({current_stop}) -- "
+                           "note": f"{verb} the thesis's current stop ({current_stop}) -- "
                                    "will be applied at the next monitor poll" + unverified}
         elif price is None:
             stop_result = {"enforced": False,
-                           "note": f"raises the thesis's current stop ({current_stop}), but no "
+                           "note": f"{verb} the thesis's current stop ({current_stop}), but no "
                                    "live price is currently known for this symbol -- the monitor "
                                    "requires a known price to apply ANY stop override and fails "
                                    "closed without one, so this will NOT be applied" + unverified}
@@ -239,19 +274,20 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
             # refuses to use it (FIX B, 2026-08-10); this is the same
             # reasoning applied to the price guard instead of valuation.
             stop_result = {"enforced": False,
-                           "note": f"raises the thesis's current stop ({current_stop}), but is at "
+                           "note": f"{verb} the thesis's current stop ({current_stop}), but is at "
                                    f"or above the last known price ({price}) -- the monitor refuses "
                                    "a stop at or above price (it would liquidate the position at "
                                    "the next poll), so this is refused" + unverified}
         else:
             stop_result = {"enforced": True,
-                           "note": f"raises the thesis's current stop ({current_stop}) and is "
+                           "note": f"{verb} the thesis's current stop ({current_stop}) and is "
                                    f"below the last known price ({price}) -- "
                                    "will be applied at the next monitor poll" + unverified}
     else:
         stop_result = {"enforced": False,
                        "note": f"not stricter than the thesis's current stop ({current_stop}) "
-                               "-- the monitor only tightens stops, so this is ignored" + unverified}
+                               "-- the monitor only tightens stops without an explicit, reasoned "
+                               "widen, so this is ignored" + unverified}
 
     if target is None:
         target_result = {"enforced": False, "note": "no target was set"}
@@ -401,11 +437,16 @@ def clear_levels_file(symbol: str, path: Path | None = None) -> dict:
 
 
 def write_levels(symbol: str, stop, targets, reason: str, ts: str,
-                 path: Path | None = None) -> dict:
+                 path: Path | None = None, widen: bool = False) -> dict:
     """Merge one symbol's levels into overrides.json ATOMICALLY.
 
     `targets` accepts None, a single number, or a list of numbers -- see
     merge_levels().
+
+    `widen`: mark this stop as a deliberate loosening -- see merge_levels()'s
+    docstring. `reason` is already mandatory on every write; a widen with no
+    reason is refused by the monitor (apply_overrides requires BOTH) and is
+    therefore pointless to set here.
 
     os.replace mirrors scripts/risk_review.py: the monitor reads this file every
     poll and a torn read makes it drop ALL overrides for that tick.
@@ -422,7 +463,7 @@ def write_levels(symbol: str, stop, targets, reason: str, ts: str,
             existing = json.loads(path.read_text())
         except Exception:
             existing = {}
-    merged = merge_levels(existing, symbol, stop, targets, reason, ts)
+    merged = merge_levels(existing, symbol, stop, targets, reason, ts, widen=widen)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(merged, indent=2))
@@ -507,6 +548,24 @@ def _selftest() -> None:
     except ValueError as e:
         assert "at or below stop" in str(e), e
     print("selftest OK: merge_levels expresses a two-target thesis (the levels-mechanism blocker)")
+
+    # `widen`: scripts/market_monitor.py:apply_overrides() honours a stop
+    # LOOSENING only when the override carries a truthy `widen` AND a
+    # non-empty reason -- deliberate, attributable, never a silent side
+    # effect of a stray number. merge_levels must write that key ONLY when
+    # widen=True, and must NOT write it at all otherwise -- an absent key
+    # must keep meaning "not a widen", not merely a falsy one (apply_overrides
+    # reads `ov.get("widen")`, so both are equivalent to it, but the levels
+    # dict is also read/displayed elsewhere and a stray `"widen": false`
+    # invites the reader to wonder whether it was ever considered).
+    out5 = merge_levels({}, "GGG", 5.0, None, "inside the noise", "t", widen=True)
+    assert out5["GGG"].get("widen") is True, out5
+    out6 = merge_levels({}, "HHH", 5.0, None, "normal tighten", "t")
+    assert "widen" not in out6["HHH"], out6
+    out7 = merge_levels({}, "III", 5.0, None, "normal tighten", "t", widen=False)
+    assert "widen" not in out7["III"], out7
+    print("selftest OK: merge_levels writes widen only when explicitly True, "
+          "never the bare key on False (an absent key means 'not a widen')")
 
     # A level must be removable: with no expiry, an override outlives its
     # position and wakes up on re-entry at a price it was never written for.
@@ -684,6 +743,45 @@ def _selftest() -> None:
           "apply_overrides()'s apply-time price guard -- known price below "
           "the stop enforces, at/above or unknown refuses (fail closed)")
 
+    # ---- WIDEN (levels-mechanism: the agent's route to a real loosening) --
+    # apply_overrides() honours a stop LOOSENING only when the override
+    # carries widen=True AND a reason -- evaluate_enforcement must report
+    # that truthfully, not always say "not stricter" the way it did when the
+    # agent's path had no way to write that key at all.
+
+    # d) widen=True on a stop BELOW the thesis's current stop, with a known
+    #    price the new (lower) stop still sits under -> enforced True.
+    r = evaluate_enforcement(stop=90.0, target=None, has_thesis=True,
+                             target_weight=0.1, owned=True,
+                             current_stop=100.0, current_targets=[130.0],
+                             price=150.0, widen=True)
+    assert r["stop"]["enforced"] is True, r
+
+    # e) the SAME looser stop with widen=False (the default) -> still not
+    #    enforced -- widen must be opt-in, never inferred from the stop alone.
+    r = evaluate_enforcement(stop=90.0, target=None, has_thesis=True,
+                             target_weight=0.1, owned=True,
+                             current_stop=100.0, current_targets=[130.0],
+                             price=150.0)
+    assert r["stop"]["enforced"] is False, r
+
+    # f) widen=True but the price guard still refuses (price at/above the new
+    #    stop) -- widen bypasses the stricter-only rule, never the price guard.
+    r = evaluate_enforcement(stop=160.0, target=None, has_thesis=True,
+                             target_weight=0.1, owned=True,
+                             current_stop=100.0, current_targets=[130.0],
+                             price=150.0, widen=True)
+    assert r["stop"]["enforced"] is False, r
+
+    # g) widen=True with an unknown price -> still fail closed.
+    r = evaluate_enforcement(stop=90.0, target=None, has_thesis=True,
+                             target_weight=0.1, owned=True,
+                             current_stop=100.0, current_targets=[130.0],
+                             price=None, widen=True)
+    assert r["stop"]["enforced"] is False, r
+    print("selftest OK: evaluate_enforcement reports a widen truthfully -- "
+          "opt-in only, and the price guard still gates it either way")
+
     # load_price(): reads the SAME quotes.json shape apply_overrides()'s call
     # site does, redirected to a scratch file so this NEVER touches the live
     # research_store/monitor/quotes.json.
@@ -741,6 +839,21 @@ def _selftest() -> None:
         # meant to stand permissively clear of. 1e12 sits far above every
         # stop this table exercises while still passing isfinite().
         price = c["prices"].get("AAA") if "prices" in c else 1e12
+        # `widen` IS a real evaluate_enforcement() parameter now -- the
+        # agent's route to it (server.py's set_levels() -> decide.write_levels()
+        # -> merge_levels()) exists, so this must exercise the SAME branch
+        # apply_overrides() takes, not skip it. evaluate_enforcement's `widen`
+        # arg means "a widen that WILL be honoured" -- exactly like
+        # apply_overrides()'s own gate, `bool(ov.get("widen")) and
+        # str(ov.get("reason") or "").strip()`, requiring BOTH the flag and a
+        # non-blank reason. Compute it the same way apply_overrides does,
+        # rather than reading `ov["widen"]` alone, so the "widen without a
+        # reason is ignored" case (reason="") correctly produces widen=False
+        # here too -- decide.py's OWN write path (merge_levels) can never
+        # actually construct that combination (reason is mandatory for ANY
+        # write, widen or not), so this mirrors what a caller that already
+        # cleared that bar always passes.
+        widen_flag = bool(ov.get("widen")) and bool(str(ov.get("reason") or "").strip())
         r = evaluate_enforcement(
             stop=ov.get("stop") if isinstance(ov.get("stop"), (int, float))
                  else c["thesis_stop"],
@@ -748,16 +861,8 @@ def _selftest() -> None:
             has_thesis=True, target_weight=0.07, owned=True,
             current_stop=c["thesis_stop"],
             current_targets=list(c["thesis_targets"]),
-            price=price)
-        # `widen` is a real apply_overrides() branch (Task 1's table covers it)
-        # but evaluate_enforcement has no parameter for it, and never needs one:
-        # server.py's set_levels() -- the ONLY real caller -- never writes a
-        # "widen" key (merge_levels/write_levels accept no such argument), so
-        # an agent-written override can never take that branch. Skip the stop
-        # assertion only for the cases that exercise it; every other case
-        # (including both target-direction cases below) is still checked.
-        if "widen" not in ov:
-            assert r["stop"]["enforced"] == c["stop_enforced"], (c["name"], r["stop"])
+            price=price, widen=widen_flag)
+        assert r["stop"]["enforced"] == c["stop_enforced"], (c["name"], r["stop"])
         if ov_targets is not None:
             assert r["target"]["enforced"] == c["target_enforced"], \
                 (c["name"], r["target"])

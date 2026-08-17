@@ -404,17 +404,24 @@ def _selftest() -> None:
     assert "cannot currently BUY what it" in out
     assert "reachable only if the" in out
     assert "in either direction" in out, "level adjustment must not read one-way"
-    # ⚠️ THIS ASSERTION WAS INVERTED ON 2026-08-17, deliberately. It used to pin
-    # "needs saying out loud" -- the charter's old promise that a stop COULD be
-    # loosened when marked deliberately. apply_overrides honours such a widen,
-    # but nothing in the agent's path ever wrote one: set_levels, merge_levels
-    # and write_levels have no widen parameter, so every loosening was silently
-    # ignored. The principal decided the agent will NOT be given the capability,
-    # so the charter now states the limit instead of promising the power. Pin the
-    # LIMIT, or the old fiction can come back unnoticed.
-    assert "never loosened" in out, "the charter must state the stop-loosening limit"
-    assert "needs saying out loud" not in out, \
-        "the charter must not re-promise a loosening the tools cannot express"
+    # ⚠️ THIS ASSERTION WAS INVERTED AGAIN ON 2026-08-17 (levels-mechanism),
+    # deliberately, back to what it pinned before the FIRST inversion the same
+    # day. That earlier inversion pinned "never loosened" because set_levels,
+    # merge_levels and write_levels had no `widen` parameter -- the charter's
+    # old promise that a stop COULD be loosened when marked deliberately was a
+    # fiction the agent's tools could not back up, demonstrated live on MRK:
+    # the agent reasoned a stop from measured terrain, the deterministic
+    # formula stop out-raised it, and apply_overrides()'s stricter-only rule
+    # made the agent's number unreachable with no route to override it. Those
+    # three functions now accept `widen` end to end (decide.py, server.py),
+    # so "never loosened" is a limit that no longer describes the mechanism --
+    # pinning it would be exactly the old fiction, just facing the other way.
+    # Pin the CAPABILITY, or this can flip back unnoticed a third time.
+    assert "loosened, but only when you mark it deliberately" in out, \
+        "the charter must state the widen mechanism now that it exists"
+    assert "widen=True" in out, "the charter must name the actual parameter"
+    assert "never loosened" not in out, \
+        "the charter must not re-promise the OLD limit the tools now contradict"
     assert "NOTHING ACTS ON THEM" in out, "the mandate is advisory; do not reclaim it"
     assert "You are the enforcement" in out
     assert "never\nthe resulting POSITION" in out or "never the resulting POSITION" in out.replace("\n"," ")

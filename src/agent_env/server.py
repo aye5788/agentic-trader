@@ -431,7 +431,7 @@ def history(symbol: str, days: int = 60) -> str:
 @mcp.tool()
 def set_levels(symbol: str, stop: float,
                targets: float | list[float] | None = 0.0,
-               reason: str = "") -> str:
+               reason: str = "", widen: bool = False) -> str:
     """Set YOUR stop and take-profit(s) for a position. `reason` is required.
 
     This WRITES to the override file the monitor merges every poll -- it does
@@ -449,6 +449,18 @@ def set_levels(symbol: str, stop: float,
     `targets` accepts a single number or a list -- pass ALL of a multi-target
     thesis's targets together. `positions()` shows you the current list; a
     thesis with two targets requires two here, or the whole set is ignored.
+
+    `widen=True` is how you LOOSEN a stop deliberately -- the one exception to
+    "stricter only". Use it when an inherited stop sits inside the name's own
+    noise, where it is not protection but a guarantee of being taken out by
+    nothing: `terrain()` and `history()` tell you where that is. It is
+    deliberate, attributable, and recorded -- the monitor honours a widen ONLY
+    together with a `reason` (already required on every call here), so a
+    widen with no reason is not merely undocumented, it is refused and
+    therefore pointless. Widening does NOT relax the price guard below: a stop
+    at or above the current price is still refused regardless of widen --
+    that guard is about arming a breached stop, which widening a level below
+    spot is never about.
 
     Read the `enforcement` object in the response before assuming a position is
     protected -- `ok: true` only means the write succeeded, not that either
@@ -544,7 +556,8 @@ def set_levels(symbol: str, stop: float,
         # intact) -- merge_levels/write_levels treat "no targets supplied"
         # and "an explicit empty list" identically, but keeping the `or None`
         # normalisation here matches the prior singular-value contract.
-        merged = decide.write_levels(symbol, stop, _targets or None, reason, ts)
+        merged = decide.write_levels(symbol, stop, _targets or None, reason, ts,
+                                     widen=bool(widen))
     except ValueError as e:
         return json.dumps({"ok": False, "error": str(e)}, indent=2)
 
@@ -606,6 +619,11 @@ def set_levels(symbol: str, stop: float,
         current_stop=getattr(thesis, "stop", None),
         current_targets=list(getattr(thesis, "targets", []) or []) if thesis else None,
         price=_enf_price,
+        # Read back from `merged[sym]`, not the raw `widen` argument -- that is
+        # exactly what got WRITTEN (merge_levels only sets the key when True),
+        # so the enforcement report can never claim a widen that was not
+        # actually recorded.
+        widen=bool(merged[sym].get("widen")),
     )
     return json.dumps({"ok": True, "symbol": sym, "written": merged[sym],
                        "enforcement": enforcement}, indent=2)
@@ -1761,8 +1779,20 @@ def _selftest() -> None:
     assert ping() == "pong"
     assert mcp is not None
     # FIX 2: no snapshot on disk (marks.load() -> None) must not crash the tools.
+    # ⛔ Redirect `OVERRIDES` (this module's own module-level path, distinct
+    # from decide.OVERRIDES -- positions()'s `_overrides()` reads THIS one
+    # directly) to an empty scratch file for this block, same discipline
+    # every other selftest block in this file already applies to
+    # decide.OVERRIDES. Without it this assertion depends on the LIVE
+    # research_store/monitor/overrides.json being empty -- true in a quiet
+    # repo, false the moment a real session has set a real level, which is
+    # exactly the state a live trading system is in most of the time.
     orig_load = marks.load
     marks.load = lambda: None
+    import tempfile as _tf0                                       # noqa: PLC0415
+    orig_overrides_path = globals()["OVERRIDES"]
+    _td0 = _tf0.TemporaryDirectory()
+    globals()["OVERRIDES"] = Path(_td0.name) / "overrides.json"
     try:
         p = json.loads(positions())
         assert p == {}, p
@@ -1790,6 +1820,8 @@ def _selftest() -> None:
         assert b["mandate"] == {}, b  # empty when no snapshot
     finally:
         marks.load = orig_load
+        globals()["OVERRIDES"] = orig_overrides_path
+        _td0.cleanup()
     print("selftest OK: mcp server boots, ping responds, degrades to JSON without a snapshot")
 
     # ---- a STALE snapshot must announce itself ----------------------------
@@ -1797,6 +1829,15 @@ def _selftest() -> None:
     # comment and surfaced it nowhere, so a session whose snapshot writer had
     # failed planned against YESTERDAY'S holdings with placement allowed. Not
     # zero orders -- confident wrong ones, against positions possibly sold.
+    #
+    # Redirects `OVERRIDES` (this module's own path -- see the FIX 2 block
+    # above) for the whole section: it calls positions() several times below,
+    # including one asserting a bare {} result, which depends on the LIVE
+    # overrides.json being empty unless redirected.
+    import tempfile as _tf1                                       # noqa: PLC0415
+    orig_overrides_path1 = globals()["OVERRIDES"]
+    _td1_holder = _tf1.TemporaryDirectory()
+    globals()["OVERRIDES"] = Path(_td1_holder.name) / "overrides.json"
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     import numpy as _np2
     fresh = (_dt.now(_tz.utc) - _td(hours=2)).isoformat()
@@ -1853,6 +1894,8 @@ def _selftest() -> None:
         assert "STALE" not in json.loads(positions()), "fresh must not cry wolf"
     finally:
         marks.load = _real_load
+        globals()["OVERRIDES"] = orig_overrides_path1
+        _td1_holder.cleanup()
     print("selftest OK: a stale/undateable snapshot announces itself in BOTH "
           "account() and positions(); a fresh one stays silent")
 
@@ -2487,6 +2530,66 @@ def _selftest() -> None:
     print("selftest OK: set_levels() reports actual enforcement (no-thesis, looser-stop, "
           "stricter-stop, target-count-mismatch, target-lowers) -- never a bare ok:true, "
           "and never touched the live overrides.json or journal.jsonl")
+
+    # --- Part 4A2: `widen` -- the agent's route to a DELIBERATE stop
+    # loosening. scripts/market_monitor.py:apply_overrides() already honours
+    # this (widen=True AND a reason); this proves set_levels() can actually
+    # reach that branch, and that the price guard still applies to a widen
+    # exactly as it does to any other stop (below spot, never at/above it).
+    orig_overrides = decide.OVERRIDES
+    orig_rh_positions = decide.RH_POSITIONS
+    orig_quotes = decide.QUOTES
+    orig_read_current = globals()["read_current"]
+    orig_append_journal = store.append_journal
+    store.append_journal = lambda ev: None
+    with tempfile.TemporaryDirectory() as td:
+        decide.OVERRIDES = Path(td) / "overrides.json"
+        decide.RH_POSITIONS = Path(td) / "positions.json"
+        decide.QUOTES = Path(td) / "quotes.json"
+        try:
+            decide.RH_POSITIONS.write_text(json.dumps(
+                {"positions": {"NVDA": {"qty": 10}}}))
+            th_w = Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
+                         targets=[130.0], target_weight=0.1)
+            globals()["read_current"] = lambda: ResearchProduct(as_of="t", theses=[th_w])
+            _real_marks_load_w = marks.load
+            marks.load = lambda *a, **k: {
+                "account_value": 1000.0,
+                "positions": {"NVDA": {"qty": 10, "mark": 110.0}}}
+            decide.QUOTES.write_text(json.dumps({"prices": {"NVDA": 110.0}}))
+            try:
+                # a) a stop BELOW the thesis stop, no widen -> refused by the
+                #    monitor (not stricter), same as before this change.
+                r = json.loads(set_levels("NVDA", 90.0, 0.0, "test: no widen"))
+                assert r["ok"] is True, r
+                assert r["enforcement"]["stop"]["enforced"] is False, r
+                assert r["written"].get("widen") is None, r["written"]
+
+                # b) the SAME loosening, now marked widen=True with a reason,
+                #    and below the live price -> honoured.
+                r = json.loads(set_levels("NVDA", 90.0, 0.0,
+                                          "test: inside the noise", widen=True))
+                assert r["ok"] is True, r
+                assert r["written"]["widen"] is True, r
+                assert r["enforcement"]["stop"]["enforced"] is True, r
+
+                # c) a widen still cannot arm a breached stop -- the ceiling
+                #    guard (at/above the live price) applies regardless of widen.
+                r = json.loads(set_levels("NVDA", 110.0, 0.0,
+                                          "test: widen at spot", widen=True))
+                assert r["ok"] is False, r
+                assert "at or ABOVE the last price" in r["error"], r
+            finally:
+                marks.load = _real_marks_load_w
+        finally:
+            decide.OVERRIDES = orig_overrides
+            decide.RH_POSITIONS = orig_rh_positions
+            decide.QUOTES = orig_quotes
+            globals()["read_current"] = orig_read_current
+            store.append_journal = orig_append_journal
+    print("selftest OK: set_levels(widen=True) reaches the monitor's real "
+          "loosening branch (honoured only with a reason, and never past the "
+          "at-or-above-spot ceiling)")
 
     # --- Part 4B: set_levels() must not claim enforcement the monitor will
     # refuse. scripts/market_monitor.py:apply_overrides() (Part 3, 2026-08-17)
