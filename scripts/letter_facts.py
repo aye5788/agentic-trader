@@ -195,8 +195,17 @@ def main() -> None:
                                 # next run) are plumbing — journaled, never narrated;
                                 # they must not eat letter space. Meaningful PM
                                 # judgment comes through reentry_decisions instead.
+                # ⚠️ `note` IS THE SYSTEM'S OWN REASON AND IT WAS BEING DROPPED.
+                # Every order this system places carries why it was placed
+                # ("exit: dropped out of target book", "rebalance trim to 7%
+                # target weight"). This whitelist omitted it, so facts.json
+                # handed the narrator a motive-free trade list -- and the
+                # letter, obeying "never invent a why", apologised four times
+                # in issue 007 for rationales that were in the journal all
+                # along. Costly, because it reads as evasion to the owner.
                 fills.append({k: f.get(k) for k in
-                              ("symbol", "side", "amount", "status", "avg_price") if k in f})
+                              ("symbol", "side", "amount", "status", "avg_price",
+                               "note") if k in f})
                 if f.get("reason") == "risk_review":
                     risk_actions.append({"symbol": f.get("symbol"), "kind": f.get("side")})
             reentries.extend(e.get("reentry_decisions", []))
@@ -219,6 +228,32 @@ def main() -> None:
                 for a in e.get("applied", []):
                     if a.get("kind") in ("tighten_stop", "lower_tp"):
                         risk_actions.append({"symbol": a.get("symbol"), "kind": a.get("kind")})
+
+    # ---- JOIN THE WHY TO THE WHAT --------------------------------------
+    # fills and agent_decisions arrived as two unrelated lists with no key
+    # between them, so the narrator could not tell that an AMAT decision and an
+    # AMAT fill were ONE story. Issue 007 therefore told AMAT three times --
+    # once from the decisions in the body, once from the fills in the cards,
+    # once more for the churn -- and read as disjointed and repetitive because
+    # it structurally was. Attach each symbol's decisions to its fills; keep
+    # session-level judgement (symbol "PORTFOLIO") separate, since it explains
+    # the week rather than any one trade.
+    by_symbol: dict[str, list] = {}
+    portfolio_decisions = []
+    for d in agent_decisions:
+        raw = str(d.get("symbol") or "").strip()
+        if not raw or raw.upper() == "PORTFOLIO":
+            portfolio_decisions.append(d)
+            continue
+        for sym in raw.split(","):          # one decision can cover a basket,
+            sym = sym.strip()               # e.g. "IWM,XLK,XLE,XLV"
+            if sym:
+                by_symbol.setdefault(sym, []).append(d)
+    for f in fills:
+        matched = by_symbol.get(f.get("symbol"))
+        if matched:
+            f["agent_reasons"] = [{"action": d.get("action"), "reason": d.get("reason")}
+                                  for d in matched]
 
     # Reconcile raw exit_signals into real exits. The intraday monitor emits a
     # fresh signal EVERY tick a name is below its stop and only stops once the
@@ -246,7 +281,22 @@ def main() -> None:
                     "invested": valued["invested"],
                     "cash_pct": round(100 * valued["cash"] / valued["account_value"])
                     if valued["account_value"] else None,
-                    "marked_at": valued["marked_at"]},
+                    "marked_at": valued["marked_at"],
+                    # ⛔ IS THIS A MARKET VALUE OR A COST FIGURE? The letter is
+                    # written on a Sunday, when the book used to fall back to
+                    # cost basis silently (src/marks.py, fixed 2026-08-17) --
+                    # so issue 007 reported a -3.4% week that was really ~+7.9%
+                    # and called it "the market marked down what we still
+                    # hold". Never let that be inferred again: if anything here
+                    # is cost-marked, the letter must say so instead of
+                    # reporting the number as performance.
+                    "priced_at_cost": valued.get("priced_at_cost", []),
+                    "valuation_basis": ("market" if not valued.get("priced_at_cost")
+                                        else "PARTLY COST BASIS — some positions "
+                                             "carry no market price; unrealized "
+                                             "P&L on those is 0.0 by construction, "
+                                             "not by fact. Say so; do not report "
+                                             "these as performance.")},
         "week_pnl": week_pnl,                              # NET of deposits/withdrawals
         "week_pnl_gross": week_pnl_gross,                  # raw value ratio (flow-inclusive)
         "week_pnl_baseline": baseline,                     # null on early issues
@@ -263,6 +313,10 @@ def main() -> None:
         # Narrate FROM these, never invent a motive for a trade. If a fill has
         # no decision here, say what was done and not why.
         "agent_decisions_this_week": agent_decisions,
+        # Session-level judgement (symbol "PORTFOLIO"): explains the WEEK, not
+        # any single trade. Kept apart from the per-fill reasons so the letter
+        # stops narrating one story in two places.
+        "portfolio_decisions_this_week": portfolio_decisions,
         "reentry_decisions_this_week": reentries,
         "risk_actions_this_week": risk_actions,
         "realized": _read_json(RS / "rh" / "realized.json", None),

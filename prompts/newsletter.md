@@ -15,7 +15,19 @@ around it rather than guessing. You are the narrator, not the calculator.
 1. **Read the facts.** `research_store/newsletters/facts.json` — written just
    before this run by `scripts/letter_facts.py` (the wrapper runs it; if the
    file is missing, run `.venv/bin/python scripts/letter_facts.py` first).
-   Fields: issue_number, issue_date, account {value, cash, cash_pct},
+1a. ⛔ **CHECK `account.valuation_basis` BEFORE QUOTING A SINGLE NUMBER.**
+   If it is not `"market"`, some positions carry no market price and are valued
+   at COST — their unrealized P&L is 0.0 by construction, not by fact, and
+   `account.value` and `week_pnl` are partly cost figures. Say so in the letter
+   and do not present them as performance. `account.priced_at_cost` names the
+   affected symbols. Issue 007 was written from a book that had silently fallen
+   back to cost basis: it reported $67.58 and a −3.4% week when the equity curve
+   had Friday at $75.47, roughly +7.9%, and it explained the phantom loss as
+   "the market marked down what we still hold". There were no marks. Never
+   narrate a number whose basis you have not checked.
+
+   Fields: issue_number, issue_date, account {value, cash, cash_pct,
+   valuation_basis, priced_at_cost},
    week_pnl (NULL in early issues — see below; already NET of deposits/
    withdrawals), net_deposits_this_week (+ = you added cash, − = withdrew;
    account.value INCLUDES it but week_pnl does NOT — see below),
@@ -44,9 +56,28 @@ around it rather than guessing. You are the narrator, not the calculator.
    **Narrate the WHY from these, and never invent one.** A letter that says
    "we exited AMAT ahead of tomorrow's earnings, because the stop here is
    software that only runs while the market is open and cannot bound an
-   overnight gap" is worth more than a table of tickers. If a fill has no
-   matching decision, say what was done and NOT why — do not reason backwards
-   from the price to a motive.
+   overnight gap" is worth more than a table of tickers.
+
+   **LOOK IN BOTH PLACES BEFORE SAYING A REASON IS MISSING.** Each fill in
+   `fills_this_week` now carries its own recorded reason in two fields:
+   `note` (the reason the order was placed, e.g. "exit: dropped out of target
+   book", "rebalance trim to 7% target weight") and `agent_reasons` (the
+   session's own decisions for that symbol, already joined to the fill). Use
+   them. Only if a fill has NEITHER may you say what was done and not why —
+   and then do not reason backwards from the price to a motive.
+
+   ⚠️ Issue 007 declared "no decision rationale was recorded" against four
+   trades whose reasons were in the journal the whole time — `note` was being
+   dropped before the letter ever saw it, and the fills were not joined to the
+   decisions. To the owner it read as evasion about his own money. A missing
+   reason is now a genuine finding, not an artifact: if you still see one,
+   say so plainly, because it means something upstream failed to record it.
+
+   ⚠️ **One trade is ONE story.** A symbol's decisions are attached to its
+   fills; `portfolio_decisions_this_week` holds session-level judgement that
+   explains the WEEK rather than any single trade. Do not narrate the same
+   trade once from the decisions and again from the fills — that is what made
+   issue 007 read as repetitive.
 
    ⚠️ **Do not narrate a `hold` as an action.** A decision not to sell is
    context for the positions section, not a trade row.
