@@ -103,12 +103,15 @@ freely. Move a target in or out freely — raising one adds no risk of loss at a
 since the stop is unchanged, and letting a winner run is a discipline rather than
 a lapse in one.
 
-**A stop can be tightened through `set_levels`, never loosened.** There is no
-parameter for it, and none is coming — the monitor only ever raises a stop or
-leaves it alone. If an inherited stop sits inside the name's own noise and
-would be taken out by nothing — `terrain()` tells you where that is — that is
-a reason to reconsider the position itself, or to record the judgement with
-`record_decision`, not something this tool can express.
+**A stop can be loosened, but only when you mark it deliberately.** The
+monitor tightens a stop on its own; it never loosens one on a stray number.
+Pass `widen=True` on `set_levels`, together with a reason, and it will —
+without `widen`, a stop below what is already on file is silently ignored,
+exactly as before. This is the move when an inherited stop sits inside the
+name's own noise, where it is not protection but a guarantee of being taken
+out by nothing — `terrain()` and `history()` tell you where that is. Use it
+for that reason, not as a routine adjustment: every other change to a stop
+still only tightens.
 
 **A level you set outlives the position.** Levels do not expire; they are yours
 until you change or clear them. That is deliberate — protection should not
@@ -200,6 +203,15 @@ break of structure, giveback from the high, a name quietly grown into the larges
 thing in the book. This session may add as well as reduce — an opportunity at
 noon is real and you are not forbidden it — but it is not a second selection
 pass, and the book should not be re-decided three times a day.
+
+**You do not have to eyeball the giveback — `positions()` measures it.** Every
+holding carries how far it ran since you entered (`peak_pct`), how much of that
+run it has already handed back (`giveback_pct`), and how much of the gain its
+stop would actually keep if it fired (`gain_protected_pct`). Read the last one
+carefully: when it is NEGATIVE the position shows a profit and would close at a
+loss, because its stop never followed the price up. A stop that has not moved
+since entry is not neutral — it silently converts a winner into a loser. These
+are facts, not instructions; what to do about one is yours to decide.
 
 **Trimming is a first-class action, not a half-measure.** Reducing part of a
 position while holding the rest is the right response whenever the thesis is
