@@ -133,19 +133,19 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
     held, False = confirmed not held, None = ownership could not be determined
     (mirrors `owned_symbols()` returning None on a torn/absent snapshot).
 
-    `price` is the last known live price for this symbol -- read the SAME
-    research_store/monitor/quotes.json the monitor itself writes (see
-    `load_price()` below), never a stale snapshot. It is a THREE-state
-    argument, deliberately distinguishing "not asked" from "asked and came up
-    empty":
+    `price` is meant to be the last known live price for this symbol -- read
+    the SAME research_store/monitor/quotes.json the monitor itself writes
+    (see `load_price()` below). It is a THREE-state argument, deliberately
+    distinguishing "not asked" from "asked and came up empty":
       - omitted entirely (the `_PRICE_UNSET` sentinel default) -- the caller
-        does not participate in the apply-time price guard at all. This is
-        the current state of server.py's set_levels(), which does not yet
-        pass a price (a known, tracked gap -- apply_overrides() itself is
-        NOT affected: its own live call site always has a real prices dict,
-        so the actual monitor enforcement is unaffected regardless of what
-        this report says). Falls back to the pre-guard behaviour: a stricter
-        stop is reported enforced.
+        does not participate in the apply-time price guard at all. server.py's
+        set_levels() no longer does this: as of commit bffac51 it always
+        passes a price explicitly, and since the fix that wired in
+        `load_price()` (final review, I2) that price IS read from this same
+        quotes.json rather than marks.load()'s mark-or-avg_cost fallback --
+        so this branch is reachable only by a caller that predates the guard
+        entirely, not by the live production call site. Falls back to the
+        pre-guard behaviour: a stricter stop is reported enforced.
       - explicitly `None` -- the caller DID check and no live price is known
         for this symbol right now. Reported `enforced: false`, fail-closed,
         exactly like apply_overrides() would refuse it.
