@@ -155,6 +155,45 @@ check.
 This does not block or retry. It makes the D4 class visible: the agent said it
 did something, and the artifact disagrees.
 
+### C5 — the charter describes the mechanism that exists
+
+`prompts/charter.md` is already correct in intent and matches `apply_overrides`:
+
+> **Adjusting a level is a normal move, in either direction.** Tighten a stop
+> freely. Move a target in or out freely — raising one adds no risk of loss at
+> all, since the stop is unchanged, and letting a winner run is a discipline
+> rather than a lapse in one.
+
+That is exactly the behaviour wanted. The defect is that **it promises a
+capability the mechanism does not provide**: no target can be moved at all
+while `set_levels` takes one and every thesis carries two. The agent is
+instructed that a move is normal and free, attempts it, and receives `ignored`.
+
+Compounding it, the charter enumerates when enforcement comes back false —
+*"no thesis in tonight's book, is not yet confirmed owned by the broker, or
+your stop is looser than the one already set"* — and **omits the target-count
+mismatch**, which is the only refusal an agent actually meets on this book. So
+the refusal it hits is the one case the charter does not explain. An
+unexplained refusal is ambiguity the agent will resolve by inventing a reason,
+which is the failure mode this repo has already documented for the review
+verdict.
+
+Changes:
+
+- Add the count requirement to the enforcement-false list, and state that a
+  target change must supply the thesis's full target list.
+- Once C3 lands, point the agent at the run-up / peak / giveback /
+  protected-gain fields where levels are discussed, so the charter names the
+  evidence the decision should be made on.
+
+**Ordering is part of this change.** C5 ships *with* C1, never before it.
+Describing a capability ahead of its mechanism is precisely what produced this
+defect; doing it again in the other direction would be the same error.
+
+⛔ No literal threshold enters the template. `check_charter_no_literals`
+enforces this and must keep passing — the charter says the agent may move a
+level and what evidence exists to inform it, never where the level should sit.
+
 ## Non-goals
 
 - No threshold, trigger level, or automatic ratchet anywhere in code.
