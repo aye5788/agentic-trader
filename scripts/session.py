@@ -360,31 +360,13 @@ def render_review(rev: dict | None, mode: str) -> str:
     return "\n".join(out) + "\n---\n\n"
 
 
-# ⏳ TEMPORARY (2026-08-17) — ONE-TIME PRINCIPAL INSTRUCTION.
-# A session normally gets the charter and NOTHING else; that is the whole point
-# of the inversion. This is a deliberate, retirable exception: a file the
-# principal writes by hand, appended verbatim to the brief, for a task the
-# standing charter cannot express (here: liquidate the retired ETF sleeve).
-#
-# It is FIRE-ONCE BY CONSTRUCTION — run() renames it to .done the moment the
-# brief is built, BEFORE the agent is spawned, so a crash/retry cannot replay a
-# live instruction to trade. Retire by deleting these lines and the file.
-ONE_TIME = REPO / "research_store" / "ONE_TIME_INSTRUCTION.md"
-
-
 def build_brief(mode: str) -> str:
     """Render the charter for this session. Called AFTER the lock is held."""
     text = charter.render(mandate_mod.load(), strategy.load(), _tool_names())
     stamp = datetime.now(timezone.utc).astimezone()
-    once = ""
-    if ONE_TIME.exists():
-        once = ("\n\n---\n\n# ⚠️ ONE-TIME INSTRUCTION FROM THE PRINCIPAL\n"
-                "This overrides your normal discretion FOR THIS SESSION ONLY, and "
-                "only within the mandate — every guardrail still binds.\n\n"
-                + ONE_TIME.read_text().strip() + "\n")
     return (f"{text}\n\n---\n\n{render_review(last_review(), mode)}"
             f"THIS SESSION: **{mode}**, "
-            f"{stamp.strftime('%A %Y-%m-%d %H:%M %Z')}.\n{once}")
+            f"{stamp.strftime('%A %Y-%m-%d %H:%M %Z')}.\n")
 
 
 # --------------------------------------------------------------------------- #
@@ -463,13 +445,6 @@ def run(mode: str, dry_run: bool = False) -> dict:
         # FACTS AFTER THE LOCK. See the module docstring -- the wait can be
         # fifteen minutes, and a brief built before it is that much out of date.
         brief = build_brief(mode)
-
-        # ⏳ TEMPORARY (2026-08-17): consume the one-time instruction BEFORE the
-        # agent is spawned. Renamed, not deleted, so the instruction survives as
-        # evidence of what was ordered -- but a crash, a retry or the next
-        # scheduled session can never replay an order to trade.
-        if ONE_TIME.exists():
-            ONE_TIME.rename(ONE_TIME.with_suffix(".md.done"))
 
         # snapshot first, then the clock: `finally` keys the integrity check on
         # `started`, so assigning it first left a window where started was set
