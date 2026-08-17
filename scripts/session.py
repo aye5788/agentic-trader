@@ -56,6 +56,7 @@ import snapshot_freshness            # noqa: E402
 
 MODES = ("premarket", "open", "close", "wake")
 LOCK = REPO / "research_store" / "session.lock"
+OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
 
 # The session's own wall-clock ceiling. A hung `claude -p` holds the lock, so
 # every LATER session is blocked behind it -- one wedged process silently ends
@@ -164,6 +165,57 @@ def should_retry(err: str | None) -> bool:
         return False
     low = err.lower()
     return any(s in low for s in _DEAD_SIGNATURES)
+
+
+# --------------------------------------------------------------------------- #
+# level claim vs. artifact
+# --------------------------------------------------------------------------- #
+# Actions whose whole point is to move a level. If one of these is recorded and
+# the override file is byte-identical afterwards, the decision did not bind.
+LEVEL_ACTIONS = ("tighten_stops", "tighten_stop", "set_levels", "lower_tp",
+                 "raise_target", "ratchet_stop")
+
+
+def level_claim_unmet(decisions, overrides_before, overrides_after):
+    """A recorded level change with no matching artifact. Pure. None if fine.
+
+    Does NOT block or retry -- it makes the claim/artifact gap visible, the
+    same way unrecorded_fills catches a claimed fill with no execution.
+    """
+    claimed = [d.get("action") for d in (decisions or [])
+               if d.get("event") == "agent_decision"
+               and str(d.get("action") or "") in LEVEL_ACTIONS]
+    if not claimed:
+        return None
+    if (overrides_before or {}) != (overrides_after or {}):
+        return None
+    return (f"session recorded {sorted(set(claimed))} but "
+            f"research_store/monitor/overrides.json is unchanged — the level "
+            f"decision did not take effect; check the enforcement object "
+            f"set_levels returned")
+
+
+def _read_overrides() -> dict:
+    """Current override file, {} when absent or torn. Never raises."""
+    try:
+        return json.loads(OVERRIDES.read_text())
+    except Exception:                                          # noqa: BLE001
+        return {}
+
+
+def _decisions_since(journal, since_ts: str) -> list:
+    """agent_decision events written at or after `since_ts`. Never raises."""
+    out = []
+    try:
+        for line in journal.read_text().splitlines():
+            if not line.strip():
+                continue
+            e = json.loads(line)
+            if e.get("event") == "agent_decision" and str(e.get("ts") or "") >= since_ts:
+                out.append(e)
+    except Exception:                                          # noqa: BLE001
+        pass
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -425,6 +477,7 @@ def run(mode: str, dry_run: bool = False) -> dict:
     fill_before = snapshot_freshness.latest_fill_ts(
         REPO / "research_store" / "journal.jsonl")
     started = None
+    result = None
     try:
         # ⛔ acquire() RETURNS None ON TIMEOUT -- it does not raise. An earlier
         # form of this guarded `except TimeoutError`, which is dead code: the
@@ -445,6 +498,13 @@ def run(mode: str, dry_run: bool = False) -> dict:
         # FACTS AFTER THE LOCK. See the module docstring -- the wait can be
         # fifteen minutes, and a brief built before it is that much out of date.
         brief = build_brief(mode)
+
+        # Read BEFORE the clock too, same reasoning as `before`/`started` right
+        # below: `finally` keys the level check on `started`, so these are read
+        # here rather than after, or a NameError in the teardown could skip the
+        # tripwire silently the same way an out-of-order `before` once did.
+        ov_before = _read_overrides()
+        ov_started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
         # snapshot first, then the clock: `finally` keys the integrity check on
         # `started`, so assigning it first left a window where started was set
@@ -499,10 +559,17 @@ def run(mode: str, dry_run: bool = False) -> dict:
         # on it, re-read should_retry: a retry re-runs a session that may have
         # already placed orders, so a wrong True here is an order-duplication
         # bug, not a wasted run.
-        return {"ok": ok, "mode": mode, "error": error,
-                "seconds": round(time.time() - started, 1),
-                "retryable": should_retry(error),
-                "output_bytes": len(out or "")}
+        #
+        # Named (not returned inline) so `finally` below can attach
+        # `level_warning` to this SAME dict before it actually returns -- a
+        # `return` statement's value is evaluated before `finally` runs, so a
+        # mutation there still lands, but only if `finally` has a reference to
+        # the object. An inline `return {...}` gives it none.
+        result = {"ok": ok, "mode": mode, "error": error,
+                  "seconds": round(time.time() - started, 1),
+                  "retryable": should_retry(error),
+                  "output_bytes": len(out or "")}
+        return result
 
     except KeyboardInterrupt:
         return {"ok": False, "mode": mode,
@@ -522,6 +589,22 @@ def run(mode: str, dry_run: bool = False) -> dict:
                           f"session: {', '.join(changed)}", file=sys.stderr)
             except Exception as e:      # noqa: BLE001
                 print(f"integrity check failed: {e}", file=sys.stderr)
+            # A recorded level change with no matching artifact -- SNDK/STX/AMD,
+            # 2026-08-12/08-14. Surfaces only; never blocks or retries, and
+            # never touches `ok`/`error`/`retryable` above. Wrapped defensively
+            # even though its helpers already never raise, because nothing here
+            # is allowed to crash a session that has already traded.
+            try:
+                warn = level_claim_unmet(
+                    _decisions_since(REPO / "research_store" / "journal.jsonl",
+                                      ov_started_at),
+                    ov_before, _read_overrides())
+                if warn:
+                    print(f"LEVEL WARNING: {warn}")
+                    if result is not None:
+                        result["level_warning"] = warn
+            except Exception as e:      # noqa: BLE001
+                print(f"level check failed: {e}", file=sys.stderr)
         if fh is not None:
             session_lock.release(fh)
 
@@ -725,6 +808,19 @@ def _selftest() -> None:
         def poll(self):  # noqa: D102
             return 0
     _kill_group(_Dead())
+
+    # ---- A CLAIMED LEVEL CHANGE WITH NO MATCHING ARTIFACT MUST SURFACE -----
+    # A session that RECORDS a level change and leaves overrides.json untouched
+    # has not made one. On 2026-08-12 and 08-14 sessions recorded stop
+    # tightenings on SNDK/STX/AMD; overrides.json never existed, so none took
+    # effect -- and the 08-16 investor letter reported the de-risking as done.
+    d = [{"event": "agent_decision", "action": "tighten_stops", "symbol": "PORTFOLIO"}]
+    assert level_claim_unmet(d, {}, {}) is not None
+    assert "tighten_stops" in level_claim_unmet(d, {}, {})
+    # ...but not when the file actually changed
+    assert level_claim_unmet(d, {}, {"SNDK": {"stop": 1.0}}) is None
+    # ...and not when no level decision was recorded
+    assert level_claim_unmet([{"event": "agent_decision", "action": "hold"}], {}, {}) is None
 
     print("session: OK")
 
