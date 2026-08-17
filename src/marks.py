@@ -12,9 +12,13 @@ prompts/fast_loop.md step 4 and prompts/exit.md):
      "as_of": "YYYY-MM-DD", "ts": "<iso utc>",
      "positions": {"SYM": {"qty": <shares>, "avg_cost": <$>, "last": <$>}, …}}
 
-Mark priority per symbol: monitor quote (15 s during RTH, written by
-market_monitor to research_store/monitor/quotes.json) when newer than the
-snapshot, else the snapshot's `last`, else `avg_cost`.
+Mark priority per symbol: the monitor quote (15 s during RTH, written by
+market_monitor to research_store/monitor/quotes.json), else the snapshot's
+`last`, else `avg_cost`. When BOTH real prices exist the newer one wins — but
+that comparison is only ever between two prices. Cost basis is the last resort
+and never displaces a real trade merely for being older: an old price is a
+price, and its age is reported (`mark_source`, `priced_at_cost`) rather than
+silently swapped for cost. See _selftest case 7.
 
 Legacy schema ({"SYM": <cost dollars>}) is still valued (at cost, qty unknown)
 so an old snapshot degrades gracefully instead of crashing the dashboard.
@@ -54,25 +58,49 @@ def load(snapshot_path: Path = SNAPSHOT) -> dict | None:
         return None
     snap_ts = snap.get("ts") or ""
     mq = _read_json(QUOTES, {})
-    monitor_fresh = bool(mq.get("ts")) and mq["ts"] > snap_ts
-    marks = mq.get("prices", {}) if monitor_fresh else {}
-    marked_at = mq.get("ts") if monitor_fresh else (snap_ts or snap.get("as_of"))
+    quote_ts = str(mq.get("ts") or "")
+    quotes = mq.get("prices") or {}
 
-    positions, invested = {}, 0.0
+    positions, invested, priced_at_cost = {}, 0.0, []
+    used_quote = False
     for sym, p in (snap.get("positions") or {}).items():
         if not isinstance(p, dict):                    # legacy: dollars at cost
             value = float(p or 0)
             positions[sym] = {"qty": None, "avg_cost": None, "mark": None,
+                              "mark_source": "cost",
                               "value": round(value, 2), "pnl": None}
+            priced_at_cost.append(sym)
             invested += value
             continue
         qty = float(p.get("qty") or 0)
         avg = float(p.get("avg_cost") or 0)
         if not math.isfinite(avg):                      # corrupt cost basis
             avg = 0.0
-        mark = marks.get(sym) or p.get("last") or avg
-        mark = float(mark) if mark else 0.0
-        if not math.isfinite(mark):
+        # ⛔ A REAL PRICE ALWAYS BEATS COST BASIS. The freshness comparison
+        # decides only BETWEEN two real prices -- never between a price and
+        # cost. Gating the monitor quote on the SNAPSHOT's timestamp meant that
+        # every valuation taken after the monitor's last tick fell through to
+        # cost: refresh_broker_snapshot runs every session and every Sunday and
+        # writes no `last` of its own, so the quote was always "older" than the
+        # holdings observation and always discarded, leaving avg_cost as the
+        # only candidate. The whole book then marked at cost, unrealized P&L
+        # came out identically 0.0, and the 2026-08-16 letter reported a -3.4%
+        # week that was in fact up ~8% (OPSLOG 2026-08-17). Age is a thing to
+        # REPORT (mark_source / priced_at_cost), never a reason to substitute
+        # cost for a real trade.
+        q = quotes.get(sym)
+        last = p.get("last")
+        if q is not None and (last is None or quote_ts > snap_ts):
+            mark, source = q, "monitor"
+        elif last is not None:
+            mark, source = last, "snapshot"
+        else:
+            mark, source = avg, "cost"
+        try:
+            mark = float(mark)
+        except (TypeError, ValueError):
+            mark, source = avg, "cost"
+        if not math.isfinite(mark) or mark <= 0:
             # FIX B (2026-08-10): a NaN/inf mark (e.g. a corrupt monitor quote)
             # must never reach `value`/`invested`/`account_value`. Python's json
             # module writes a bare NaN and reads it back happily, so an
@@ -84,13 +112,23 @@ def load(snapshot_path: Path = SNAPSHOT) -> dict | None:
             # WRITE one -- fall back exactly like an absent mark would: cost
             # basis (already guaranteed finite above), or 0.0 if that is
             # unusable too.
-            mark = avg
+            mark, source = avg, "cost"
+        used_quote = used_quote or source == "monitor"
+        if source == "cost":
+            priced_at_cost.append(sym)
         value = qty * mark
         cost = qty * avg
         positions[sym] = {"qty": qty, "avg_cost": avg, "mark": round(mark, 4),
+                          "mark_source": source,
                           "value": round(value, 2),
                           "pnl": round(value / cost - 1.0, 4) if cost > 0 else None}
         invested += value
+
+    # The price observation actually used, not the holdings observation. When
+    # nothing was marked from a live quote this is the snapshot's own time --
+    # which, with priced_at_cost non-empty, is the signature of a book valued
+    # at cost rather than at market.
+    marked_at = quote_ts if used_quote else (snap_ts or snap.get("as_of"))
 
     cash = snap.get("cash")
     if cash is not None:
@@ -117,6 +155,11 @@ def load(snapshot_path: Path = SNAPSHOT) -> dict | None:
             "unsettled_funds": (round(float(snap["unsettled_funds"]), 2)
                                 if snap.get("unsettled_funds") is not None else None),
             "marked_at": marked_at, "cash": round(float(cash), 2),
+            # Symbols carrying NO real price, valued at cost basis. Non-empty
+            # means account_value is partly a cost figure, so unrealized P&L on
+            # those names is 0.0 BY CONSTRUCTION rather than by fact. Anything
+            # reporting performance must say so instead of quoting the number.
+            "priced_at_cost": priced_at_cost,
             "positions": positions, "invested": round(invested, 2),
             "account_value": round(account_value, 2)}
 
@@ -187,8 +230,48 @@ def _selftest() -> None:
             assert out["positions"]["AAA"]["mark"] == 10.0, out   # falls to avg_cost
             assert math.isfinite(out["account_value"]), out
 
+            # 7. THE WEEKEND / AFTER-HOURS REGRESSION (found 2026-08-17).
+            #    refresh_broker_snapshot runs every session and every Sunday and
+            #    writes NO `last`, while the monitor only quotes during RTH. So
+            #    any snapshot written after the monitor's final tick is NEWER
+            #    than the only real price on disk -- and the old test discarded
+            #    that price and marked the ENTIRE book at cost. Unrealized P&L
+            #    came out identically 0.0 and the weekly letter reported -3.4%
+            #    on a week that was up ~8%. A last trade is never a worse
+            #    estimate of market value than cost basis; it is merely older,
+            #    and its age must be REPORTED, not silently swapped for cost.
+            _write_snap(last=None, ts="2026-08-17T20:05:00+00:00")   # Sunday refresh
+            QUOTES.write_text(json.dumps({"ts": "2026-08-14T19:59:50+00:00",
+                                          "prices": {"AAA": 12.0}}))  # Friday close
+            out = load(snap_path)
+            assert out["positions"]["AAA"]["mark"] == 12.0, out
+            assert out["positions"]["AAA"]["mark_source"] == "monitor", out
+            assert out["account_value"] == 34.0, out          # 10 cash + 2 x 12
+            assert out["priced_at_cost"] == [], out
+            assert out["marked_at"] == "2026-08-14T19:59:50+00:00", out
+
+            # 8. cost basis is still the last resort when NO price exists at
+            #    all -- but it must ANNOUNCE itself rather than pass as a mark
+            QUOTES.write_text(json.dumps({"ts": "2026-08-14T19:59:50+00:00",
+                                          "prices": {}}))
+            out = load(snap_path)
+            assert out["positions"]["AAA"]["mark_source"] == "cost", out
+            assert out["priced_at_cost"] == ["AAA"], out
+            assert out["marked_at"] == "2026-08-17T20:05:00+00:00", out
+
+            # 9. the original intent is PRESERVED: when the snapshot carries a
+            #    competing price of its own, the newer of the two real prices
+            #    still wins. The freshness test decides between two prices --
+            #    it never decides between a price and cost.
+            _write_snap(last=15.0, ts="2026-08-17T20:05:00+00:00")
+            out = load(snap_path)
+            assert out["positions"]["AAA"]["mark"] == 15.0, out
+            assert out["positions"]["AAA"]["mark_source"] == "snapshot", out
+
         print("selftest OK: marks -- isfinite guard on mark/avg_cost "
-              "(NaN/inf never reaches value/account_value)")
+              "(NaN/inf never reaches value/account_value); a real price always "
+              "beats cost basis regardless of snapshot age, and a cost-marked "
+              "position announces itself in priced_at_cost")
     finally:
         SNAPSHOT, QUOTES = _snap, _quotes
 
