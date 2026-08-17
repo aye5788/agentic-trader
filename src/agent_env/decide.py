@@ -6,6 +6,7 @@ still holds.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import math
 import os
@@ -281,6 +282,22 @@ def load_owned(path: Path | None = None) -> set | None:
     return owned_symbols(snap)
 
 
+def prune_expired(overrides: dict, today: str) -> dict:
+    """Drop overrides whose `expires` date has passed. Pure.
+
+    Mirrors the rule the retired scripts/risk_review.py applied:
+    keep when `expires >= today`, with a "9999" default so an entry written
+    without the key is kept rather than silently discarded.
+    """
+    out = {}
+    for sym, rec in (overrides or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        if str(rec.get("expires", "9999")) >= str(today):
+            out[sym] = rec
+    return out
+
+
 OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
 
 
@@ -306,6 +323,7 @@ def write_levels(symbol: str, stop, targets, reason: str, ts: str,
             existing = json.loads(path.read_text())
         except Exception:
             existing = {}
+    existing = prune_expired(existing, _dt.date.today().isoformat())
     merged = merge_levels(existing, symbol, stop, targets, reason, ts)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
@@ -550,6 +568,19 @@ def _selftest() -> None:
                 (c["name"], r["target"])
     print("selftest OK: evaluate_enforcement agrees with level_rules.CASES "
           "(the shared truth table pinned against apply_overrides())")
+
+    # EXPIRY IS INERT. risk_review was the only pruner and it was retired
+    # 2026-08-13; apply_overrides never reads `expires`. An agent-set level
+    # therefore lives forever, which is exactly what the mandatory `expires`
+    # key was written to prevent.
+    ov = {"AAA": {"stop": 1.0, "expires": "2026-01-01"},
+          "BBB": {"stop": 2.0, "expires": "2099-01-01"},
+          "CCC": {"stop": 3.0}}                      # no key -> never expires
+    kept = prune_expired(ov, "2026-08-17")
+    assert set(kept) == {"BBB", "CCC"}, kept
+    assert kept["BBB"]["stop"] == 2.0, kept
+    print("selftest OK: prune_expired drops expired overrides, keeps un-expired "
+          "and keyless ones")
 
 
 if __name__ == "__main__":
