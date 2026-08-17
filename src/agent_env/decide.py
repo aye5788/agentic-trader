@@ -6,7 +6,6 @@ still holds.
 """
 from __future__ import annotations
 
-import datetime as _dt
 import json
 import math
 import os
@@ -15,9 +14,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 
-# How long an agent-set level keeps arming the live monitor. A level is a
-# judgment about a situation, and situations end -- see _expiry.
-LEVEL_TTL_DAYS = 5
 sys.path.insert(0, str(REPO / "src"))
 
 
@@ -69,25 +65,16 @@ def merge_levels(existing: dict, symbol: str, stop, targets, reason: str, ts: st
                                                     # does NOT read this key
         "targets": parsed,                          # the shape apply_overrides reads
         "reason": str(reason).strip(), "ts": ts,
-        # ⚠️ EXPIRY IS MANDATORY. risk_review.read_overrides prunes on
-        # `o.get("expires", "9999") >= today`, so an entry written WITHOUT this
-        # key never expires -- a stop the agent set once kept arming the live
-        # monitor indefinitely, outliving the position, the thesis and any
-        # reason it was set for. A level is a judgment about a situation, and
-        # situations end; the agent re-states it if it still holds.
-        "expires": _expiry(ts),
+        # NO EXPIRY. A level is the agent's judgement and lasts until the agent
+        # changes or clears it. An earlier design expired levels on a timer,
+        # which meant protection could vanish on a schedule nobody chose; the
+        # pruner that enforced it died with risk_review (2026-08-13) and went
+        # unnoticed. The hazard this creates -- a level outliving its position --
+        # is closed by clear_levels(), by the charter making a clear part of an
+        # exit, and by apply_overrides refusing a stop at or above the current
+        # price. Decision: principal, 2026-08-17.
     }
     return out
-
-
-def _expiry(ts: str, days: int = LEVEL_TTL_DAYS) -> str:
-    """The date this level stops arming the monitor (YYYY-MM-DD)."""
-    from datetime import date, datetime, timedelta      # noqa: PLC0415
-    try:
-        base = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).date()
-    except Exception:                                   # noqa: BLE001
-        base = date.today()
-    return (base + timedelta(days=days)).isoformat()
 
 
 def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
@@ -282,22 +269,6 @@ def load_owned(path: Path | None = None) -> set | None:
     return owned_symbols(snap)
 
 
-def prune_expired(overrides: dict, today: str) -> dict:
-    """Drop overrides whose `expires` date has passed. Pure.
-
-    Mirrors the rule the retired scripts/risk_review.py applied:
-    keep when `expires >= today`, with a "9999" default so an entry written
-    without the key is kept rather than silently discarded.
-    """
-    out = {}
-    for sym, rec in (overrides or {}).items():
-        if not isinstance(rec, dict):
-            continue
-        if str(rec.get("expires", "9999")) >= str(today):
-            out[sym] = rec
-    return out
-
-
 OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
 
 
@@ -323,7 +294,6 @@ def write_levels(symbol: str, stop, targets, reason: str, ts: str,
             existing = json.loads(path.read_text())
         except Exception:
             existing = {}
-    existing = prune_expired(existing, _dt.date.today().isoformat())
     merged = merge_levels(existing, symbol, stop, targets, reason, ts)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
@@ -568,19 +538,6 @@ def _selftest() -> None:
                 (c["name"], r["target"])
     print("selftest OK: evaluate_enforcement agrees with level_rules.CASES "
           "(the shared truth table pinned against apply_overrides())")
-
-    # EXPIRY IS INERT. risk_review was the only pruner and it was retired
-    # 2026-08-13; apply_overrides never reads `expires`. An agent-set level
-    # therefore lives forever, which is exactly what the mandatory `expires`
-    # key was written to prevent.
-    ov = {"AAA": {"stop": 1.0, "expires": "2026-01-01"},
-          "BBB": {"stop": 2.0, "expires": "2099-01-01"},
-          "CCC": {"stop": 3.0}}                      # no key -> never expires
-    kept = prune_expired(ov, "2026-08-17")
-    assert set(kept) == {"BBB", "CCC"}, kept
-    assert kept["BBB"]["stop"] == 2.0, kept
-    print("selftest OK: prune_expired drops expired overrides, keeps un-expired "
-          "and keyless ones")
 
 
 if __name__ == "__main__":

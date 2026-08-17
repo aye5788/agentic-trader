@@ -2186,16 +2186,8 @@ def _selftest() -> None:
             r = json.loads(set_levels("NVDA", 95.0, 110.0, "test: lowers target"))
             assert r["enforcement"]["target"]["enforced"] is True, r
 
-            # EVERY level the agent writes must carry an expiry. risk_review
-            # prunes on `expires >= today` with a "9999" default, so an entry
-            # written without the key armed the live monitor FOREVER -- outliving
-            # the position, the thesis, and the reason it was set for.
             written = json.loads(Path(decide.OVERRIDES).read_text())
             assert "NVDA" in written, written
-            assert written["NVDA"].get("expires"), \
-                "an agent-set level with no expiry never stops arming the monitor"
-            from datetime import date as _date
-            assert written["NVDA"]["expires"] > _date.today().isoformat(), written
         finally:
             decide.OVERRIDES = orig_overrides
             decide.RH_POSITIONS = orig_rh_positions
