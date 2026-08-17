@@ -129,7 +129,7 @@ def render_tools(tool_names) -> str:
         ("ORIENT", ("brief", "positions", "account", "performance",
                     "mandate_status", "halt_status")),
         ("SELECT", ("candidates", "universe", "leaders", "sectors")),
-        ("PRICE", ("quote", "depth", "terrain")),
+        ("PRICE", ("quote", "depth", "terrain", "history")),
         ("EVENTS", ("earnings", "macro_calendar", "macro", "news")),
         ("DECIDE", ("check_order", "set_levels", "record_decision", "announce")),
         ("REMEMBER", ("research_log", "rule_out", "revisit", "open_question",
