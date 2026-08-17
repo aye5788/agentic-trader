@@ -688,6 +688,23 @@ def _write_broker_snapshot(broker_positions, portfolio, ts: str,
         # CLAUDE.md hard rule 1 — one account is tradeable, every other is
         # read-only — makes writing another account's state here a mandate breach.
         expected = _expected_account()
+        # ⛔ A KNOWN IDENTITY MAY NEVER BE REPLACED BY AN UNKNOWN ONE.
+        # _expected_account() reads the identity back OUT of this very file, so
+        # publishing a blank one does not merely lose a field — it makes
+        # `expected` blank on every future write and disarms BOTH branches of
+        # this guard permanently. Nothing repairs it, because each subsequent
+        # write re-reads the blank it wrote. This happened on 2026-08-17 and had
+        # to be restored by hand (as it had been once before, in e49c82b);
+        # restoring the value never fixed the class, because the publisher kept
+        # accepting the blank. Refuse instead — the caller supplies identity,
+        # exactly as it must supply completeness.
+        if expected and not acct:
+            raise ValueError(
+                f"no account number in the broker payload, but this system "
+                f"trades {expected}. Refusing to publish a snapshot whose "
+                f"identity cannot be checked: a blank identity is read back as "
+                f"'no expected account' and would silently disarm this guard "
+                f"for every future write.")
         if expected and acct and acct != expected:
             raise ValueError(
                 f"account mismatch: broker payload is for {acct}, this system "
@@ -1884,6 +1901,18 @@ def _selftest() -> None:
             "total_value": "500", "cash": "5", "account_number": "999999999"}}),
             "wrong account")
         assert "account mismatch" in r["error"], r
+        # BLANK ACCOUNT — the guard's own undoing, and it actually happened on
+        # 2026-08-17. _expected_account() reads the identity back OUT of the
+        # snapshot, so a blank one published here makes `expected` blank on
+        # every subsequent write and this check false FOREVER. Nothing repairs
+        # it, because each write re-reads the blank it wrote. A known identity
+        # may never be replaced by an unknown one.
+        r = _must_reject(good_pos, json.dumps({"data": {
+            "total_value": "500", "cash": "5"}}), "blank account")
+        assert "no account number" in r["error"], r
+        # ...and the guard must still be armed afterwards: the rejected write
+        # must not have leaked a blank identity into the file it protects.
+        assert _expected_account() == "948184924", _expected_account()
         # non-finite portfolio numbers
         for bad_port, why in (
                 ({"total_value": "NaN", "cash": "5", "account_number": "948184924"}, "NaN total"),
@@ -1898,7 +1927,8 @@ def _selftest() -> None:
         print("selftest OK: a bad broker read is REFUSED and the previous snapshot "
               "survives byte-identical (unproven/truncated pagination, empty, "
               "truncated-row, missing qty/cost, "
-              "negative, NaN/inf, duplicate, wrong account); a no-fill refresh works")
+              "negative, NaN/inf, duplicate, wrong AND blank account); a "
+              "no-fill refresh works")
     finally:
         store.append_journal, store.read_journal = _real_ap, _real_rj2
         RH_POSITIONS = _real_rhp
