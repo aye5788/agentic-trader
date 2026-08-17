@@ -185,8 +185,50 @@ def positions() -> str:
             _p.update(excursion.facts(_p.get("avg_cost"), _p.get("mark"),
                                       _p.get("stop"), _series))
             if _ent is None:
-                _p["excursion_note"] = ("entry ambiguous (this name was exited and "
-                                        "re-entered) — peak not computed")
+                # I5 (final review): since abb4338, entry_date() returns the
+                # LATER buy on a genuine re-entry -- a re-entry is no longer a
+                # reason this can be None. What's actually left: the symbol
+                # was never bought, was bought and fully closed with no
+                # re-buy since, or a fill's quantity could not be derived at
+                # all (see src/excursion.py:entry_date's docstring).
+                _p["excursion_note"] = (
+                    "no current holding period could be derived for this "
+                    "symbol (never bought, fully closed with no re-buy "
+                    "since, or a fill whose quantity could not be "
+                    "determined) — peak not computed")
+
+    # I4 (final review): the displayed `stop` may be the agent's OWN override
+    # (state.holdings() reports it whenever one exists) even when the
+    # monitor's own apply-time price guard (apply_overrides(), mirrored here
+    # by decide.evaluate_enforcement) will REFUSE to apply it -- e.g. an
+    # override that raises the thesis's stop but has no live price the
+    # monitor knows about. gain_protected_pct above is computed straight from
+    # this `stop`, so an unenforceable override otherwise produces a
+    # confident, wrong protection figure. Flag the record rather than
+    # restructure state.holdings() -- the arithmetic already exists in
+    # evaluate_enforcement, this just asks it the same question set_levels()
+    # does at write time, now at read time.
+    _by_sym = {t.symbol: t for t in (prod.theses if prod else [])}
+    _owned_set = decide.load_owned()
+    for _sym, _p in out.items():
+        if not isinstance(_p, dict) or not _p.get("set_by_agent") or _p.get("stop") is None:
+            continue
+        _thesis = _by_sym.get(_sym)
+        _owned = None if _owned_set is None else (_sym in _owned_set)
+        _enf = decide.evaluate_enforcement(
+            stop=_p["stop"], target=None,
+            has_thesis=_thesis is not None,
+            target_weight=getattr(_thesis, "target_weight", None),
+            verdict=getattr(_thesis, "verdict", "") or "",
+            owned=_owned,
+            current_stop=_p.get("book_stop"),
+            current_targets=list(getattr(_thesis, "targets", []) or []) if _thesis else None,
+            price=decide.load_price(_sym),
+        )
+        _p["stop_enforced"] = _enf["stop"]["enforced"]
+        if not _enf["stop"]["enforced"]:
+            _p["stop_enforcement_note"] = _enf["stop"]["note"]
+
     # A level does not expire (2026-08-17) and can outlive the position it was
     # written for -- clear_levels() is the remedy, but a session that forgets
     # to call it needs to be able to SEE what it left behind, or a cleared
@@ -1826,6 +1868,60 @@ def _selftest() -> None:
     print("selftest OK: positions() surfaces a level held for a name that is not "
           "(levels_without_positions: symbol -> stored reason), and omits the "
           "key entirely when every override matches a held name")
+
+    # ---- I4 (final review): a displayed stop the monitor will REFUSE must not
+    # read as protection. state.holdings() reports `stop` as the agent's own
+    # override whenever one exists, with no regard for whether apply_overrides()
+    # will actually apply it -- and positions() feeds that same value straight
+    # into excursion.facts()'s gain_protected_pct. An override that RAISES the
+    # thesis stop but has no known live price (the monitor's own quotes.json
+    # carries no entry for this symbol) is exactly what apply_overrides()
+    # refuses fail-closed -- so the displayed stop, and any gain_protected_pct
+    # computed from it, would be confidently wrong. positions() must flag it.
+    import types
+    import tempfile
+    orig_overrides_fn2 = globals()["_overrides"]
+    orig_read_current2 = globals()["read_current"]
+    _real_load4 = marks.load
+    orig_rh_positions2 = decide.RH_POSITIONS
+    orig_quotes2 = decide.QUOTES
+    with tempfile.TemporaryDirectory() as td:
+        decide.RH_POSITIONS = Path(td) / "positions.json"
+        decide.QUOTES = Path(td) / "quotes.json"          # absent -> load_price() is None
+        try:
+            decide.RH_POSITIONS.write_text(json.dumps({"positions": {"NVDA": {"qty": 10}}}))
+            marks.load = lambda *a, **k: {
+                "account_value": 1000.0, "ts": _fresh_ts,
+                "positions": {"NVDA": {"qty": 10, "avg_cost": 100.0, "mark": 110.0}}}
+            th_i4 = types.SimpleNamespace(symbol="NVDA", stop=100.0, targets=[130.0],
+                                          target_weight=0.1, verdict="buy")
+            globals()["read_current"] = lambda: types.SimpleNamespace(
+                as_of="t", theses=[th_i4])
+            # the agent's own override RAISES the thesis stop (100 -> 108) but
+            # the monitor has no live quote for NVDA at all.
+            globals()["_overrides"] = lambda: {
+                "NVDA": {"stop": 108.0, "targets": [], "reason": "tightened"}}
+            p = json.loads(positions())
+            assert p["NVDA"]["stop"] == 108.0, p            # still the displayed value
+            assert p["NVDA"]["stop_enforced"] is False, p
+            assert "no live price is currently known" in p["NVDA"]["stop_enforcement_note"], p
+
+            # the counter-case: same override, but the monitor DOES have a
+            # live quote below the new stop -- must read as enforced, not
+            # flagged, or the note would cry wolf on every protected position.
+            decide.QUOTES.write_text(json.dumps({"prices": {"NVDA": 150.0}}))
+            p2 = json.loads(positions())
+            assert p2["NVDA"]["stop_enforced"] is True, p2
+            assert "stop_enforcement_note" not in p2["NVDA"], p2
+        finally:
+            globals()["_overrides"] = orig_overrides_fn2
+            globals()["read_current"] = orig_read_current2
+            marks.load = _real_load4
+            decide.RH_POSITIONS = orig_rh_positions2
+            decide.QUOTES = orig_quotes2
+    print("selftest OK: positions() flags a displayed stop the monitor's own "
+          "price guard will refuse (stop_enforced: false), and stays silent "
+          "when the monitor would actually apply it")
 
     # ---- liquidity: the SOURCE must ride with the number -------------------
     # The floor is $50M of CONSOLIDATED volume, but the only reading was Alpaca
