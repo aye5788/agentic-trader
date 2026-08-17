@@ -13,6 +13,27 @@ panels) lives in src/agent_env/server.py.
 """
 from __future__ import annotations
 
+import math
+
+
+def _finite_round(v, ndigits: int = 4):
+    """float(v) rounded, or None when v is missing/non-finite.
+
+    A hole in opens/highs/lows at a date where closes has a valid row (the
+    panels are independently-sourced columns, reindexed onto `c`'s index, not
+    guaranteed to align cell-for-cell) would otherwise reach `round(float(nan),
+    4)` -- still a float, still NaN -- and json.dumps() emits it as a bare
+    `NaN` token, which is not valid JSON and poisons every consumer that
+    parses this tool's output. None is the honest value for a bar this
+    module cannot vouch for; the caller can see exactly which field is
+    missing rather than receiving an unparseable response.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return round(f, ndigits) if math.isfinite(f) else None
+
 
 def series(opens, highs, lows, closes, symbol: str, days: int) -> dict:
     """Daily bars (oldest -> newest) and the levels derived from them for `symbol`.
@@ -49,26 +70,26 @@ def series(opens, highs, lows, closes, symbol: str, days: int) -> dict:
     tail_idx = c.index[-n_bars:]
     bars = [{
         "d": ts.date().isoformat() if hasattr(ts, "date") else str(ts)[:10],
-        "o": round(float(o.loc[ts]), 4),
-        "h": round(float(h.loc[ts]), 4),
-        "l": round(float(l.loc[ts]), 4),
-        "c": round(float(c.loc[ts]), 4),
+        "o": _finite_round(o.loc[ts]),
+        "h": _finite_round(h.loc[ts]),
+        "l": _finite_round(l.loc[ts]),
+        "c": _finite_round(c.loc[ts]),
     } for ts in tail_idx]
 
     def _ma(n: int):
         if len(c) < n:
             return None
-        return round(float(c.tail(n).mean()), 4)
+        return _finite_round(c.tail(n).mean())
 
     def _hi(n: int):
         if len(h) < n:
             return None
-        return round(float(h.tail(n).max()), 4)
+        return _finite_round(h.tail(n).max())
 
     def _lo(n: int):
         if len(l) < n:
             return None
-        return round(float(l.tail(n).min()), 4)
+        return _finite_round(l.tail(n).min())
 
     ma20, ma50, ma200 = _ma(20), _ma(50), _ma(200)
     high_20, low_20 = _hi(20), _lo(20)
@@ -132,8 +153,33 @@ def _selftest() -> None:
     # unknown symbol is an error, never an empty success
     assert "error" in series(o, h, l, c, "ZZZ", days=10), "unknown symbol must error"
 
+    # M-f: a HOLE in opens/highs/lows at a date where closes has a valid row
+    # (the panels are independently-sourced columns, not guaranteed to align
+    # cell-for-cell) must degrade that one field to None, never a bare NaN
+    # token that breaks json.dumps()'s output. `c` itself cannot hold a NaN
+    # here (series() dropna()s it before reindexing the others onto it).
+    import json as _json
+    o_holed = o.copy()
+    o_holed.loc[idx[-1], "AAA"] = float("nan")          # last session's open is missing
+    r = series(o_holed, h, l, c, "AAA", days=5)
+    assert r["bars"][-1]["o"] is None, r["bars"][-1]
+    assert r["bars"][-1]["c"] == 159.0, r["bars"][-1]    # the OTHER fields are unaffected
+    assert r["bars"][-2]["o"] is not None, r["bars"][-2]  # only the holed row is None
+    _json.dumps(r)          # must not raise / must not embed a bare NaN token
+    assert "NaN" not in _json.dumps(r), "a bare NaN token leaked into the JSON"
+
+    # the SAME guard covers the derived levels (high_N/low_N/ma_N): an
+    # all-NaN window (every high in the last 20 sessions missing) must
+    # degrade to None too, not a NaN token from an empty-after-dropna max().
+    h_holed = h.copy()
+    h_holed.loc[idx[-20:], "AAA"] = float("nan")
+    r2 = series(o, h_holed, l, c, "AAA", days=5)
+    assert r2["levels"]["high_20"] is None, r2["levels"]
+    _json.dumps(r2)
+
     print("selftest OK: history -- bars oldest->newest, derived levels, "
-          "short history yields None rather than a fabricated average")
+          "short history yields None rather than a fabricated average, and a "
+          "hole in one panel degrades to None rather than a bare NaN token")
 
 
 if __name__ == "__main__":
