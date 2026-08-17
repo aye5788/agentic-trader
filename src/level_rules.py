@@ -74,15 +74,57 @@ CASES = [
      "ov": {"stop": "not-a-number", "targets": "nope", "reason": "junk"},
      "stop_after": 100.0, "targets_after": [130.0],
      "stop_enforced": False, "target_enforced": False},
+
+    # ---- APPLY-TIME PRICE GUARD (added 2026-08-17, Part 3 of the levels-
+    # persistence plan) -- levels no longer expire, so a stop override can
+    # outlive its position and wake up on RE-ENTRY at a price it was never
+    # written for. `prices` is a NEW, OPTIONAL key: cases above omit it, which
+    # means "prices not supplied to apply_overrides for this case" (the
+    # pre-guard arithmetic, exercised with the guard's legacy no-op default).
+    # Cases below supply it to exercise the guard itself.
+    {"name": "override stop at or above the current price is refused",
+     "thesis_stop": 100.0, "thesis_targets": [130.0],
+     "ov": {"stop": 160.0, "reason": "stale from a previous holding"},
+     "prices": {"AAA": 150.0},
+     "stop_after": 100.0, "targets_after": [130.0],
+     "stop_enforced": False, "target_enforced": False},
+
+    {"name": "override stop below the current price still applies",
+     "thesis_stop": 100.0, "thesis_targets": [130.0],
+     "ov": {"stop": 120.0, "reason": "genuine tightening"},
+     "prices": {"AAA": 150.0},
+     "stop_after": 120.0, "targets_after": [130.0],
+     "stop_enforced": True, "target_enforced": False},
+
+    {"name": "unknown price refuses the stop override (fail closed)",
+     "thesis_stop": 100.0, "thesis_targets": [130.0],
+     "ov": {"stop": 120.0, "reason": "tightening with no quote available"},
+     "prices": {},
+     "stop_after": 100.0, "targets_after": [130.0],
+     "stop_enforced": False, "target_enforced": False},
+
+    {"name": "unknown price does NOT block a target change",
+     "thesis_stop": 100.0, "thesis_targets": [130.0],
+     "ov": {"targets": [160.0], "reason": "target with no quote available"},
+     "prices": {},
+     "stop_after": 100.0, "targets_after": [160.0],
+     "stop_enforced": False, "target_enforced": True},
 ]
 
 
 def _selftest() -> None:
     assert CASES, "the table must not be empty"
+    # `prices` is deliberately NOT in this required set -- it is optional.
+    # A case that omits it is not testing the apply-time price guard at all
+    # (both interpreters treat that as "prices not supplied": the guard's
+    # own no-op default, i.e. the pre-guard arithmetic). Only cases that
+    # want to exercise the guard carry a `prices` dict.
     keys = {"name", "thesis_stop", "thesis_targets", "ov", "stop_after",
             "targets_after", "stop_enforced", "target_enforced"}
     for c in CASES:
         assert keys <= set(c), (c.get("name"), keys - set(c))
+        if "prices" in c:
+            assert isinstance(c["prices"], dict), (c["name"], "prices must be a dict")
     names = [c["name"] for c in CASES]
     assert len(names) == len(set(names)), "case names must be unique"
     print("selftest OK: level_rules -- shared enforcement table is well-formed")

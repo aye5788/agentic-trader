@@ -77,9 +77,12 @@ def merge_levels(existing: dict, symbol: str, stop, targets, reason: str, ts: st
     return out
 
 
+_PRICE_UNSET = object()   # sentinel, distinct from None -- see `price` below.
+
+
 def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
                          owned, current_stop, current_targets,
-                         verdict: str = "") -> dict:
+                         verdict: str = "", price=_PRICE_UNSET) -> dict:
     """Report what scripts/market_monitor.py's apply_overrides() will ACTUALLY do
     with this stop/target at the next poll. This does not enforce anything
     itself -- it mirrors the stop/target arithmetic of apply_overrides() AND
@@ -109,8 +112,15 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
         OPEN and does not apply this filter -- watching proceeds as if owned,
         and the note says so explicitly rather than silently claiming a clean
         `enforced: true`.
-      - stop: the new stop RAISES the thesis's current stop. A looser stop is
-        silently ignored.
+      - stop: the new stop RAISES the thesis's current stop, AND is BELOW a
+        known live price. `price` is scripts/market_monitor.py:apply_overrides()'s
+        own price guard (Part 3, 2026-08-17) mirrored here: a stop at or above
+        the current price is not a stop -- it is breached the instant it is
+        applied, and the monitor sells the whole position at market within one
+        poll. `price=None` (unknown) FAILS CLOSED exactly like the monitor
+        does -- this reports `enforced: false`, never `true`, because a stop
+        the monitor will refuse must never be reported as applied. A looser
+        stop, or a stop with no known price, is reported not-enforced.
       - target: `target` is not None, every supplied value is a number, and the
         resulting list matches the LENGTH of the thesis's existing targets list
         -- apply_overrides moves targets in EITHER direction (raising a target
@@ -122,6 +132,25 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
     [] when `has_thesis` is False). `owned` is a tri-state: True = confirmed
     held, False = confirmed not held, None = ownership could not be determined
     (mirrors `owned_symbols()` returning None on a torn/absent snapshot).
+
+    `price` is the last known live price for this symbol -- read the SAME
+    research_store/monitor/quotes.json the monitor itself writes (see
+    `load_price()` below), never a stale snapshot. It is a THREE-state
+    argument, deliberately distinguishing "not asked" from "asked and came up
+    empty":
+      - omitted entirely (the `_PRICE_UNSET` sentinel default) -- the caller
+        does not participate in the apply-time price guard at all. This is
+        the current state of server.py's set_levels(), which does not yet
+        pass a price (a known, tracked gap -- apply_overrides() itself is
+        NOT affected: its own live call site always has a real prices dict,
+        so the actual monitor enforcement is unaffected regardless of what
+        this report says). Falls back to the pre-guard behaviour: a stricter
+        stop is reported enforced.
+      - explicitly `None` -- the caller DID check and no live price is known
+        for this symbol right now. Reported `enforced: false`, fail-closed,
+        exactly like apply_overrides() would refuse it.
+      - a positive number -- the last known live price. Reported enforced iff
+        the new stop sits below it.
     """
     if not has_thesis:
         note = "no thesis for this symbol -- the monitor is not watching it at all"
@@ -180,9 +209,36 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
                  "thesis anyway, but confirm the position is really held")
 
     if isinstance(stop, (int, float)) and stop > current_stop:
-        stop_result = {"enforced": True,
-                       "note": f"raises the thesis's current stop ({current_stop}) -- "
-                               "will be applied at the next monitor poll" + unverified}
+        # ⛔ MIRRORS apply_overrides()'s apply-time price guard (Part 3,
+        # 2026-08-17). A stop at or above the current price is not a stop --
+        # it is breached the instant it is applied, and the monitor sells the
+        # whole position at market within one poll. With no known price, the
+        # note says so plainly rather than asserting a price relationship it
+        # cannot verify -- but `enforced` is still `false`, because that much
+        # IS known: the monitor requires a known price to apply ANY stop
+        # override and fails closed without one, so this one will not be
+        # applied at the next poll either way.
+        if price is _PRICE_UNSET:
+            stop_result = {"enforced": True,
+                           "note": f"raises the thesis's current stop ({current_stop}) -- "
+                                   "will be applied at the next monitor poll" + unverified}
+        elif price is None:
+            stop_result = {"enforced": False,
+                           "note": f"raises the thesis's current stop ({current_stop}), but no "
+                                   "live price is currently known for this symbol -- the monitor "
+                                   "requires a known price to apply ANY stop override and fails "
+                                   "closed without one, so this will NOT be applied" + unverified}
+        elif not isinstance(price, (int, float)) or price <= 0 or float(stop) >= float(price):
+            stop_result = {"enforced": False,
+                           "note": f"raises the thesis's current stop ({current_stop}), but is at "
+                                   f"or above the last known price ({price}) -- the monitor refuses "
+                                   "a stop at or above price (it would liquidate the position at "
+                                   "the next poll), so this is refused" + unverified}
+        else:
+            stop_result = {"enforced": True,
+                           "note": f"raises the thesis's current stop ({current_stop}) and is "
+                                   f"below the last known price ({price}) -- "
+                                   "will be applied at the next monitor poll" + unverified}
     else:
         stop_result = {"enforced": False,
                        "note": f"not stricter than the thesis's current stop ({current_stop}) "
@@ -270,6 +326,33 @@ def load_owned(path: Path | None = None) -> set | None:
 
 
 OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
+QUOTES = REPO / "research_store" / "monitor" / "quotes.json"
+
+
+def load_price(symbol: str, path: Path | None = None) -> float | None:
+    """Last known live price for `symbol`, from the monitor's own quotes.json.
+
+    Reads the SAME file scripts/market_monitor.py writes every ~15s during RTH
+    and the SAME file its apply_overrides() call site reads (research_store/
+    monitor/quotes.json, shape `{"prices": {SYM: px}}`) -- so a report built
+    from this can never claim a price the monitor itself doesn't have.
+
+    `path` defaults to the live module-level QUOTES, looked up at CALL time
+    (not bound as a default argument) so tests can redirect reads by patching
+    `decide.QUOTES` -- same pattern as `load_owned()`. Degrades to None on any
+    missing/torn/malformed file, or when the symbol has no entry -- "unknown"
+    is the only safe reading of a price this function cannot vouch for, and
+    evaluate_enforcement's price guard fails closed on exactly that.
+    """
+    path = path or QUOTES
+    sym = str(symbol).strip().upper()
+    try:
+        data = json.loads(path.read_text()) if path.exists() else None
+    except Exception:
+        data = None
+    prices = data.get("prices") if isinstance(data, dict) else None
+    px = prices.get(sym) if isinstance(prices, dict) else None
+    return float(px) if isinstance(px, (int, float)) and px > 0 else None
 
 
 def clear_level(existing: dict, symbol: str) -> dict:
@@ -448,9 +531,13 @@ def _selftest() -> None:
     # reported enforced=False for four live positions until the verdict clause
     # was added, and the charter tells the agent that flag is the only proof a
     # stop is real.
+    # price=150.0 is a permissive stand-in (above the stop being tested) so
+    # this scenario isolates the property it names (the verdict clause) --
+    # not the separate price guard, which has its own scenarios below.
     r = evaluate_enforcement(stop=108.0, target=118.0, has_thesis=True,
                              target_weight=0.0, verdict="hold", owned=True,
-                             current_stop=100.0, current_targets=[120.0, 140.0])
+                             current_stop=100.0, current_targets=[120.0, 140.0],
+                             price=150.0)
     assert r["stop"]["enforced"] is True, r
     # ...and an R:R-dropped thesis (weight 0, verdict "avoid") is NOT watched
     r = evaluate_enforcement(stop=108.0, target=118.0, has_thesis=True,
@@ -464,10 +551,13 @@ def _selftest() -> None:
     assert r["stop"]["enforced"] is False, r
     assert "100.0" in r["stop"]["note"], r
 
-    # 3) stop STRICTER (higher) than the thesis's current stop -> enforced.
+    # 3) stop STRICTER (higher) than the thesis's current stop -> enforced,
+    #    given a known price below the new stop (see the price-guard block
+    #    below for the property this scenario deliberately does not test).
     r = evaluate_enforcement(stop=108.0, target=None, has_thesis=True,
                              target_weight=0.1, owned=True,
-                             current_stop=100.0, current_targets=[120.0])
+                             current_stop=100.0, current_targets=[120.0],
+                             price=150.0)
     assert r["stop"]["enforced"] is True, r
 
     # 4) target count MISMATCHES the thesis's existing targets -> not enforced.
@@ -536,13 +626,76 @@ def _selftest() -> None:
     #    ownership was never confirmed, not silently claim a clean result.
     r = evaluate_enforcement(stop=108.0, target=None, has_thesis=True,
                              target_weight=0.1, owned=None,
-                             current_stop=100.0, current_targets=[120.0])
+                             current_stop=100.0, current_targets=[120.0],
+                             price=150.0)
     assert r["stop"]["enforced"] is True, r
     assert "could not be verified" in r["stop"]["note"], r
     print("selftest OK: evaluate_enforcement also mirrors the held-set "
           "construction (book filter: target_weight>0 and stop; ownership "
           "filter: not-held vs indeterminate-fails-open) -- not just the "
           "stop/target arithmetic")
+
+    # ---- APPLY-TIME PRICE GUARD (Part 3, 2026-08-17) ----------------------
+    # decide.py must never claim `enforced: true` for a stop
+    # scripts/market_monitor.py:apply_overrides() will actually refuse -- a
+    # stale override that outlives its position and wakes on re-entry can sit
+    # ABOVE the new price, and apply_overrides() now refuses exactly that
+    # (and refuses ANY stop override with no known price at all, fail closed).
+    # This block is the required new decide selftest case for that guard.
+
+    # a) known price BELOW the new stop -> enforced, note names the price.
+    r = evaluate_enforcement(stop=120.0, target=None, has_thesis=True,
+                             target_weight=0.1, owned=True,
+                             current_stop=100.0, current_targets=[130.0],
+                             price=150.0)
+    assert r["stop"]["enforced"] is True, r
+    assert "150.0" in r["stop"]["note"], r
+
+    # b) known price AT OR ABOVE the new stop -> refused, note names the
+    #    price it compared against -- this is the exact re-entry hazard
+    #    (a stale stop from a previous, higher-priced holding).
+    r = evaluate_enforcement(stop=160.0, target=None, has_thesis=True,
+                             target_weight=0.1, owned=True,
+                             current_stop=100.0, current_targets=[130.0],
+                             price=150.0)
+    assert r["stop"]["enforced"] is False, r
+    assert "150.0" in r["stop"]["note"], r
+    assert "at or above" in r["stop"]["note"], r
+
+    # c) price UNKNOWN (no live quote for this symbol) -> refused, fail
+    #    closed like apply_overrides() -- and the note says the price is
+    #    unknown rather than asserting a comparison it cannot make.
+    r = evaluate_enforcement(stop=120.0, target=None, has_thesis=True,
+                             target_weight=0.1, owned=True,
+                             current_stop=100.0, current_targets=[130.0],
+                             price=None)
+    assert r["stop"]["enforced"] is False, r
+    assert "no live price is currently known" in r["stop"]["note"], r
+    print("selftest OK: evaluate_enforcement's stop guard mirrors "
+          "apply_overrides()'s apply-time price guard -- known price below "
+          "the stop enforces, at/above or unknown refuses (fail closed)")
+
+    # load_price(): reads the SAME quotes.json shape apply_overrides()'s call
+    # site does, redirected to a scratch file so this NEVER touches the live
+    # research_store/monitor/quotes.json.
+    import tempfile as _tf                                      # noqa: PLC0415
+    global QUOTES
+    _orig_quotes = QUOTES
+    with _tf.TemporaryDirectory() as _td:
+        QUOTES = Path(_td) / "quotes.json"
+        try:
+            assert load_price("AAA") is None, "absent file -> unknown"
+            QUOTES.write_text(json.dumps({"prices": {"AAA": 150.0, "BBB": 0.0}}))
+            assert load_price("AAA") == 150.0
+            assert load_price("aaa") == 150.0, "case-insensitive"
+            assert load_price("BBB") is None, "a non-positive price is not usable"
+            assert load_price("ZZZ") is None, "symbol with no entry -> unknown"
+            QUOTES.write_text("{not json")
+            assert load_price("AAA") is None, "torn read -> unknown, not a crash"
+        finally:
+            QUOTES = _orig_quotes
+    print("selftest OK: load_price reads quotes.json (case-insensitive, "
+          "non-positive/absent/torn -> None, never raises)")
 
     # decision_entry: every decision must carry a reason (pure builder for
     # journal events)
@@ -565,13 +718,23 @@ def _selftest() -> None:
     for c in level_rules.CASES:
         ov = c["ov"]
         ov_targets = ov.get("targets")
+        # Cases carrying a `prices` key are exercising apply_overrides()'s
+        # price guard, and use "AAA" as the held symbol (same as this
+        # module's and market_monitor's own truth-table harnesses) -- look
+        # up that price directly. Cases WITHOUT `prices` are not testing the
+        # guard at all (see level_rules.py's own doc comment on the key), so
+        # a permissive stand-in keeps them isolating whatever property they
+        # actually name, exactly as market_monitor's apply_overrides() also
+        # takes prices=None (its own no-op default) for those same cases.
+        price = c["prices"].get("AAA") if "prices" in c else float("inf")
         r = evaluate_enforcement(
             stop=ov.get("stop") if isinstance(ov.get("stop"), (int, float))
                  else c["thesis_stop"],
             target=ov_targets,
             has_thesis=True, target_weight=0.07, owned=True,
             current_stop=c["thesis_stop"],
-            current_targets=list(c["thesis_targets"]))
+            current_targets=list(c["thesis_targets"]),
+            price=price)
         # `widen` is a real apply_overrides() branch (Task 1's table covers it)
         # but evaluate_enforcement has no parameter for it, and never needs one:
         # server.py's set_levels() -- the ONLY real caller -- never writes a
