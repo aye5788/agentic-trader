@@ -110,10 +110,12 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
         `enforced: true`.
       - stop: the new stop RAISES the thesis's current stop. A looser stop is
         silently ignored.
-      - target: `target` is not None and the resulting one-element list
-        matches the LENGTH of the thesis's existing targets list (only ever
-        true for a thesis with exactly one target) AND lowers it. Any count
-        mismatch is silently ignored.
+      - target: `target` is not None, every supplied value is a number, and the
+        resulting list matches the LENGTH of the thesis's existing targets list
+        -- apply_overrides moves targets in EITHER direction (raising a target
+        adds no risk of loss, since the stop is unchanged), so a raise is
+        applied exactly like a lower. Any count mismatch, or a list identical
+        to the current targets, is ignored.
 
     `current_stop`/`current_targets` are the thesis's own stop/targets (None /
     [] when `has_thesis` is False). `owned` is a tri-state: True = confirmed
@@ -189,18 +191,30 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
         target_result = {"enforced": False, "note": "no target was set"}
     else:
         cur = list(current_targets or [])
-        if len(cur) != 1:
+        new = list(target) if isinstance(target, (list, tuple)) else [target]
+        if not all(isinstance(o, (int, float)) for o in new):
             target_result = {"enforced": False,
-                             "note": f"thesis has {len(cur)} target(s); a single target here "
-                                     "only matches a thesis with exactly 1 target -- ignored" + unverified}
-        elif target < cur[0]:
-            target_result = {"enforced": True,
-                             "note": f"lowers the thesis's current target ({cur[0]}) -- "
-                                     "will be applied at the next monitor poll" + unverified}
+                             "note": "targets must all be numbers -- ignored" + unverified}
+        elif len(new) != len(cur):
+            # THE refusal an agent on this book actually meets: every live
+            # thesis carries two targets. Name the expected count so the agent
+            # can retry correctly instead of inferring it.
+            target_result = {"enforced": False,
+                             "note": f"this thesis has {len(cur)} target(s) and you supplied "
+                                     f"{len(new)}; the monitor applies a target list only when "
+                                     f"the count matches -- supply all {len(cur)}" + unverified}
+        elif [float(o) for o in new] == [float(o) for o in cur]:
+            target_result = {"enforced": False,
+                             "note": "identical to the thesis's current targets -- "
+                                     "nothing to change" + unverified}
         else:
-            target_result = {"enforced": False,
-                             "note": f"not lower than the thesis's current target ({cur[0]}) "
-                                     "-- the monitor only lowers targets, so this is ignored" + unverified}
+            # EITHER DIRECTION. apply_overrides permits raising as well as
+            # lowering: raising adds no risk of loss, since the stop is
+            # unchanged. Reporting otherwise is why no take-profit in this book
+            # has ever been reached.
+            target_result = {"enforced": True,
+                             "note": f"replaces the thesis's targets ({cur}) -- "
+                                     "will be applied at the next monitor poll" + unverified}
 
     return {"stop": stop_result, "target": target_result}
 
@@ -398,11 +412,20 @@ def _selftest() -> None:
                              current_stop=100.0, current_targets=[120.0])
     assert r["target"]["enforced"] is True, r
 
-    # matching count but does NOT lower -> not enforced.
+    # matching count and RAISES the target -> enforced. apply_overrides moves
+    # targets in either direction; a stale one-way report is why no
+    # take-profit in this book has ever been reached.
     r = evaluate_enforcement(stop=None, target=130.0, has_thesis=True,
                              target_weight=0.1, owned=True,
                              current_stop=100.0, current_targets=[120.0])
+    assert r["target"]["enforced"] is True, r
+
+    # identical to the current target -> not enforced, nothing to change.
+    r = evaluate_enforcement(stop=None, target=120.0, has_thesis=True,
+                             target_weight=0.1, owned=True,
+                             current_stop=100.0, current_targets=[120.0])
     assert r["target"]["enforced"] is False, r
+    assert "nothing to change" in r["target"]["note"], r
     print("selftest OK: evaluate_enforcement mirrors apply_overrides() exactly "
           "(no-thesis, looser-stop, stricter-stop, target-count-mismatch, "
           "target-lowers)")
@@ -463,6 +486,35 @@ def _selftest() -> None:
         except ValueError:
             pass
     print("selftest OK: merge_levels is pure, reason mandatory, levels sane")
+
+    # ---- AGREEMENT WITH REAL ENFORCEMENT ----------------------------------
+    # This is the regression that would have caught the target-direction lie.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import level_rules                                        # noqa: PLC0415
+    for c in level_rules.CASES:
+        ov = c["ov"]
+        ov_targets = ov.get("targets")
+        r = evaluate_enforcement(
+            stop=ov.get("stop") if isinstance(ov.get("stop"), (int, float))
+                 else c["thesis_stop"],
+            target=ov_targets,
+            has_thesis=True, target_weight=0.07, owned=True,
+            current_stop=c["thesis_stop"],
+            current_targets=list(c["thesis_targets"]))
+        # `widen` is a real apply_overrides() branch (Task 1's table covers it)
+        # but evaluate_enforcement has no parameter for it, and never needs one:
+        # server.py's set_levels() -- the ONLY real caller -- never writes a
+        # "widen" key (merge_levels/write_levels accept no such argument), so
+        # an agent-written override can never take that branch. Skip the stop
+        # assertion only for the cases that exercise it; every other case
+        # (including both target-direction cases below) is still checked.
+        if "widen" not in ov:
+            assert r["stop"]["enforced"] == c["stop_enforced"], (c["name"], r["stop"])
+        if ov_targets is not None:
+            assert r["target"]["enforced"] == c["target_enforced"], \
+                (c["name"], r["target"])
+    print("selftest OK: evaluate_enforcement agrees with level_rules.CASES "
+          "(the shared truth table pinned against apply_overrides())")
 
 
 if __name__ == "__main__":
