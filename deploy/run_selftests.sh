@@ -80,6 +80,7 @@ VENV_SELFTESTS=(
     # account owner as fact.
     "scripts/letter_facts.py"
     "src/level_rules.py"
+    "src/excursion.py"
 )
 
 # Scripts that `import moomoo` at module scope — MUST run under system python3.

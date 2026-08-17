@@ -160,6 +160,30 @@ def positions() -> str:
     prod = read_current()
     v = marks.load()
     out = state.holdings(v, prod.theses if prod else [], _overrides())
+    # Excursion facts: what the path looked like, not just where it stands.
+    # I/O lives here; the arithmetic is pure in src/excursion.py.
+    try:
+        import pandas as _pd                                   # noqa: PLC0415
+        import excursion                                       # noqa: PLC0415
+        _hi = _pd.read_parquet(REPO / "research_store" / "prices" / "highs.parquet")
+        _events = [json.loads(l) for l in
+                   (REPO / "research_store" / "journal.jsonl").read_text().splitlines()
+                   if l.strip()]
+    except Exception:
+        _hi, _events = None, None
+    if _hi is not None:
+        for _sym, _p in out.items():
+            if not isinstance(_p, dict) or _p.get("avg_cost") is None:
+                continue
+            _ent = excursion.entry_date(_events, _sym)
+            _series = []
+            if _ent is not None and _sym in _hi.columns:
+                _series = [x for x in _hi.loc[_hi.index >= _ent, _sym].dropna().tolist()]
+            _p.update(excursion.facts(_p.get("avg_cost"), _p.get("mark"),
+                                      _p.get("stop"), _series))
+            if _ent is None:
+                _p["excursion_note"] = ("entry ambiguous (this name was exited and "
+                                        "re-entered) — peak not computed")
     # The staleness banner rides with the HOLDINGS too, not only account(). An
     # agent that reads positions() and never calls account() would otherwise act
     # on a stale book with nothing telling it so.
