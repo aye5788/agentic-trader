@@ -109,6 +109,23 @@ CASES = [
      "prices": {},
      "stop_after": 100.0, "targets_after": [160.0],
      "stop_enforced": False, "target_enforced": True},
+
+    # ⛔ NaN IS NOT A USABLE PRICE (found in final review, 2026-08-17). A bare
+    # `px <= 0` / `stop >= px` comparison is FALSE for a NaN price in both
+    # directions -- Python defines every comparison against NaN as False --
+    # so the old guard (`not isinstance(px, (int, float)) or px <= 0 or
+    # stop >= px`) let a NaN price sail through untouched and the override
+    # was APPLIED. src/marks.py already treats a NaN/inf mark as "a corrupt
+    # monitor quote" and refuses to use it (FIX B, 2026-08-10) -- this is the
+    # same failure mode reaching the stop guard instead of the valuation
+    # path. Demonstrated by the reviewer: price NaN -> stop 120.0 applied
+    # over a thesis stop of 100.0.
+    {"name": "non-finite price refuses the stop override (fail closed)",
+     "thesis_stop": 100.0, "thesis_targets": [130.0],
+     "ov": {"stop": 120.0, "reason": "tightening against a corrupt NaN quote"},
+     "prices": {"AAA": float("nan")},
+     "stop_after": 100.0, "targets_after": [130.0],
+     "stop_enforced": False, "target_enforced": False},
 ]
 
 

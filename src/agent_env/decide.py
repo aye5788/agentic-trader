@@ -228,7 +228,16 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
                                    "live price is currently known for this symbol -- the monitor "
                                    "requires a known price to apply ANY stop override and fails "
                                    "closed without one, so this will NOT be applied" + unverified}
-        elif not isinstance(price, (int, float)) or price <= 0 or float(stop) >= float(price):
+        elif (not isinstance(price, (int, float)) or not math.isfinite(price)
+              or price <= 0 or float(stop) >= float(price)):
+            # ⛔ NaN IS NOT A USABLE PRICE. `price <= 0` and `stop >= price`
+            # are BOTH False for a NaN price -- every comparison against NaN
+            # is False in Python -- so this must check isfinite explicitly or
+            # a corrupt quote reads as "enforced: true" here while
+            # apply_overrides() (mirrored above) refuses it. src/marks.py
+            # already treats a NaN/inf mark as "a corrupt monitor quote" and
+            # refuses to use it (FIX B, 2026-08-10); this is the same
+            # reasoning applied to the price guard instead of valuation.
             stop_result = {"enforced": False,
                            "note": f"raises the thesis's current stop ({current_stop}), but is at "
                                    f"or above the last known price ({price}) -- the monitor refuses "
@@ -726,7 +735,12 @@ def _selftest() -> None:
         # a permissive stand-in keeps them isolating whatever property they
         # actually name, exactly as market_monitor's apply_overrides() also
         # takes prices=None (its own no-op default) for those same cases.
-        price = c["prices"].get("AAA") if "prices" in c else float("inf")
+        # A FINITE stand-in, not float("inf") -- the guard now requires
+        # math.isfinite(price) (this fix's own change), and inf is
+        # definitionally not finite, so it would fail the very guard it is
+        # meant to stand permissively clear of. 1e12 sits far above every
+        # stop this table exercises while still passing isfinite().
+        price = c["prices"].get("AAA") if "prices" in c else 1e12
         r = evaluate_enforcement(
             stop=ov.get("stop") if isinstance(ov.get("stop"), (int, float))
                  else c["thesis_stop"],

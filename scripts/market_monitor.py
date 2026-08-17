@@ -20,6 +20,7 @@ morning (stop-vs-momentum churn guard).
 """
 import argparse
 import json
+import math
 import subprocess
 import sys
 import time
@@ -463,7 +464,18 @@ def apply_overrides(held: dict, overrides: dict, prices: dict | None = None) -> 
             # unfavourable one.
             if isinstance(ov_stop, (int, float)) and prices is not None:
                 px = prices.get(sym) if isinstance(prices, dict) else None
-                if not isinstance(px, (int, float)) or px <= 0 or float(ov_stop) >= float(px):
+                # ⛔ NaN IS NOT A USABLE PRICE. `px <= 0` and `stop >= px` are
+                # BOTH False for a NaN px -- every comparison against NaN is
+                # False in Python -- so a bare isinstance+<=0 guard let a
+                # corrupt quote sail straight through and the stale override
+                # was APPLIED. src/marks.py already treats a NaN/inf mark as
+                # "a corrupt monitor quote" and refuses to use it (FIX B,
+                # 2026-08-10); this mirrors that reasoning for the same
+                # failure mode reaching the stop guard instead of the
+                # valuation path. Found by the reviewer: price NaN -> stop
+                # 120.0 applied over a thesis stop of 100.0.
+                if (not isinstance(px, (int, float)) or not math.isfinite(px)
+                        or px <= 0 or float(ov_stop) >= float(px)):
                     ov_stop = None
             if isinstance(ov_stop, (int, float)) and t.stop is not None:
                 widen = bool(ov.get("widen")) and str(ov.get("reason") or "").strip()
