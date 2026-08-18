@@ -192,28 +192,52 @@ def build(rows: list, closes: pd.DataFrame, horizon: int) -> dict:
     bias = {"reduce": 0, "increase": 0, "other": 0}
     detail = []
 
+    # ⛔ ONE DECISION MAY NAME SEVERAL SYMBOLS. A session that exits four ETFs in
+    # one move journals symbol="IWM,XLK,XLE,XLV". Scored as a single string that
+    # matches no price column, the whole basket came back `unscoreable` and
+    # vanished from the scorecard -- silently, which is worse than the sibling
+    # bug in src/health.py (fixed 2026-08-18), because that one at least fired
+    # an alert. A scorecard that quietly drops the biggest decisions of the week
+    # is what turns the reviewer back into decoration.
+    #
+    # HOW A BASKET IS COUNTED, stated because it is a judgement and not a
+    # discovery:
+    #   - OUTCOMES are scored PER SYMBOL. The tape settles each name separately
+    #     and a basket where two names rose and two fell is not one verdict.
+    #     Each row carries `from_basket`/`basket_size` so it can be re-weighted
+    #     later without re-deriving anything.
+    #   - BIAS is counted PER DECISION. It measures which way the agent leans,
+    #     and one judgement to reduce is one lean regardless of how many tickers
+    #     it touched. Counting it per symbol would let a single basket exit
+    #     swamp a month of individual calls.
     for e in rows:
         if e.get("event") != "agent_decision":
             continue
-        sym, act = e.get("symbol"), e.get("action")
+        raw, act = e.get("symbol"), e.get("action")
         day = str(e.get("ts", ""))[:10]
         stance = stance_of.get(e.get("ts"))
 
         d = direction(act)
         bias["reduce" if d == "reduce" else "increase" if d == "increase" else "other"] += 1
 
-        # PORTFOLIO is a finding, not a position — it has no price to settle it
-        ret = None if sym == "PORTFOLIO" else forward_return(closes, sym, day, horizon)
-        outcome = score_decision(act, ret)
-        tally[outcome] += 1
+        syms = [s.strip() for s in str(raw or "").upper().split(",") if s.strip()]
+        if not syms:
+            syms = [raw]
+        for sym in syms:
+            # PORTFOLIO is a finding, not a position — no price to settle it
+            ret = None if sym == "PORTFOLIO" else forward_return(closes, sym, day, horizon)
+            outcome = score_decision(act, ret)
+            tally[outcome] += 1
 
-        r = score_reviewer(stance, outcome)
-        rev[r] += 1
+            r = score_reviewer(stance, outcome)
+            rev[r] += 1
 
-        detail.append({"day": day, "symbol": sym, "action": act,
-                       "forward_return": None if ret is None else round(ret, 4),
-                       "outcome": outcome, "reviewer": r,
-                       "stance": stance})
+            detail.append({"day": day, "symbol": sym, "action": act,
+                           "forward_return": None if ret is None else round(ret, 4),
+                           "outcome": outcome, "reviewer": r,
+                           "stance": stance,
+                           "from_basket": len(syms) > 1,
+                           "basket_size": len(syms)})
 
     # ---- HEAD TO HEAD: only where they actually DISAGREED -----------------
     # The overall hit rates are dominated by the cases both parties called the
@@ -328,6 +352,34 @@ def _selftest() -> None:
     assert score_decision("hold", -0.004) == "tie"
     assert score_decision("exit", None) == "unscoreable"
     assert score_decision("pondered", 0.5) == "unscoreable"
+
+    # ---- a basket decision reaches the scorecard, per symbol ---------------
+    # The real 2026-08-17 shape. Before this, symbol="IWM,XLK,XLE,XLV" matched
+    # no price column, scored `unscoreable`, and the week's largest decision
+    # silently left the scorecard.
+    import pandas as _pd
+    _idx = _pd.to_datetime(["2026-08-17", "2026-08-18", "2026-08-19",
+                            "2026-08-20", "2026-08-21", "2026-08-24"])
+    _closes = _pd.DataFrame({"IWM": [100, 99, 98, 97, 96, 90],   # fell -> exit right
+                             "XLK": [100, 101, 102, 103, 104, 110]},  # rose -> wrong
+                            index=_idx)
+    _rows = [{"event": "agent_decision", "ts": "2026-08-17T13:32:00+00:00",
+              "symbol": "IWM,XLK", "action": "exit"}]
+    _sc = build(_rows, _closes, 5)
+    _d = _sc["decisions"]
+    assert len(_d) == 2, f"a 2-name basket must score 2 rows, got {len(_d)}: {_d}"
+    assert {r["symbol"] for r in _d} == {"IWM", "XLK"}, _d
+    assert all(r["from_basket"] and r["basket_size"] == 2 for r in _d), _d
+    # outcomes are per symbol: the tape settled them differently
+    assert {r["symbol"]: r["outcome"] for r in _d} == {
+        "IWM": "agent_right", "XLK": "agent_wrong"}, _d
+    # ...but BIAS counts the DECISION once -- one judgement is one lean
+    assert _sc["direction"]["reduce"] == 1, _sc["direction"]
+    # a single-symbol decision is unchanged and not marked as a basket
+    _sc1 = build([{"event": "agent_decision", "ts": "2026-08-17T13:32:00+00:00",
+                   "symbol": "IWM", "action": "exit"}], _closes, 5)
+    assert len(_sc1["decisions"]) == 1 and _sc1["decisions"][0]["from_basket"] is False
+    assert _sc1["direction"]["reduce"] == 1, _sc1["direction"]
 
     # the reviewer is scored on the same event, from its own stance
     assert score_reviewer("AFFIRM", "agent_right") == "reviewer_right"
