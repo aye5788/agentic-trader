@@ -1,7 +1,34 @@
 # Investor letter — accuracy follow-ups after issue 008
 
 **Date:** 2026-08-17
-**Status:** OPEN. Not started. Raised by the principal (Aaron) after reading issue 008.
+**Status:** ✅ **DONE 2026-08-18.** All four landed, plus a fifth found while
+verifying (D5). Raised by the principal (Aaron) after reading issue 008.
+
+⚠️ **D1's CAUSE changed under it.** The account moved from cash to limited
+margin on 2026-08-18, so proceeds settle same-session and `buying_power`
+normally equals `cash` now. The FIX is unchanged and still needed — a gap can
+still open (pending deposit, broker hold), and the letter must never again
+describe a constraint as a choice — but the prompt rule deliberately does NOT
+name T+1 as the reason. It gives the narrator both numbers and lets it judge,
+per the standing rule in this file.
+
+## D5 — a held stock was flagged as an ETF sleeve position (found by verifying)
+
+`letter_facts.py` derived `sleeve` from `rank >= 100`. That was true only while
+the ETF sleeve occupied a rank band above 100. It stopped being true twice:
+`slow_loop.protective_theses()` now assigns rank 200 to a name the AGENT bought
+that the ranking did not select (full geometry, `target_weight` 0.0, purely so
+the monitor can watch it), and the sleeve was retired 2026-08-16. Result: MRK,
+a pharma stock bought 08-17, read as `sleeve: true` in `facts.json`.
+
+Neither the prompt nor the template read the field, so it never reached print —
+but the narrator is instructed to narrate FROM `facts.json`, so a false fact
+sitting in it is a loaded gun.
+
+**Fixed:** `sleeve` is now membership of `config/etf_universe.csv` (a property
+of the symbol, not of a rank sentinel), and a new `protective_only` flag names
+what rank-200-at-zero-weight actually means, so the letter can explain a held
+position the ranking did not choose instead of showing it bare at 0% weight.
 **Owner:** whoever next touches `scripts/letter_facts.py` / `prompts/newsletter.md`
 
 ---

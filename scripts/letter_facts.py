@@ -146,13 +146,76 @@ def main() -> None:
     # come exclusively from marks.load()'s broker-backed position snapshot.
     prod = read_current()
     theses = {t.symbol: t for t in prod.theses} if prod else {}
+
+    # ⛔ WHAT "SLEEVE" MEANS. This used to be `rank >= 100`, which was true only
+    # while the ETF sleeve occupied a rank band above 100. It stopped being true
+    # twice over: slow_loop.protective_theses() now assigns rank 200 to a name
+    # the AGENT bought that the ranking did not select (full geometry,
+    # target_weight 0.0, purely so the monitor can watch it), and the sleeve
+    # itself was retired 2026-08-16. On 2026-08-18 that made MRK -- a pharma
+    # stock bought the previous session -- read as an ETF sleeve position in
+    # facts.json. Membership is a property of the SYMBOL, so read it from the
+    # ETF universe rather than inferring it from a rank sentinel.
+    etf_symbols = set()
+    try:
+        for i, line in enumerate((REPO / "config" / "etf_universe.csv")
+                                 .read_text().splitlines()):
+            if i and line.strip():
+                etf_symbols.add(line.split(",")[0].strip().upper())
+    except Exception:                                            # noqa: BLE001
+        etf_symbols = set()
+
+    # --- D4: how far each position RAN, and how much of it is protected ------
+    # The single most important risk fact in the book, and the letter could not
+    # see it: issue 008 said nothing about AMD and TER showing a profit while
+    # their stops sat below cost -- both would have closed RED. The arithmetic
+    # is pure in src/excursion.py (shared with positions()); only the I/O is
+    # here. Best-effort: a missing panel must never stop a letter being written.
+    _exc = {}
+    try:
+        import pandas as _pd                                    # noqa: PLC0415
+        import excursion            # REPO/src already on sys.path  # noqa: PLC0415
+        _hi = _pd.read_parquet(RS / "prices" / "highs.parquet")
+        _events = [json.loads(l) for l in
+                   (RS / "journal.jsonl").read_text().splitlines() if l.strip()]
+        for _sym, _p in valued["positions"].items():
+            if _p.get("avg_cost") is None:
+                continue
+            _ent = excursion.entry_date(_events, _sym)
+            _series = []
+            if _ent is not None and _sym in _hi.columns:
+                _series = _hi.loc[_hi.index >= _ent, _sym].dropna().tolist()
+            _th = theses.get(_sym)
+            _exc[_sym] = excursion.facts(_p.get("avg_cost"), _p.get("mark"),
+                                         _th.stop if _th else None, _series)
+    except Exception as _e:                      # noqa: BLE001
+        _exc = {}
+        print(f"  excursion facts unavailable ({_e.__class__.__name__}) — "
+              f"positions carry nulls", file=sys.stderr)
+
     positions = []
     for symbol, p in valued["positions"].items():
         t = theses.get(symbol)
+        e = _exc.get(symbol) or {}
         positions.append({
+            # NEGATIVE gain_protected_pct = shows a profit, would close at a
+            # loss because the stop never followed the price up. State it.
+            "peak_pct": (round(e["peak_pct"], 4)
+                         if e.get("peak_pct") is not None else None),
+            "giveback_pct": (round(e["giveback_pct"], 4)
+                             if e.get("giveback_pct") is not None else None),
+            "gain_protected_pct": (round(e["gain_protected_pct"], 4)
+                                   if e.get("gain_protected_pct") is not None else None),
             "symbol": symbol,
             "rank": t.rank if t else None,
-            "sleeve": t.rank >= 100 if t else None,
+            "sleeve": (symbol.upper() in etf_symbols) if etf_symbols else None,
+            # A thesis carrying rank>=100 AND zero target weight is not a
+            # recommendation: the loop did not select this name, the AGENT
+            # bought it, and the geometry exists only so the monitor can watch
+            # it. Say that rather than showing a held position at 0% target
+            # weight with no explanation.
+            "protective_only": (bool(t.rank is not None and t.rank >= 100
+                                     and not t.target_weight) if t else None),
             "thesis": t.thesis if t else None,
             "weight": round(t.target_weight, 4) if t else None,
             "stop": round(t.stop, 2) if t and t.stop else None,
@@ -282,6 +345,27 @@ def main() -> None:
                     "invested": valued["invested"],
                     "cash_pct": round(100 * valued["cash"] / valued["account_value"])
                     if valued["account_value"] else None,
+                    # ⛔ CASH IS NOT THE SAME AS DEPLOYABLE. Issue 008 reported
+                    # "41% cash" and framed it as "a real decision in front of
+                    # me" when only $8.36 of $31.13 could actually be spent --
+                    # 11% of the account, not 41%. The letter described a
+                    # constraint as a choice. These three fields are what make
+                    # the difference statable; the narrator judges, no
+                    # threshold lives here.
+                    #
+                    # ⚠️ The CAUSE changed 2026-08-18: the account moved from
+                    # cash to limited margin, so proceeds settle same-session
+                    # and buying_power normally equals cash now. That is
+                    # exactly why the reason is NOT hardcoded anywhere here --
+                    # a gap can still open (a pending deposit, a broker hold),
+                    # and the letter must read the numbers rather than recite
+                    # a settlement story that has stopped being true.
+                    "buying_power": valued.get("buying_power"),
+                    "unsettled_funds": valued.get("unsettled_funds"),
+                    "deployable_pct": (
+                        round(100 * float(valued["buying_power"]) / valued["account_value"])
+                        if valued.get("buying_power") is not None
+                        and valued.get("account_value") else None),
                     "marked_at": valued["marked_at"],
                     # ⛔ IS THIS A MARKET VALUE OR A COST FIGURE? The letter is
                     # written on a Sunday, when the book used to fall back to
@@ -301,6 +385,19 @@ def main() -> None:
         "week_pnl": week_pnl,                              # NET of deposits/withdrawals
         "week_pnl_gross": week_pnl_gross,                  # raw value ratio (flow-inclusive)
         "week_pnl_baseline": baseline,                     # null on early issues
+        # ⛔ THE MEASURED WINDOW, WHICH IS NOT THE HEADER WINDOW. `issue_date`
+        # comes from today's Monday; `week_pnl` comes from the newest equity
+        # point at least ~7 days old. They are computed independently and can
+        # describe different spans -- always, not just when it goes wrong.
+        # Issue 008 headed itself "Week of August 17" and reported +9.6% for a
+        # span starting 08-10 -- the same days issue 007 covered and called
+        # -3.4%. Two letters, overlapping windows, opposite signs, no
+        # reconciliation. A reader adding them together gets a fiction.
+        "week_pnl_from": (baseline or {}).get("date"),
+        "week_pnl_to": valued.get("as_of") or today.isoformat(),
+        "week_pnl_window_matches_header": (
+            (baseline or {}).get("date") == monday.isoformat()
+            if baseline else None),
         "net_deposits_this_week": net_flows,               # + = money added, - = withdrawn
         "flows_this_week": [{k: f.get(k) for k in
                              ("date", "amount", "direction", "status", "note")}

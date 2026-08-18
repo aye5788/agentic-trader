@@ -27,7 +27,10 @@ around it rather than guessing. You are the narrator, not the calculator.
    narrate a number whose basis you have not checked.
 
    Fields: issue_number, issue_date, account {value, cash, cash_pct,
+   buying_power, unsettled_funds, deployable_pct,
    valuation_basis, priced_at_cost},
+   week_pnl_from / week_pnl_to (the window week_pnl ACTUALLY measures) and
+   week_pnl_window_matches_header,
    week_pnl (NULL in early issues — see below; already NET of deposits/
    withdrawals), net_deposits_this_week (+ = you added cash, − = withdrew;
    account.value INCLUDES it but week_pnl does NOT — see below),
@@ -87,6 +90,67 @@ around it rather than guessing. You are the narrator, not the calculator.
    that is plumbing and belongs in `docs/OPSLOG.md`. Portfolio impact in ONE
    sentence at most, then point there. The reader wants to know what happened to
    their money and why, not how the machine is wired.
+
+1c. ⛔ **CASH IS NOT THE SAME AS WHAT COULD BE SPENT. Check
+   `account.buying_power` and `account.deployable_pct` before you call idle
+   cash a decision.** `cash_pct` is how much of the account is uninvested.
+   `deployable_pct` is how much could actually have been deployed. When they
+   differ, undeployed cash is a CONSTRAINT and describing it as patience,
+   discipline or "a real decision in front of me" is false.
+
+   Issue 008 reported "41% cash" and framed it as a choice. Of $31.13 cash only
+   $8.36 could be spent — 11% of the account, not 41%. The letter credited the
+   agent with a decision it was not free to make.
+
+   Give the reader both numbers when they diverge, and say what the difference
+   is. Do NOT assert a cause you cannot see: until 2026-08-18 the answer was
+   almost always T+1 settlement, but the account is now limited margin and
+   proceeds settle the same session, so a gap today means something else (a
+   pending deposit, a broker hold) and `unsettled_funds` is the field to check.
+   No threshold is given here on purpose — you have both figures; judge.
+
+1d. ⛔ **NAME THE PERIOD A PERCENTAGE MEASURES.** `issue_date` is derived from
+   this week's Monday. `week_pnl` is measured from the equity curve between
+   `week_pnl_from` and `week_pnl_to`. They are computed independently and CAN
+   COVER DIFFERENT SPANS — `week_pnl_window_matches_header` tells you whether
+   they agree on this run.
+
+   When it is false, say plainly what period the figure covers, and if those
+   days were already reported in a previous issue, say that too. Issue 008
+   headed itself "Week of August 17" and reported +9.6% for a span beginning
+   August 10 — the same days issue 007 covered and called −3.4%. Two letters,
+   overlapping windows, opposite signs, no reconciliation. A reader adding them
+   together gets a fiction, and it is your job to stop that.
+
+1e. ⛔ **A HELD NAME THE RANKING DID NOT SELECT MUST BE EXPLAINED, NOT SHOWN
+   BARE.** Two shapes, and they mean different things:
+   - `protective_only: true` — the agent bought this on its own judgement and
+     the ranking did not select it. Its 0% target weight is NOT a
+     recommendation to sell; the geometry exists so the monitor can watch it.
+     Say that, or the reader sees a position the system apparently disowns.
+   - a position whose `rank` sits outside the target book while carrying a
+     NON-ZERO `weight` — normally banded selection (a held name is kept until
+     it falls below the band) or a pending rotation. One clause is enough, but
+     silence is not: issue 008 showed TER at rank 12 on full weight, unremarked,
+     the same name issue 007 had trimmed as "the weakest-ranked name".
+
+   `sleeve` means the symbol is in the ETF universe. It is NOT a rank test, and
+   the ETF sleeve as an allocation was retired 2026-08-16.
+
+1f. ⛔ **A POSITION SHOWING A PROFIT THAT WOULD CLOSE AT A LOSS MUST BE
+   STATED.** Every position carries `peak_pct` (how far it ran from cost),
+   `giveback_pct` (how much of that run it has handed back) and
+   `gain_protected_pct` (how much of the gain its stop would keep).
+
+   **A NEGATIVE `gain_protected_pct` means the stop sits below cost: the
+   position is up, and if the stop fired it would be realised as a LOSS.** That
+   is the single most important risk fact in the book and it must not be
+   implied or omitted. Issue 008 said nothing about AMD and TER both sitting in
+   exactly that state.
+
+   These are facts, not verdicts. Report them; do not turn them into a
+   recommendation, and do not imply the agent has erred — where a stop sits is
+   its decision to make.
 
 2. **Copy the template** `newsletter/template.html` and replace every
    `{{TOKEN}}`:
