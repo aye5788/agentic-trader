@@ -692,14 +692,20 @@ def main() -> None:
              and t.earnings_date <= str((asof + pd.Timedelta(days=5)).date())]
     print(f"earnings: {n_stamped}/{len(theses)} dated"
           + (f" | REPORTING WITHIN 5d: {', '.join(sorted(_soon))}" if _soon else ""))
-    print(f"\n{'BOOK (top-10, R:R>=2 gated)':40}{'weight':>8}{'entry':>9}{'stop':>9}{'R:R':>6}")
+    # The size comes from [portfolio] book_hold; hardcoding "top-10" printed a
+    # header that disagreed with the 14 rows beneath it from 2026-08-16 onward.
+    _bh = (cfg.get("portfolio") or {}).get("book_hold")
+    print(f"\n{f'BOOK (top-{_bh}, R:R>=2 gated)':40}{'weight':>8}{'entry':>9}{'stop':>9}{'R:R':>6}")
     for t in book_held:
         print(f"  {t.symbol:<8}{t.thesis[:28]:<30}{t.target_weight:>8.2%}"
               f"{(t.entry_zone[0]+t.entry_zone[1])/2:>9.2f}{t.stop:>9.2f}{reward_risk(t):>6.2f}")
     if book_drop:
         print(f"  -- dropped for geometry (stop too wide for 2:1): "
               + ", ".join(f"{s}(σ={sg:.1%})" for s, _, sg in book_drop))
-    print(f"\n{'SLEEVE (top-4)':40}{'weight':>8}{'entry':>9}{'stop':>9}{'R:R':>6}")
+    # Printed an empty SLEEVE table every run after the sleeve was retired.
+    _sh = (cfg.get("portfolio") or {}).get("sleeve_hold") or 0
+    if _sh or etf_held:
+        print(f"\n{f'SLEEVE (top-{_sh})':40}{'weight':>8}{'entry':>9}{'stop':>9}{'R:R':>6}")
     for t in etf_held:
         print(f"  {t.symbol:<8}{t.thesis[:28]:<30}{t.target_weight:>8.2%}"
               f"{(t.entry_zone[0]+t.entry_zone[1])/2:>9.2f}{t.stop:>9.2f}{reward_risk(t):>6.2f}")
