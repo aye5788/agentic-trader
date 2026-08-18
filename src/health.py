@@ -190,6 +190,14 @@ def unrecorded_fills(journal: list, day: str) -> list:
 
     Only trading actions count: `hold`, `skip` and portfolio-level findings
     execute nothing and must never be reported as a missing fill.
+
+    ⚠️ ONE DECISION MAY NAME SEVERAL SYMBOLS. A session that exits four ETFs in
+    one move journals `symbol: "IWM,XLK,XLE,XLV"` -- one record, four trades.
+    Comparing that string against individual fill symbols never matches, so the
+    check reported a fully-recorded liquidation as missing (fired 2026-08-18,
+    issue #11). The symbol field is therefore SPLIT, which also means a
+    partially-executed multi-symbol decision now reports the specific names that
+    are missing instead of an opaque blob nobody can act on.
     """
     traded = {"exit", "trim", "sell", "buy", "add", "open", "increase", "reduce"}
     want, got = set(), set()
@@ -199,7 +207,10 @@ def unrecorded_fills(journal: list, day: str) -> list:
         if e.get("event") == "agent_decision":
             sym = e.get("symbol")
             if sym and sym != "PORTFOLIO" and str(e.get("action", "")).lower() in traded:
-                want.add(str(sym).upper())
+                for one in str(sym).upper().split(","):
+                    one = one.strip()
+                    if one and one != "PORTFOLIO":
+                        want.add(one)
         elif e.get("event") == "execution":
             for f in (e.get("fills") or []):
                 if f.get("symbol"):
@@ -584,6 +595,34 @@ def _selftest() -> None:
     # other days are not this day's problem
     assert unrecorded_fills(j, "2026-08-11") == []
     assert unrecorded_fills([], "2026-08-12") == []
+
+    # ⚠️ A MULTI-SYMBOL DECISION IS ONE RECORD, NOT ONE SYMBOL. The real
+    # 2026-08-17 ETF liquidation journalled symbol="IWM,XLK,XLE,XLV" for a
+    # single exit decision. All four filled and all four were journalled, and
+    # this check still reported the whole comma-joined blob as an unrecorded
+    # fill -- it fired on 2026-08-18, filed issue #11, and was wrong. A check
+    # that cries wolf is how a real one gets ignored.
+    j3 = [
+        {"event": "agent_decision", "ts": "2026-08-17T13:32:00Z",
+         "symbol": "IWM,XLK,XLE,XLV", "action": "exit"},
+        {"event": "execution", "ts": "2026-08-17T13:31:00Z",
+         "fills": [{"symbol": "IWM"}, {"symbol": "XLK"},
+                   {"symbol": "XLE"}, {"symbol": "XLV"}]},
+    ]
+    assert unrecorded_fills(j3, "2026-08-17") == [], unrecorded_fills(j3, "2026-08-17")
+    # ...and a PARTIAL multi-symbol execution must still report the ones that
+    # are genuinely missing, BY NAME rather than as an opaque blob.
+    j4 = [
+        {"event": "agent_decision", "ts": "2026-08-17T13:32:00Z",
+         "symbol": "IWM, XLK , XLE", "action": "exit"},
+        {"event": "execution", "ts": "2026-08-17T13:31:00Z",
+         "fills": [{"symbol": "IWM"}]},
+    ]
+    assert unrecorded_fills(j4, "2026-08-17") == ["XLE", "XLK"], unrecorded_fills(j4, "2026-08-17")
+    # a multi-symbol HOLD is still not a trade
+    j5 = [{"event": "agent_decision", "ts": "2026-08-17T18:38:00Z",
+           "symbol": "AMD,DELL,INTC", "action": "hold"}]
+    assert unrecorded_fills(j5, "2026-08-17") == []
 
     # ---- unrecorded fills, now actually WIRED --------------------------------
     # It was pure, selftested and called by nothing until 2026-08-13: a control
