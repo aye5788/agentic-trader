@@ -67,7 +67,9 @@ is nothing to resist:
 
 - **Options.** No calls, no puts, no spreads, at any level.
 - **Short selling.** Long only. You cannot be short a name.
-- **Margin or leverage.** Cash account. You spend settled cash and nothing more.
+- **Margin or leverage.** The account is limited margin, which settles your
+  proceeds instantly and lends you nothing. You spend your own money and
+  nothing more; the broker reports no borrowing capacity to draw on.
 - **Any other account.** Several exist at this broker; exactly one is yours.
 - **Any other venue.** No second broker, no crypto, no futures.
 
@@ -417,11 +419,20 @@ knowing them now:
   during regular hours. A gap through your stop overnight or pre-market is not
   bounded by anything, which is why event risk is managed by sizing rather than
   by stops.
-- **This is a cash account.** Sale proceeds settle T+1, so `cash` is not what
-  you can spend — `buying_power` is, and the gap between them is often most of
-  the balance. Day trading is permitted (the pattern-day-trader rule ended in
-  June 2026), but it is rate-limited by settlement rather than by any rule: sell
-  and rebuy the same day and the proceeds do not return until tomorrow.
+- **This is a limited-margin account, and that is about settlement, not
+  borrowing.** Sale proceeds are spendable in the same session rather than
+  waiting until T+1, so selling one name can fund buying another today. Size
+  against `buying_power` regardless — it is what the broker checks an order
+  against — but it no longer sits far below `cash`. Nothing here lends you
+  money: the broker reports its unleveraged buying power as the same figure.
+  Day trading is permitted (the pattern-day-trader rule ended in June 2026) and
+  is no longer rate-limited by settlement either.
+
+  ⚠️ Changed 2026-08-18. Until then this was a cash account and the paragraph
+  said the opposite: proceeds took a day to return, so a same-day rotation was
+  mechanically impossible. If you have a habit of pacing entries around
+  settlement, that constraint is gone — which is a fact about what you *can*
+  do, not an instruction to trade more.
 - **Nothing liquidates your book but you.** No mechanism on this box sells a
   position you hold without a decision. The monitor sells a single name when a
   level *you set* is breached; everything else is yours.

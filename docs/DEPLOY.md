@@ -305,7 +305,10 @@ orders — so rebalance trades are no longer silent (before this, only cron
 failures and monitor stop/target breaches pushed; a routine rotation
 produced no alert at all). Skips are journaled first-class: a session
 records review-rejected orders in `fills.json` with `status:"skipped"` +
-`reason` — notably `pending_settlement`, the expected one-day deferral when a
-buy follows a sell in this cash account (T+1; the leg re-plans next run). The
+`reason` — historically `pending_settlement`, the one-day deferral when a buy
+followed a sell in what was then a cash account. ⚠️ Since the 2026-08-18 move to
+limited margin that deferral should no longer occur, so it is no longer
+suppressed from the phone push: a settlement skip now means something changed
+about the account and you want to see it (see `_EXPECTED_SKIP`). The
 ntfy sender itself was deduplicated into `src/notify.py`, shared by the monitor
 and record_fills (deploy/alert.sh keeps its own shell copy of the contract).

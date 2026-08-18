@@ -85,11 +85,14 @@ def render_terms(gov_cfg: dict) -> str:
     return "\n".join([
         "Standing terms:",
         "",
-        # Day trading, options and the cash-account fact are stated once each in
+        # Day trading, options and the account-type fact are stated once each in
         # "WHAT YOU CAN AND CANNOT TRADE" and "WHAT IS TRUE ABOUT THIS SYSTEM".
         # Repeating them here read as three separate rules about the same thing.
-        "- **Settlement** — T+1 on closes. Size buys against `buying_power`, "
-        "never `cash`; the difference is real and often most of the balance.",
+        # CHANGED 2026-08-18: the account moved from cash to LIMITED MARGIN, so
+        # the T+1 clause this line carried for months is simply no longer true.
+        "- **Settlement** — same session. This is a limited-margin account: "
+        "sale proceeds are spendable immediately, not at T+1. Size buys against "
+        "`buying_power` — it is the figure the broker checks an order against.",
         f"- **Liquidity floor** — names below "
         f"${float(gov_cfg.get('min_dollar_volume_20d', 0)):,.0f} of 20-day dollar "
         f"volume are flagged advisory, never blocked.",

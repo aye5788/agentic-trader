@@ -191,8 +191,9 @@ def main() -> None:
         if e.get("event") == "execution":
             for f in e.get("fills", e.get("placed", [])):
                 if f.get("status") == "skipped":
-                    continue    # deferred/rejected legs (settlement lag, re-plans
-                                # next run) are plumbing — journaled, never narrated;
+                    continue    # deferred/rejected legs (e.g. insufficient buying
+                                # power, re-planned next run) are plumbing —
+                                # journaled, never narrated;
                                 # they must not eat letter space. Meaningful PM
                                 # judgment comes through reentry_decisions instead.
                 # ⚠️ `note` IS THE SYSTEM'S OWN REASON AND IT WAS BEING DROPPED.
