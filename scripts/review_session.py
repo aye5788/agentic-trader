@@ -335,9 +335,20 @@ def run(dry: bool = False, force: bool = False, day: str | None = None,
     live = OUT / "live.log"
     try:
         with live.open("w") as fh:
+            # ⛔ stdin MUST be closed. `codex exec` reads stdin for extra input
+            # even when the prompt is passed as an argument, and blocks until
+            # EOF. Under cron/systemd stdin is /dev/null so it EOFs instantly
+            # and this never showed -- but run from any context with an
+            # inherited open stdin (an interactive invocation, a wrapper that
+            # pipes) it hangs to TIMEOUT_S, writes nothing, and records NO
+            # VERDICT. That is indistinguishable from "the reviewer never ran",
+            # which OPSLOG 2026-08-13 already documents as a silent failure.
+            # Observed twice on 2026-08-18 running codex by hand. One argument
+            # removes the dependency on the caller's environment entirely.
             proc = subprocess.run(CODEX + [build_prompt(dpath)],
                                   cwd=str(REPO), stdout=fh,
                                   stderr=subprocess.STDOUT, text=True,
+                                  stdin=subprocess.DEVNULL,
                                   timeout=TIMEOUT_S)
         text = live.read_text()
     except subprocess.TimeoutExpired:
