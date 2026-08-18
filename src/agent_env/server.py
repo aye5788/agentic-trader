@@ -101,9 +101,11 @@ def _staleness(v: dict) -> dict | None:
     of failure available here: not zero orders, but confident wrong ones, sized
     and targeted against positions that may already have been sold.
 
-    The writers are the 10:00 fast loop and the monitor. Retiring the fast loop
-    (plan Task 8 step 5) removes one of them, so this must be loud before that
-    happens, not after.
+    The writer is now agent_env.refresh_broker_snapshot() (every session, trading
+    or not) plus record_fills() after a trade. The 10:00 fast loop used to write
+    it too; when that was deleted on 2026-08-14 nothing took over, and the
+    snapshot went two days stale on 08-16 while the monitor stop-watched a
+    position that had already been sold. That is why this is loud.
     """
     from datetime import datetime, timezone           # noqa: PLC0415
     causal = snapshot_freshness.status(

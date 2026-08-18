@@ -102,7 +102,13 @@ def render_terms(gov_cfg: dict) -> str:
 
 
 def render_gate(gov_cfg: dict) -> str:
+    # ⛔ THIS LIST SAYS "It refuses:" AND IS READ AS COMPLETE. Every refusal in
+    # scripts/hooks/pretooluse_order_gate.py belongs here. The drawdown halt and
+    # the rule-out limb were both missing until 2026-08-18 -- an agent could be
+    # refused for a reason the charter never named, and the drawdown halt is the
+    # one refusal it cannot diagnose from its own tools.
     order_pct = gov_cfg.get("max_order_pct")
+    max_dd = gov_cfg.get("max_drawdown")
     return "\n".join([
         "Before any order reaches the broker it passes a gate that runs in the "
         "harness, not in your judgment. It refuses:",
@@ -111,6 +117,10 @@ def render_gate(gov_cfg: dict) -> str:
         "are placed by hand then",
         "- a **BUY** while entries are halted (exits still place)",
         "- a **BUY** for a symbol outside the configured universe",
+        f"- a **BUY** while the book is more than **{_pct(max_dd)}** below its "
+        f"tracked equity peak — an automatic halt on entries, never on exits",
+        "- a **BUY** in a name carrying an active `rule_out`, until `revisit()` "
+        "clears it",
         f"- any order whose notional exceeds **{_pct(order_pct)} of equity**",
         "- any order in an account other than the one Agentic account",
         "- **every** order while shadow mode is set",
@@ -266,6 +276,7 @@ def _selftest() -> None:
                                   "min_distinct_names": 4},
             "relative_return": {"window_days": 60, "benchmark": "SPY"}}
     SCFG = {"governance": {"max_order_pct": 0.15,
+                           "max_drawdown": 0.25,
                            "min_dollar_volume_20d": 50_000_000.0},
             "portfolio": {"book_hold": 10, "sleeve_hold": 4,
                           "book_weight": 0.70, "sleeve_weight": 0.30},
@@ -340,17 +351,28 @@ def _selftest() -> None:
     #   - gap risk is priced at ENTRY, because extended/overnight sessions reject
     #     fractional and dollar-based orders outright (verified against the order
     #     tool's own schema) -- there is NO action available between the bells at
-    #     any price, so 15:45 cannot be a place to react to it
-    #   - 15:45 opens nothing: fifteen minutes before losing control of a position
-    #     for 17.5 hours is not when a new one gets opened
-    for must in ("10:00 — THE BOOK", "12:00 — WHAT CHANGED",
-                 "15:45 — IS EVERYTHING STILL TRUE",
+    #     any price, so 15:15 cannot be a place to react to it
+    #   - 15:15 opens nothing: forty-five minutes before losing control of a
+    #     position for 17.5 hours is not when a new one gets opened
+    #
+    # ⛔ THE TIMES AND THE COUNT MUST MATCH deploy/agentic-session@{open,close}
+    # .timer. Until 2026-08-18 this charter described THREE sessions -- 10:00,
+    # 12:00 and 15:45 -- and asserted all three here. Only two have ever
+    # existed, at 10:35 and 15:15. Nothing caught it because the assertion
+    # tested the charter against ITSELF. An agent told a midday session is
+    # coming can defer a decision to a session that never runs, so the phantom
+    # is asserted ABSENT below, not merely unmentioned.
+    for must in ("10:35 — THE BOOK",
+                 "15:15 — IS EVERYTHING STILL TRUE",
+                 "Two run each weekday",
                  "Gap risk is priced HERE, at entry",
                  "This session does not open positions",
                  "Write to tomorrow"):
         assert must in out, f"session definition lost: {must}"
-    # the 15:45 handoff is what makes research_log a HANDOFF and not an archive
-    assert "The 10:00 session\nreads these" in out or "10:00 session" in out.split("Write to tomorrow")[1][:400]
+    for phantom in ("12:00", "15:45", "10:00 — THE BOOK", "Three run each weekday"):
+        assert phantom not in out, f"a session that does not run reappeared: {phantom}"
+    # the 15:15 handoff is what makes research_log a HANDOFF and not an archive
+    assert "10:35 session" in out.split("Write to tomorrow")[1][:400]
 
     # ⚠️ PRESERVE WHAT WORKS. The de-risk trim is the behaviour with the best
     # measured record in this system (two AMAT trims, +6.53% and +3.38%, both

@@ -359,7 +359,7 @@ on a timer, with nobody watching**. Three things make that work:
 - [x] Wrap remaining Schwab endpoints — quote, price history, option chain,
       movers, market hours (all verified live)
 - [x] Wire Alpaca news into the sensing layer (repo adapter, verified live)
-- [x] Strategy foundation decided — momentum swing (pivoted from a PEAD first pass), equities-first, cash acct
+- [x] Strategy foundation decided — momentum swing (pivoted from a PEAD first pass), equities-first; cash account until 2026-08-18, limited margin since
 - [x] Trade-management + risk rules speced — IBD-derived, vol-adjusted stops, R:R gate
 - [x] Regime-gate design — mechanical floor + agent overlay; FRED vetted as supplement
 - [x] Build **earnings event calendar** (`src/event_calendar/`) — Finnhub spine +

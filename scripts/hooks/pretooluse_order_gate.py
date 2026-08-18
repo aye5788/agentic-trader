@@ -273,10 +273,10 @@ def decide(payload: dict, cfg: dict, valued: dict, shadow: bool,
             "yet. (Exits are unaffected — a cooldown never blocks a sell.)")
 
     # ---- an active rule-out refuses the rebuy -----------------------------
-    # The fast loop also drops these from the plan (apply_rule_outs), but the
-    # loop is not the only path to place_equity_order: a session can call the
-    # MCP tool directly. This is the chokepoint that does not depend on which
-    # code path proposed the order, which is the whole reason the hook exists.
+    # This is the ONLY enforcement of a rule-out since scripts/fast_loop.py was
+    # deleted on 2026-08-14; it used to drop them from its plan as well. The hook
+    # exists precisely so enforcement does not depend on which code path proposed
+    # the order — a session calls place_equity_order directly.
     ro = (ruled or {}).get(sym)
     if ro is not None:
         until = f", until {ro['until']}" if ro.get("until") else ""

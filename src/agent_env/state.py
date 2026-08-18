@@ -27,8 +27,9 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
     silently dropped.
 
     `watched` mirrors the monitor's OWN watch condition exactly — see
-    scripts/market_monitor.py:283 (`t.target_weight > 0 and t.stop`) and the
-    matching de-risk-eligible set in scripts/risk_review.py:250 (`_held`).
+    scripts/market_monitor.py:283 (`t.target_weight > 0 and t.stop`). (The same
+    condition gated scripts/risk_review.py's de-risk-eligible set until that was
+    retired into the sessions on 2026-08-13.)
     A thesis with a stop but `target_weight == 0` (or missing) is NOT watched
     by either of those — reporting `watched=True` for it here would be a false
     "protected" signal, worse than reporting unwatched, so this must match the
