@@ -93,7 +93,9 @@
         159.5828
       ],
       "expect_stop_rejected": false,
-      "expect_targets_rejected": false
+      "expect_targets_rejected": false,
+      "read_model_expect_stop": 130.0668,
+      "read_model_why": "positions() always resolves guard-on, because the live monitor always passes a prices dict. With no quote for this symbol the override is refused and the thesis stop is what is watched \u2014 even though the apply_overrides(prices=None) path above skips that guard."
     },
     {
       "name": "TER \u2014 stop refused, targets ACCEPTED (count matches)",
@@ -152,7 +154,9 @@
         120.0
       ],
       "expect_stop_rejected": false,
-      "expect_targets_rejected": false
+      "expect_targets_rejected": false,
+      "read_model_expect_stop": 100.0,
+      "read_model_why": "positions() always resolves guard-on, because the live monitor always passes a prices dict. With no quote for this symbol the override is refused and the thesis stop is what is watched \u2014 even though the apply_overrides(prices=None) path above skips that guard."
     },
     {
       "name": "a stop at or above the live price is refused (would arm already breached)",
@@ -217,7 +221,9 @@
         140.0
       ],
       "expect_stop_rejected": false,
-      "expect_targets_rejected": false
+      "expect_targets_rejected": false,
+      "read_model_expect_stop": 100.0,
+      "read_model_why": "positions() always resolves guard-on, because the live monitor always passes a prices dict. With no quote for this symbol the override is refused and the thesis stop is what is watched \u2014 even though the apply_overrides(prices=None) path above skips that guard."
     },
     {
       "name": "targets move in EITHER direction when the count matches",

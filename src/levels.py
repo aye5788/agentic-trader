@@ -57,7 +57,13 @@ def resolve(thesis_stop, thesis_targets, override, price=None,
     Returns every input alongside the resolved answer, so a caller can show the
     agent what it asked for AND what it got, rather than silently one or other.
     """
-    ov = override or {}
+    # ⛔ A MALFORMED OVERRIDE MUST NOT RAISE. apply_overrides ignores any
+    # non-dict entry ("garbage", a list, a number) and degrades that symbol to
+    # "no override". This called .get() straight away and raised AttributeError
+    # instead -- and holdings() raised even earlier -- so one bad entry in
+    # overrides.json would have taken down positions() entirely while the
+    # monitor carried on. Found by review, 2026-08-18.
+    ov = override if isinstance(override, dict) else {}
     ov_stop = ov.get("stop")
     ov_targets = ov.get("targets")
     # `widen` counts only WITH a reason -- same conjunction the monitor uses.
@@ -179,6 +185,12 @@ def _selftest() -> None:
     # what the live monitor does (it always passes a prices dict).
     r = resolve(100.0, [], {"stop": 105.0}, price=None, price_guard=True)
     assert r["effective_stop"] == 100.0 and "fails closed" in r["effective_stop_status"], r
+
+    # a malformed override is IGNORED, exactly as apply_overrides ignores it,
+    # and must never raise -- positions() would otherwise die on a bad file
+    for junk in ("garbage", ["nope"], 7, True):
+        r = resolve(100.0, [120.0], junk)
+        assert r["effective_stop"] == 100.0 and r["effective_targets"] == [120.0], (junk, r)
 
     # no override at all is quiet and keeps the thesis
     r = resolve(100.0, [120.0], None)

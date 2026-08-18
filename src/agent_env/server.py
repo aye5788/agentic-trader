@@ -178,7 +178,7 @@ def positions() -> str:
     prod = read_current()
     v = marks.load()
     ov = _overrides()
-    out = state.holdings(v, prod.theses if prod else [], ov)
+    out = state.holdings(v, prod.theses if prod else [], ov, _monitor_prices())
     # Excursion facts: what the path looked like, not just where it stands.
     # I/O lives here; the arithmetic is pure in src/excursion.py.
     try:
@@ -360,7 +360,7 @@ def compare_trims(notional: float, symbols: str = "") -> str:
     """
     v = marks.load() or {}
     prod = read_current()
-    held = state.holdings(v, prod.theses if prod else [], _overrides())
+    held = state.holdings(v, prod.theses if prod else [], _overrides(), _monitor_prices())
     syms = [s.strip().upper() for s in symbols.split(",") if s.strip()] or None
     return json.dumps(
         state.compare_trims(held, v.get("account_value") or 0.0, float(notional), syms),
@@ -1429,7 +1429,7 @@ def earnings(symbols: str = "", weeks: int = 6) -> str:
     syms = _symlist(symbols)
     if not syms:
         v = marks.load() or {}
-        syms = sorted(state.holdings(v, [], _overrides()).keys())
+        syms = sorted(state.holdings(v, [], _overrides(), _monitor_prices()).keys())
         if not syms:
             return json.dumps({"earnings": {},
                                "note": "no symbols given and no positions held"},
@@ -1501,6 +1501,23 @@ MIN_STOP_FRACTION = 0.50
 
 OVERRIDES = REPO / "research_store" / "monitor" / "overrides.json"
 WAKES = REPO / "research_store" / "monitor" / "wakes.json"
+
+
+def _monitor_prices() -> dict:
+    """The prices the MONITOR validates overrides against (monitor/quotes.json).
+
+    Not the position mark: marks fall back to snapshot price or cost basis, and
+    resolving an override against cost basis is how the display came to show a
+    stop the monitor had refused. Missing/torn -> {}, which makes the resolver
+    fail closed exactly as apply_overrides does.
+    """
+    # decide.QUOTES, not a hardcoded path: it is the one place this repo names
+    # the monitor's quote file, and tests redirect it. A second literal path
+    # would silently bypass that redirection and test nothing.
+    try:
+        return (json.loads(decide.QUOTES.read_text()) or {}).get("prices", {}) or {}
+    except Exception:                                           # noqa: BLE001
+        return {}
 
 
 def _overrides() -> dict:
@@ -1686,7 +1703,7 @@ def news(symbols: str = "", limit: int = 20) -> str:
     syms = _symlist(symbols)
     if not syms:
         v = marks.load() or {}
-        syms = sorted(state.holdings(v, [], _overrides()).keys())
+        syms = sorted(state.holdings(v, [], _overrides(), _monitor_prices()).keys())
     if not syms:
         return json.dumps({"news": [], "note": "no symbols and nothing held"},
                           indent=2)
@@ -1833,7 +1850,7 @@ def brief() -> str:
                           "computed live. Nothing acts on either — what a regime "
                           "call means for this book is your judgement."}
 
-    held = state.holdings(v, prod.theses if prod else [], _overrides())
+    held = state.holdings(v, prod.theses if prod else [], _overrides(), _monitor_prices())
     top = screen.rank(panel, asof, _all_tickers()).head(10).round(4)
 
     # Degrade mandate_status gracefully when no snapshot exists yet
@@ -2057,9 +2074,21 @@ def _selftest() -> None:
             globals()["_overrides"] = lambda: {
                 "NVDA": {"stop": 108.0, "targets": [], "reason": "tightened"}}
             p = json.loads(positions())
-            assert p["NVDA"]["stop"] == 108.0, p            # still the displayed value
+            # ⛔ THIS TEST USED TO ASSERT `stop == 108.0` -- "still the displayed
+            # value" -- ALONGSIDE stop_enforced False. That is the contradiction
+            # the whole levels module exists to remove: the monitor has no quote,
+            # so it refuses the override and enforces 100.0, and reporting 108.0
+            # as `stop` told the agent it was protected at a level nothing was
+            # watching. `stop` is now the ENFORCED value; what was asked for
+            # lives in `your_stop`. (Review finding, 2026-08-18.)
+            assert p["NVDA"]["stop"] == 100.0, p            # what is ENFORCED
+            assert p["NVDA"]["your_stop"] == 108.0, p       # what was asked for
             assert p["NVDA"]["stop_enforced"] is False, p
-            assert "no live price is currently known" in p["NVDA"]["stop_enforcement_note"], p
+            assert "REJECTED" in p["NVDA"]["stop_status"], p
+            assert "LEVELS_NOT_IN_FORCE" in p["NVDA"], p
+            # every stop-derived number must follow the enforced stop, not the
+            # requested one -- computing them off 108 was the original defect.
+            assert abs(p["NVDA"]["mark_to_stop_pct"] - (100.0 / 110.0 - 1.0)) < 1e-6, p
 
             # the counter-case: same override, but the monitor DOES have a
             # live quote below the new stop -- must read as enforced, not

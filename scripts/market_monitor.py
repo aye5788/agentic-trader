@@ -477,7 +477,14 @@ def apply_overrides(held: dict, overrides: dict, prices: dict | None = None) -> 
                 if (not isinstance(px, (int, float)) or not math.isfinite(px)
                         or px <= 0 or float(ov_stop) >= float(px)):
                     ov_stop = None
-            if isinstance(ov_stop, (int, float)) and t.stop is not None:
+            # math.isfinite, not just isinstance: NaN and +/-inf ARE floats, so
+            # an isinstance check alone let a NaN stop through -- and because
+            # every comparison against NaN is False, `ov_stop > t.stop` was
+            # False while an explicit widen still applied it, arming the stop
+            # watcher on a level no price can ever satisfy. Found by review,
+            # 2026-08-18; src/levels.py rejected it and the enforcer did not.
+            if (isinstance(ov_stop, (int, float)) and math.isfinite(ov_stop)
+                    and t.stop is not None):
                 widen = bool(ov.get("widen")) and str(ov.get("reason") or "").strip()
                 if ov_stop > t.stop or widen:
                     t.stop = float(ov_stop)
@@ -496,7 +503,8 @@ def apply_overrides(held: dict, overrides: dict, prices: dict | None = None) -> 
             # needs no permission either -- it only ever reduces exposure.
             ot = ov.get("targets")
             if (isinstance(ot, list) and t.targets and len(ot) == len(t.targets)
-                    and all(isinstance(o, (int, float)) for o in ot)):
+                    and all(isinstance(o, (int, float)) and math.isfinite(o)
+                            for o in ot)):
                 t.targets = [float(o) for o in ot]
             out[sym] = t
         except Exception:
@@ -524,6 +532,40 @@ def owned_symbols(snap) -> set | None:
         except (TypeError, ValueError):
             continue
     return out
+
+
+def _publish_enforcement(held, pre, prices, book_asof) -> None:
+    """Publish what apply_overrides ACTUALLY applied, for readers to trust.
+
+    ⛔ NOTHING HERE MAY PREVENT A SELL. This is a reporting side-effect sitting
+    on the poll path that ends in a stop scan, so every failure is swallowed. An
+    earlier version called _save() unguarded: _save does a direct write_text
+    that can raise, the outer loop only prints "loop error (continuing)", and a
+    path-specific write failure would therefore have skipped the entire stop
+    scan every tick while looking like a transient. A report that can stop the
+    stop is worse than no report. Found by review, 2026-08-18.
+    """
+    try:
+        _save(MON / "enforcement.json", {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "poll_id": f"{book_asof}:{datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+            "book_asof": book_asof,
+            "quotes_seen": sorted(prices.keys()) if isinstance(prices, dict) else [],
+            "levels": {
+                s: {
+                    "effective_stop": getattr(th, "stop", None),
+                    "effective_targets": list(getattr(th, "targets", []) or []),
+                    "thesis_stop": pre.get(s, (None, []))[0],
+                    "thesis_targets": pre.get(s, (None, []))[1],
+                    "override_applied": (
+                        getattr(th, "stop", None) != pre.get(s, (None, []))[0]
+                        or list(getattr(th, "targets", []) or []) != pre.get(s, (None, []))[1]),
+                }
+                for s, th in held.items()
+            },
+        })
+    except Exception:                                           # noqa: BLE001
+        pass        # never let a report block the scan that places the sell
 
 
 def unprotected_positions(theses, owned) -> dict:
@@ -988,44 +1030,26 @@ def check_once(cfg, client) -> int:
     except Exception:
         _ov = {}   # absent OR a torn read → ignore ALL overrides this tick (self-heals next tick;
                    # risk_review.py writes atomically via os.replace, so torn reads are rare)
+    # apply_overrides is called BEFORE this tick's own quotes are fetched
+    # (below), so it has no live price yet -- read the monitor's OWN last
+    # write of quotes.json (its own poll, ~15s old) instead. A missing or
+    # torn read degrades to {}, which the guard inside apply_overrides
+    # treats as "no usable price for any symbol" -- every stop override is
+    # refused (fail closed), never applied on a guess.
+    try:
+        _px = (json.loads(QUOTES.read_text()) or {}).get("prices", {})
+    except Exception:                                           # noqa: BLE001
+        _px = {}            # no quotes -> every stop override is refused (fail closed)
+    _pre = {s: (getattr(th, "stop", None), list(getattr(th, "targets", []) or []))
+            for s, th in held.items()}
     if _ov:
-        # apply_overrides is called BEFORE this tick's own quotes are fetched
-        # (below), so it has no live price yet -- read the monitor's OWN last
-        # write of quotes.json (its own poll, ~15s old) instead. A missing or
-        # torn read degrades to {}, which the guard inside apply_overrides
-        # treats as "no usable price for any symbol" -- every stop override is
-        # refused (fail closed), never applied on a guess.
-        try:
-            _px = (json.loads(QUOTES.read_text()) or {}).get("prices", {})
-        except Exception:                                       # noqa: BLE001
-            _px = {}        # no quotes -> every stop override is refused (fail closed)
-        _pre = {s: (getattr(th, "stop", None), list(getattr(th, "targets", []) or []))
-                for s, th in held.items()}
         held = apply_overrides(held, _ov, _px)
-        # ⛔ PUBLISH WHAT WAS ACTUALLY APPLIED, from the enforcer itself.
-        # Everything else that reports levels -- positions(), the dashboard, the
-        # weekly letter -- derives them, and on 2026-08-18 a derivation
-        # disagreed with this function while looking authoritative. This is the
-        # ground truth for the poll that just ran: not a second opinion, the
-        # thing the sell order will use. Additive; it changes no behaviour.
-        _save(MON / "enforcement.json", {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "poll_id": f"{prod.as_of}:{datetime.now(timezone.utc).isoformat(timespec='seconds')}",
-            "book_asof": prod.as_of,
-            "quotes_seen": sorted(_px.keys()) if isinstance(_px, dict) else [],
-            "levels": {
-                s: {
-                    "effective_stop": getattr(th, "stop", None),
-                    "effective_targets": list(getattr(th, "targets", []) or []),
-                    "thesis_stop": _pre.get(s, (None, []))[0],
-                    "thesis_targets": _pre.get(s, (None, []))[1],
-                    "override_applied": (
-                        getattr(th, "stop", None) != _pre.get(s, (None, []))[0]
-                        or list(getattr(th, "targets", []) or []) != _pre.get(s, (None, []))[1]),
-                }
-                for s, th in held.items()
-            },
-        })
+    # EVERY poll, not only the ones with overrides: a reader must be able to
+    # tell "no override applied" from "this file is stale". Writing it only
+    # under `if _ov` left the previous poll's snapshot standing, which is the
+    # same class of lie the file exists to remove. Found by review 2026-08-18.
+    _publish_enforcement(held, _pre, _px, prod.as_of)
+
     # ⚠️ NOT a bare `return 0`. An all-cash book still has wakes to watch, and
     # that is exactly when a wake matters most: "tell me if NVDA reaches X so I
     # can re-enter" is registered precisely when the name is NOT held. Returning

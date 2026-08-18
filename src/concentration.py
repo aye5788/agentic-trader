@@ -119,6 +119,49 @@ def cap_weights(weights: dict, closes: pd.DataFrame, asof, params: dict) -> dict
     return w
 
 
+def _clusters_report_selftest() -> None:
+    """⛔ clusters_report() was PUBLISHED BY positions() WITH NO TEST. The
+    module's selftest is defined above it and never touched it, so the model
+    the agent reads was unvalidated -- exactly the gate ("only after their
+    model contracts are approved") it was supposed to satisfy. Found by
+    review, 2026-08-18."""
+    import numpy as _np
+    import pandas as _pd
+    idx = _pd.date_range("2026-01-01", periods=200, freq="D")
+    rng = _np.random.default_rng(0)
+    base = _np.cumsum(rng.normal(0, 1, 200)) + 100
+    other = _np.cumsum(rng.normal(0, 1, 200)) + 100
+    closes = _pd.DataFrame({
+        "AA": base,                       # AA and AB move together
+        "AB": base + rng.normal(0, 0.01, 200),
+        "ZZ": other,                      # ZZ is independent
+    }, index=idx)
+    r = clusters_report(["AA", "AB", "ZZ"], closes, idx[-1])
+    assert r["members"]["AA"] == ["AA", "AB"], r["members"]
+    assert r["members"]["ZZ"] == ["ZZ"], r["members"]
+    # the whole contract must travel with the answer, or the number is
+    # uninterpretable and reads as a sector classification
+    for key in ("version", "method", "lookback_days", "correlation_threshold",
+                "min_observations_rule", "price_panel_asof",
+                "symbols_not_in_panel", "note"):
+        assert key in r["model"], key
+    # a symbol absent from the panel is a singleton and is NAMED as absent
+    r2 = clusters_report(["AA", "NOPE"], closes, idx[-1])
+    assert r2["members"]["NOPE"] == ["NOPE"], r2["members"]
+    assert "NOPE" in r2["model"]["symbols_not_in_panel"], r2["model"]
+    # too little history -> singleton, and said so rather than grouped silently
+    short = closes.tail(5)
+    r3 = clusters_report(["AA", "AB"], short, short.index[-1])
+    assert r3["members"]["AA"] == ["AA"], r3["members"]
+    assert set(r3["model"]["symbols_with_insufficient_history"]) == {"AA", "AB"}, r3["model"]
+    # fewer than two names cannot cluster and must not raise
+    assert clusters_report(["AA"], closes, idx[-1])["members"] == {"AA": ["AA"]}
+    assert clusters_report([], closes, idx[-1])["members"] == {}
+    print("selftest OK: clusters_report — co-movers grouped, independents and "
+          "short-history names singletons, absent symbols named, full model "
+          "contract attached")
+
+
 def _selftest() -> None:
     import numpy as np
 
@@ -174,9 +217,6 @@ def _selftest() -> None:
     assert cap_weights(heavy, closes, asof, {**p_heavy, "per_name_cap": None}) == w_noceil
     print("concentration selftest OK: cap_weights (per_name_cap water-fill)")
 
-
-if __name__ == "__main__":
-    _selftest()
 
 
 # --- Reporting membership, which is NOT the same use as capping weights -------
@@ -246,3 +286,12 @@ def clusters_report(symbols, closes, asof, lookback: int = CLUSTER_DEFAULT_LOOKB
         members.setdefault(n, [n])
         cid.setdefault(n, n)
     return {"members": members, "cluster_id": cid, "model": model}
+
+
+# ⛔ THE ENTRY POINT MUST BE LAST. It previously sat above clusters_report(), so
+# running this module executed a selftest for a function that did not yet exist
+# -- the published cluster model was therefore never validated by its own file.
+# Found by review, 2026-08-18.
+if __name__ == "__main__":
+    _selftest()
+    _clusters_report_selftest()

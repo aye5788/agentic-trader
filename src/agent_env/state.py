@@ -12,7 +12,8 @@ sys.path.insert(0, str(REPO / "src"))
 import levels                                   # noqa: E402
 
 
-def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
+def holdings(valued: dict, theses: list, overrides: dict | None = None,
+             monitor_prices: dict | None = None) -> dict:
     """Merge broker positions with the levels the agent set for them.
 
     `overrides` is research_store/monitor/overrides.json — the levels the agent
@@ -50,14 +51,24 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
         t = by_sym.get(sym)
         book_stop = getattr(t, "stop", None) if t else None
         book_targets = list(getattr(t, "targets", []) or []) if t else []
-        o = ov.get(sym) or {}
+        # A non-dict entry in overrides.json is IGNORED, matching
+        # apply_overrides, rather than raising and taking positions() down.
+        _raw_o = ov.get(sym)
+        o = _raw_o if isinstance(_raw_o, dict) else {}
         agent_stop = o.get("stop")
         agent_targets = o.get("targets")
         # price_guard=True: the live monitor always passes a prices dict, so a
         # missing mark DROPS the override there. The display must fail closed
         # the same way or it would show a level the monitor is not using.
+        # ⛔ THE MONITOR'S PRICE SOURCE, NOT THE MARK. apply_overrides validates
+        # against monitor/quotes.json. `mark` here can be a snapshot price or
+        # even COST BASIS when no monitor quote exists (src/marks.py), so
+        # resolving against it reproduces the exact divergence this module was
+        # written to remove: with no quote the monitor refuses an override and
+        # the display would still show it. Found by review, 2026-08-18.
+        _mp = (monitor_prices or {})
         _lv = levels.resolve(book_stop, book_targets, o,
-                             price=p.get("mark"), price_guard=True,
+                             price=_mp.get(sym), price_guard=True,
                              thesis_as_of=getattr(t, "as_of", None))
         _sig = dict(getattr(t, "signals", {}) or {}) if t else {}
         _qty, _ac, _mk = p.get("qty"), p.get("avg_cost"), p.get("mark")
@@ -131,6 +142,14 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
             "realized_vol_window": ("252 trading days (momentum.compute lookback)"
                                     if _sig.get("sigma") is not None else None),
             "realized_vol_source": _sig.get("source"),
+            # as-of on EVERY stored fact, not only some. The review found
+            # realized_vol_source present with no realized_vol_as_of, rank_as_of
+            # present with no rank source, and thesis_as_of emitted only when an
+            # override existed -- so a stored number could be read with no way
+            # to tell how old it was.
+            "realized_vol_as_of": getattr(t, "as_of", None) if t else None,
+            "strategy_rank_source": _sig.get("source"),
+            "thesis_as_of": getattr(t, "as_of", None) if t else None,
             "eligibility_state": _eligibility,
             "retention_state": _retention,
             # ---- Codex spec step 5: STOP-DERIVED. Unblocked only because the
@@ -158,7 +177,6 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
             rec["set_by_agent"] = True
             rec["book_stop"] = book_stop
             # Say plainly when what you asked for is NOT what is being watched.
-            rec["thesis_as_of"] = _lv["thesis_as_of"]
             rec["override_written_at"] = _lv["override_written_at"]
             rec["your_stop"] = agent_stop
             rec["your_targets"] = list(agent_targets) if agent_targets else None
@@ -423,6 +441,13 @@ def compare_trims(held: dict, account_value: float, notional: float,
     Each is absent rather than approximated, because an unvalidated estimate
     sitting beside measured facts is indistinguishable from one.
     """
+    # A negative notional describes a PURCHASE as a trim: proceeds and quantity
+    # go negative, post-trim value and gross exposure RISE. Refused rather than
+    # computed. Found by review, 2026-08-18.
+    if not isinstance(notional, (int, float)) or not (float(notional) > 0):
+        return {"error": f"notional must be a positive number, got {notional!r}. "
+                         "A trim reduces a position; this tool does not model "
+                         "adding to one.", "trims": {}}
     out, av = {}, float(account_value or 0.0)
     names = sorted(held) if symbols is None else sorted(symbols)
     for sym in names:
