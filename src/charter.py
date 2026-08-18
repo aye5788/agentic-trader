@@ -109,24 +109,41 @@ def render_gate(gov_cfg: dict) -> str:
     # one refusal it cannot diagnose from its own tools.
     order_pct = gov_cfg.get("max_order_pct")
     max_dd = gov_cfg.get("max_drawdown")
+    # ⛔ SPLIT BY SIDE, because the previous single list was WRONG in three ways
+    # and an agent read all of them (found by an independent Codex audit of the
+    # rendered charter, 2026-08-18, each verified against the code):
+    #   - "A SELL is refused by nothing but the kill switch" -- false. SHADOW
+    #     refuses sells too; the gate's own text says "including sells". An
+    #     agent believing it can always exit in shadow mode is the dangerous one.
+    #   - the per-order cap was listed as applying to "any order" -- it is
+    #     BUYS ONLY (governance.py: capping a sell would strand a position the
+    #     system is trying to exit).
+    #   - "any order in an account other than the one Agentic account" -- the
+    #     hook performs NO account check; that protection is at the broker.
     return "\n".join([
         "Before any order reaches the broker it passes a gate that runs in the "
-        "harness, not in your judgment. It refuses:",
+        "harness, not in your judgment.",
         "",
-        "- any order while the **kill switch** is set — including a sell; exits "
-        "are placed by hand then",
-        "- a **BUY** while entries are halted (exits still place)",
-        "- a **BUY** for a symbol outside the configured universe",
-        f"- a **BUY** while the book is more than **{_pct(max_dd)}** below its "
-        f"tracked equity peak — an automatic halt on entries, never on exits",
-        "- a **BUY** in a name carrying an active `rule_out`, until `revisit()` "
+        "**Refused whatever the side, buy or sell:**",
+        "",
+        "- any order while the **kill switch** is set — exits must then be "
+        "placed by hand",
+        "- **every** order while shadow mode is set, sells included",
+        "",
+        "**Refused for a BUY only.** An exit is never blocked by these: the stop "
+        "here is software, so blocking a sell would remove a position's only "
+        "protection.",
+        "",
+        "- a buy while entries are halted",
+        "- a buy for a symbol outside the configured universe",
+        f"- a buy while the book is more than **{_pct(max_dd)}** below its "
+        f"tracked equity peak",
+        "- a buy in a name carrying an active `rule_out`, until `revisit()` "
         "clears it",
-        f"- any order whose notional exceeds **{_pct(order_pct)} of equity**",
-        "- any order in an account other than the one Agentic account",
-        "- **every** order while shadow mode is set",
+        f"- a buy whose notional exceeds **{_pct(order_pct)} of equity**",
         "",
-        "**A SELL is refused by nothing but the kill switch.** Stops here are "
-        "software, so blocking a sell would remove a position's only protection.",
+        "The account you may trade in is enforced at the broker, not by this "
+        "gate.",
     ])
 
 
@@ -229,6 +246,31 @@ def render_baseline(strat_cfg: dict) -> str:
     if tilt is not None:
         parts.append(f"The signal is sector-residualised at a tilt of {tilt} — "
                      f"momentum measured against sector peers rather than raw.")
+    # ⛔ DEFINE THE SIGNAL, do not just name it. "cross-sectional momentum"
+    # appeared once and was never unpacked, so the agent could not tell what it
+    # ranks on, what makes a name eligible, or what releases a holding -- and
+    # filled the gap with generic portfolio management (2026-08-18).
+    band = port.get("book_band")
+    how = ["\n\n**What that means, concretely.** Each name is scored by "
+           "percentile-ranking two views across the eligible universe and "
+           "averaging them: risk-adjusted 12-month return, and trend (the close "
+           "divided by its 200-day mean)."]
+    how.append("A name is **eligible only if its 12-month return is positive** — "
+               "that is the absolute filter, and it is what takes this book to "
+               "cash when a trend breaks, since it has no short leg.")
+    if book_hold is not None:
+        how.append(f"The book holds the top {book_hold}.")
+    if band is not None:
+        how.append(f"A name you already hold is retained until it falls below "
+                   f"rank {band} — that band exists so a name slipping one place "
+                   f"does not churn out and straight back in.")
+    parts.append(" ".join(how))
+    parts.append(
+        "\n\n**Weekly means the ROTATION, not the risk.** The full re-rank and "
+        "rotation happens once a week, on Sunday. Weekday sessions are not "
+        "rebalances — they manage the book you already hold. That does not "
+        "restrict exits: a stop, a target, a trim, a thesis that broke, or a "
+        "same-day close are available to you on any session.")
     parts.append(
         "\n\nThe evidence: a survivorship-corrected point-in-time backtest, "
         "2021–2026, returned materially above the benchmark on both absolute and "
@@ -504,9 +546,61 @@ def _selftest() -> None:
     # the deviation allowance is present and unhedged
     assert "belief, not a rule" in out
     assert "not a violation" in out
+    # ...but it is no longer a blank cheque: deviating on SELECTION and on RISK
+    # carry different burdens. "the only thing it costs you is a recorded
+    # reason" was the sentence that licensed rank-34-38 buys on 2026-08-18.
+    assert "Deviating on RISK" in out and "Deviating on SELECTION" in out
+    assert "the only thing it costs you is a recorded" not in out
 
-    # a SELL's protection is stated
-    assert "refused by nothing but the kill switch" in out
+    # ⛔ DEFINE, DO NOT NAME. Each of these was named and never defined, and the
+    # agent filled the gap with generic portfolio management (2026-08-18).
+    assert "A swing trade here opens" in out, "the trade itself must be defined"
+    assert "It lasts days to weeks" in out
+    assert "percentile-ranking two views" in out, "the signal must be defined"
+    assert "eligible only if its 12-month return is positive" in out
+    assert "A **thesis** is the reason you opened a position" in out
+
+    # ⛔ EVERY BOUNDARY STATES ITS EXCEPTION, or the agent invents a prohibition.
+    assert "You MAY close a position the same day you opened it" in out
+    assert "not a minimum" in out or "not a promise to hold" in out
+    assert "does not forbid selling\nthe remainder" in out or \
+           "It does not forbid selling" in out
+    assert "This is about anchoring, and nothing more" in out
+    assert "except when you are\n  executing the weekly rotation" in out or \
+           "executing the weekly rotation" in out
+    assert "Weekly means the ROTATION, not the risk" in out
+
+    # ⛔ CONCENTRATION IS CONDITIONS, NOT A DISPOSITION. Stated flatly either way
+    # ("always fine" / "always a risk") produces the wrong behaviour; the agent
+    # needs the cases that distinguish them.
+    assert "These are NOT reasons to reduce a theme" in out
+    assert "These ARE reasons, and each names a specific mechanism" in out
+    assert "It fell hard today" in out, "the one-day-drawdown non-reason was lost"
+    assert "Clustered stop risk" in out
+    assert "leaves the denominator unchanged" in out, \
+        "the arithmetic a session got wrong on 2026-08-18 must be stated"
+
+    # the two guards that became judgement when fast_loop was deleted, and were
+    # named NOWHERE in the charter until 2026-08-18
+    assert "compare the live price with the thesis entry zone" in out
+    assert "rebuying a name that recently stopped out" in out
+
+    # ⛔ WHAT REFUSES A SELL MUST BE EXACTLY TRUE. This asserted "refused by
+    # nothing but the kill switch" until 2026-08-18, which was FALSE -- shadow
+    # mode refuses sells too, and an agent believing it can always exit is the
+    # dangerous direction of that error. The gate is now split by side; these
+    # assertions prove both halves survive and that the false claim is gone.
+    assert "Refused whatever the side, buy or sell" in out
+    assert "shadow mode is set, sells included" in out
+    assert "Refused for a BUY only" in out
+    assert "refused by nothing but the kill switch" not in out, \
+        "the false sell-protection claim came back"
+    # the per-order cap and the whitelist are BUY-side; a sell is never capped
+    for buy_only in ("a buy whose notional exceeds", "a buy for a symbol outside",
+                     "a buy while entries are halted"):
+        assert buy_only in out, buy_only
+    # the gate does not check the account; saying it does invents a protection
+    assert "enforced at the broker, not by this gate" in out
 
     # the author-facing marker must NEVER reach the agent -- rendered inline it
     # corrupted the very sentence it annotated
