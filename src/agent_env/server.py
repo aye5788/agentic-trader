@@ -226,6 +226,15 @@ def positions() -> str:
             current_stop=_p.get("book_stop"),
             current_targets=list(getattr(_thesis, "targets", []) or []) if _thesis else None,
             price=decide.load_price(_sym),
+            # ⛔ THE WIDEN FLAG WAS NEVER PASSED. evaluate_enforcement takes it
+            # and defaults it False, so a DELIBERATELY widened stop -- the one
+            # case where a looser override IS applied by the monitor -- was
+            # reported as rejected. Live on 2026-08-18: MRK carried
+            # widen=true and was the only override actually in force, and this
+            # report said otherwise. The monitor requires widen AND a reason,
+            # so both are read here from the same override record.
+            widen=bool((_ovr := (ov.get(_sym) or {})).get("widen"))
+                  and bool(str(_ovr.get("reason") or "").strip()),
         )
         _p["stop_enforced"] = _enf["stop"]["enforced"]
         if not _enf["stop"]["enforced"]:

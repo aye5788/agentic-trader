@@ -9,6 +9,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
+import levels                                   # noqa: E402
+
 
 def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
     """Merge broker positions with the levels the agent set for them.
@@ -47,6 +49,7 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
         o = ov.get(sym) or {}
         agent_stop = o.get("stop")
         agent_targets = o.get("targets")
+        _lv = levels.resolve(book_stop, book_targets, o, price=p.get("mark"))
         rec = {
             "qty": p.get("qty"),
             "avg_cost": p.get("avg_cost"),
@@ -54,8 +57,17 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
             "value": p.get("value"),
             "pnl": p.get("pnl"),
             "share_of_equity": (float(p["value"]) / av) if av > 0 and p.get("value") is not None else None,
-            "stop": agent_stop if agent_stop is not None else book_stop,
-            "targets": agent_targets if agent_targets else book_targets,
+            # ⛔ WHAT IS ENFORCED, not what was requested. This used to take the
+            # agent's override whenever one existed, while the monitor applied
+            # it only when stricter (or explicitly widened) and only when the
+            # target COUNT matched. So the agent read back its own numbers and
+            # believed them to be in force. Measured 2026-08-18: XOM, RTX and
+            # BAC all displayed the stop and single target the session had just
+            # reasoned out, while the monitor had rejected every one of them.
+            # src/levels.resolve is now the single rule, proven equal to
+            # market_monitor.apply_overrides on the live book.
+            "stop": _lv["effective_stop"],
+            "targets": list(_lv["effective_targets"]),
             # Mirrors market_monitor.in_book() EXACTLY — see this function's
             # docstring on why it must not approximate. A weight of 0 with
             # verdict "hold" is a HELD name the ranking did not select, given
@@ -68,6 +80,22 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
         if agent_stop is not None or agent_targets:
             rec["set_by_agent"] = True
             rec["book_stop"] = book_stop
+            # Say plainly when what you asked for is NOT what is being watched.
+            rec["your_stop"] = agent_stop
+            rec["your_targets"] = list(agent_targets) if agent_targets else None
+            rec["stop_status"] = _lv["stop_status"]
+            rec["targets_status"] = _lv["targets_status"]
+            rec["levels_in_force"] = (_lv["stop_source"] == "override"
+                                      or "REJECTED" not in _lv["stop_status"]) and \
+                                     "REJECTED" not in _lv["targets_status"]
+            _rej = [k for k in ("stop", "targets")
+                    if "REJECTED" in _lv[f"{k}_status"]]
+            if _rej:
+                rec["LEVELS_NOT_IN_FORCE"] = (
+                    f"the monitor is NOT using the {' and '.join(_rej)} you set "
+                    f"for {sym}. stop: {_lv['stop_status']}. "
+                    f"targets: {_lv['targets_status']}. What is watched: stop "
+                    f"{_lv['effective_stop']}, targets {_lv['effective_targets']}.")
             if o.get("reason"):
                 rec["level_reason"] = o["reason"]
         out[sym] = rec
