@@ -135,17 +135,18 @@ Insert as its own section. This is the spec's centrepiece.
 > **HOW YOU TRADE THIS BOOK**
 >
 > A swing trade here means, concretely:
-> - **Holding period: typically 3–15 trading sessions.** Positions usually live
->   through several sessions. This is an *expectation, not a minimum* — nothing
->   requires you to hold a position for any length of time.
->
-> ⚠️ **AARON MUST SET THIS NUMBER.** "3–15 trading sessions" is my invention. It
-> is consistent with "days to weeks" and a weekly rotation, but it is a strategy
-> parameter and it appears in no config file and no doc. Writing a number the
-> agent will treat as authoritative, derived from nothing, is precisely the
-> defect this spec exists to remove. Either Aaron states the range, or it is
-> derived from the ledger (measured holding period of closed round trips) and
-> stamped with that provenance.
+> - **Holding period: days to weeks.** Positions usually live through several
+>   sessions. This is an *expectation, not a minimum* — nothing requires you to
+>   hold a position for any length of time.
+
+The horizon is **already defined** and is unchanged by this spec: `docs/DESIGN.md`
+says "swing (multi-day to a few weeks)", `docs/STRATEGY.md` says "swing horizon
+(days–weeks)", and the charter says "days to weeks". No new number is introduced
+here, and none is needed. What was missing was never the duration — it was that
+the charter states it only by NEGATION ("you are not scalping and you are not
+investing for years") and puts the same-day permission 375 lines away in a
+section about settlement mechanics. The fix is the exception below, stated
+beside the definition.
 > - **What opens one:** a name high in the cross-sectional momentum rank that
 >   also passes the absolute filter, entered with a stop and a target set from
 >   that name's own measured behaviour.
