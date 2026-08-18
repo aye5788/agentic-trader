@@ -190,6 +190,34 @@ def positions() -> str:
                    if l.strip()]
     except Exception:
         _hi, _events = None, None
+    # Correlation-cluster membership (Codex step 6, correlation half only). I/O
+    # here, arithmetic pure in src/concentration.py. The whole model contract
+    # travels with it -- lookback, threshold, panel as-of, minimum-observation
+    # rule, version -- because a field called "cluster" with none of that reads
+    # as a sector classification, which it is not.
+    # Only when there ARE positions: with no snapshot this tool must return {}
+    # and invent nothing, and its selftest asserts exactly that.
+    try:
+        import pandas as _pd2                                  # noqa: PLC0415
+        import concentration as _conc                          # noqa: PLC0415
+        _cl = _pd2.read_parquet(REPO / "research_store" / "prices" / "closes.parquet")
+        _rep = _conc.clusters_report(list(out.keys()), _cl, _cl.index[-1]) if out else None
+    except Exception:                                          # noqa: BLE001
+        _rep = None
+    if _rep:
+        _av = float((marks.load() or {}).get("account_value") or 0.0)
+        for _sym, _p in out.items():
+            if not isinstance(_p, dict):
+                continue
+            _mem = _rep["members"].get(_sym, [_sym])
+            _p["correlation_cluster_id"] = _rep["cluster_id"].get(_sym, _sym)
+            _p["correlation_cluster_members"] = _mem
+            _wsum = sum(float(out[m].get("market_value") or 0.0)
+                        for m in _mem if isinstance(out.get(m), dict))
+            _p["correlation_cluster_weight_pct_nav"] = (
+                round(_wsum / _av, 6) if _av > 0 else None)
+        out["_correlation_cluster_model"] = _rep["model"]
+
     if _hi is not None:
         for _sym, _p in out.items():
             if not isinstance(_p, dict) or _p.get("avg_cost") is None:

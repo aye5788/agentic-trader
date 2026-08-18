@@ -177,3 +177,72 @@ def _selftest() -> None:
 
 if __name__ == "__main__":
     _selftest()
+
+
+# --- Reporting membership, which is NOT the same use as capping weights -------
+# The concentration CAP was backtested and abandoned on 2026-07-20 (it fought
+# the live 10% per-name ceiling). What follows does not cap anything: it reports
+# which held names co-move, as a measurement.
+#
+# Codex, 2026-08-18, on why this must carry its parameters: a field called
+# `cluster` "must not pretend to mean 'sector' or the agent's semantic
+# 'semi/storage complex'", and correlation clustering is honest only if the
+# output also identifies its lookback, threshold, panel as-of, minimum-
+# observation rule and model version. All five travel with the result below.
+
+CLUSTER_MODEL_VERSION = "corr-connected-components/1"
+# From the PIT backtest's own sweep grid (scripts/backtest_pit.py SWEEP:
+# lookback [63, 126], corr_threshold [0.6, 0.7, 0.8]) rather than picked here.
+CLUSTER_DEFAULT_LOOKBACK = 126
+CLUSTER_DEFAULT_THRESHOLD = 0.7
+
+
+def clusters_report(symbols, closes, asof, lookback: int = CLUSTER_DEFAULT_LOOKBACK,
+                    threshold: float = CLUSTER_DEFAULT_THRESHOLD) -> dict:
+    """Which held names co-move, with the whole model contract attached. Pure.
+
+    Returns {"members": {symbol: [names in its cluster]},
+             "cluster_id": {symbol: id},
+             "model": {...the five things that make it interpretable...}}
+
+    A name with too little history, or one absent from the panel, is its own
+    singleton and is reported as such rather than silently grouped.
+    """
+    names = sorted({s for s in symbols})
+    present = [n for n in names if n in getattr(closes, "columns", [])]
+    model = {
+        "version": CLUSTER_MODEL_VERSION,
+        "method": "connected components over pairwise Pearson correlation of "
+                  "daily returns, positive correlation only",
+        "lookback_days": int(lookback),
+        "correlation_threshold": float(threshold),
+        "min_observations_rule": f"a name needs >= {max(2, int(lookback) // 2)} "
+                                 f"non-null daily returns, else it is a singleton",
+        "price_panel_asof": str(asof),
+        "symbols_not_in_panel": sorted(set(names) - set(present)),
+        "note": "correlation membership is a MEASUREMENT, not a sector "
+                "classification and not a limit. The mandate sets no cluster cap.",
+    }
+    if len(present) < 2:
+        return {"members": {n: [n] for n in names},
+                "cluster_id": {n: n for n in names}, "model": model}
+
+    hist = closes.loc[:asof, present]
+    rets = hist.pct_change().tail(int(lookback))
+    min_obs = max(2, int(lookback) // 2)
+    usable = [c for c in rets.columns if rets[c].notna().sum() >= min_obs]
+    model["symbols_with_insufficient_history"] = sorted(set(present) - set(usable))
+
+    members, cid = {}, {}
+    if len(usable) >= 2:
+        corr = rets[usable].corr()
+        for comp in _clusters(corr, float(threshold)):
+            grp = sorted(comp)
+            key = grp[0]
+            for n in grp:
+                members[n] = grp
+                cid[n] = key
+    for n in names:                       # everything else is its own singleton
+        members.setdefault(n, [n])
+        cid.setdefault(n, n)
+    return {"members": members, "cluster_id": cid, "model": model}
