@@ -448,8 +448,10 @@ def write_levels(symbol: str, stop, targets, reason: str, ts: str,
     reason is refused by the monitor (apply_overrides requires BOTH) and is
     therefore pointless to set here.
 
-    os.replace mirrors scripts/risk_review.py: the monitor reads this file every
-    poll and a torn read makes it drop ALL overrides for that tick.
+    os.replace is required because the monitor reads this file every poll and a
+    torn read makes it drop ALL overrides for that tick. (The pattern was taken
+    from scripts/risk_review.py, retired into the sessions 2026-08-13; the
+    constraint it was written for is unchanged.)
 
     `path` defaults to the live module-level OVERRIDES, looked up at CALL time
     (not bound as a default argument) so tests can redirect writes by patching

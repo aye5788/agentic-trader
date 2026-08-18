@@ -41,8 +41,11 @@ should hold. That is the whole point of the change — the code defines the fiel
 and the guardrails; the agent plays.
 
 **It is still fenced.** Every order goes through the same gate as everything
-else: kill switch, per-order size cap, universe whitelist, `live_approved`. The
-gate runs in the harness, so the agent cannot skip it by forgetting.
+else: kill switch, per-order size cap, universe whitelist, `live_approved`,
+`HALT_ENTRIES`, the automatic drawdown halt, and any active `rule_out`. The gate
+runs in the harness, so the agent cannot skip it by forgetting. Everything on
+that list except the kill switch refuses BUYS ONLY — blocking a sell would strip
+a position of its only protection, since the stop here is software.
 
 **Why those times.** They were collision avoidance with jobs that no longer
 exist: 10:35 cleared the 10:00 fast loop (~10:04), and 15:15 landed before
@@ -57,8 +60,22 @@ order that fills at whatever the opening print turns out to be.
 
 **To stop just the sessions** and leave everything else running:
 ```
-crontab -l | grep -v run_session.sh | crontab -
+systemctl disable --now agentic-session@open.timer agentic-session@close.timer
+systemctl list-timers 'agentic-*'          # VERIFY: neither session may appear
 ```
+⚠️ **This page told you to do it with `crontab -l | grep -v run_session.sh |
+crontab -` until 2026-08-18, and that command does nothing.** The sessions have
+been systemd timers since the trading jobs were armed that way; there has never
+been a `run_session.sh` line in cron for the grep to remove. It exits 0, reports
+nothing wrong, and leaves both sessions armed — a stop that fails in the
+direction of trading. That is why the verify line above is part of the
+procedure and not an optional flourish: run it and read it.
+
+To re-arm: `systemctl enable --now agentic-session@open.timer
+agentic-session@close.timer`. ⚠️ While the timers are off, `repo_checks` reports
+four "timer NOT ENABLED" findings that MASK every other drift it would
+otherwise catch, so re-run `python3 src/repo_checks.py` after re-arming.
+
 To stop *everything*, use the kill switch below.
 
 ---

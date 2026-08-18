@@ -28,10 +28,11 @@ times (2026-08-12, 08-13, 08-14); the third bought straight into a post-earnings
 gap 4.4% below the prior close. A decision the machine records but cannot act on
 is not memory, it is a diary.
 
-So: `binding_rule_outs()` is read by scripts/fast_loop.py (drops the buy from the
-plan) and by scripts/hooks/pretooluse_order_gate.py (refuses it at placement, the
-unbypassable gate). Both chokepoints, because the loop is not the only thing that
-can place an order.
+So: `binding_rule_outs()` is read by scripts/hooks/pretooluse_order_gate.py,
+which refuses the buy at placement. That is the unbypassable chokepoint and, since
+scripts/fast_loop.py was deleted on 2026-08-14, the only one — the loop that used
+to drop these from its plan no longer exists. It does not matter which code path
+proposed the order; nothing reaches the broker without passing the gate.
 
 It binds BUYS ONLY. A rule-out can never block a sell, an exit, or a trim — same
 rule as the kill-switch split and the cooldown: stops here are software-only, so
@@ -82,8 +83,8 @@ def rule_out(root: Path, symbol: str, reason: str, now=None,
     """Record that this name was considered and rejected, with the reason.
 
     ⛔ THIS BLOCKS BUYS until revisited (or until `until` passes). See the module
-    docstring: the fast loop and the order gate both read it. It cannot block a
-    sell or an exit.
+    docstring: the order gate reads it at placement. It cannot block a sell or an
+    exit.
 
     `until` is an ISO date (YYYY-MM-DD) for a reason with a known expiry —
     "flat into earnings on the 13th" should not exclude the name forever.
@@ -138,10 +139,10 @@ def ruled_out(root: Path) -> dict:
 def binding_rule_outs(root: Path, today: str | None = None) -> dict:
     """{symbol: record} for rule-outs that BLOCK A BUY right now.
 
-    This is the function the fast loop and the order gate call. It is deliberately
-    separate from ruled_out(): that one is a reading surface for the agent (it
-    reports revisited names too), this one is a gate input and returns only what
-    is currently binding.
+    This is the function the order gate calls. It is deliberately separate from
+    ruled_out(): that one is a reading surface for the agent (it reports revisited
+    names too), this one is a gate input and returns only what is currently
+    binding.
 
     - latest entry per symbol wins (append-only file, revisit supersedes)
     - status must be "ruled_out" — a revisited name binds nothing

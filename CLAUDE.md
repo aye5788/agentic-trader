@@ -24,6 +24,14 @@ in `docs/DESIGN.md`.
 3. **This is LIVE money.** The Agentic account holds real funds. Real orders move
    real money. Prefer the review → place pattern; respect any human-approval /
    guardrail config.
+   **Account shape (changed 2026-08-18): `type: limited_margin`, was `cash`.**
+   Sale proceeds are spendable the SAME SESSION — there is no T+1 wait and no
+   settlement deferral any more. Limited margin settles proceeds; it does not
+   lend: the broker reports `unleveraged_buying_power` equal to `buying_power`,
+   so there is no leverage to draw on, no short leg, and `option_level` is empty
+   (options are structurally absent, not merely disallowed). Size against
+   `buying_power` — it is what an order is checked against — and read it live,
+   never from memory or from a number written in these docs.
    ⛔ **Never anchor on the account balance.** Do not treat it as small, do not
    write "at this scale…" / "only a demo account…", and never use the size of the
    book to discount a security, correctness, or risk concern. Judge every risk on
@@ -175,10 +183,16 @@ config/universe.csv     Fixed 150-name momentum universe (human-seed reconciled
                         with dollar-volume liquidity fill). `flag` col marks
                         adr/micro/spec/fresh-ipo model-caveats. Referenced by
                         [universe] in strategy.toml.
-config/etf_universe.csv 18-ETF dual-momentum rotation sleeve (11 SPDR sectors +
-                        broad + intl + defensive). A SECOND parallel engine to the
-                        single-name book; defensive assets rank in-sleeve as the
-                        built-in off-switch. Referenced by [etf_sleeve].
+config/etf_universe.csv 18 ETFs (11 SPDR sectors + broad + intl + defensive).
+                        ⚠️ THE SLEEVE IS RETIRED (2026-08-16: [etf_sleeve]
+                        enabled=false, sleeve_weight 0.0, book_weight 1.0,
+                        book_hold 10→14 so per-name size did not jump to 10%);
+                        the four held ETFs were sold 2026-08-17. The FILE stays
+                        and ETFs are still SCORED — the residual-momentum tilt
+                        regresses on the 11 SPDR sectors, the order-gate
+                        whitelist needs held ETFs nameable, and an unscored live
+                        ETF would have no computable stop. Retired as an
+                        ALLOCATION, not as instruments.
 src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
 src/governance.py       Layer-5 guardrails: kill-switch file, drawdown halt,
                         per-order cap, universe whitelist, live_approved master
@@ -417,7 +431,7 @@ scripts/backtest_pit.py SURVIVORSHIP-CORRECTED backtest: ranks top-150 by traili
                         biased 34%. held-into-death=0 (risk framework works).
 config/pit_pool.csv     816-name survivorship-free pool (ticker, source, in_sp500_ever).
 scripts/slow_loop.py    SLOW LOOP (deterministic brain, no LLM, no trading): momentum
-                        signal → top-10 book + top-4 sleeve → IBD trade geometry
+                        signal → top-14 book (sleeve retired) → IBD trade geometry
                         (vol-scaled targets, R:R≥2) → write validated book to the
                         Research Store. Regime-off/nothing-eligible → cash is valid.
                         (scripts/fast_loop.py was the diff core — stored targets
@@ -470,8 +484,11 @@ docs/OPSLOG.md          Dated ops & maintainer log (newest first). Technical/
                         the letter states portfolio impact in ≤1 sentence and
                         points here. Newsletter run appends entries (step 3b).
 docs/STRATEGY.md        THE TRADING STRATEGY, written for the deployed agent —
-                        dual momentum: exact signal math, portfolio rules, the
-                        fast-loop execution procedure, guardrails, proof gate.
+                        dual momentum: exact signal math, portfolio rules, how
+                        execution actually happens (the SESSIONS, §8 — the
+                        fast-loop procedure it used to describe is deleted),
+                        guardrails, proof gate. ⚠️ config/strategy.toml is
+                        authoritative for every number; §4 defers to it.
                         Read this before trading. (edge = momentum, options OFF)
 docs/OPERATOR_MANUAL.md THE human-operator manual — step-by-step for every task the
                         principal (Aaron) does: reviewing/

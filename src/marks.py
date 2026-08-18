@@ -145,11 +145,14 @@ def load(snapshot_path: Path = SNAPSHOT) -> dict | None:
             "as_of": snap.get("as_of"), "ts": snap_ts or None,
             "snapshot_freshness": freshness,
             # Pass through the broker's OWN funding figures when the snapshot
-            # carries them. `cash` is NOT what can be spent: on this cash account
-            # sale proceeds are unsettled for T+1, so on 2026-08-10 cash was
-            # $9.20 while buying_power was $2.14 (unsettled_funds $7.06). Anything
-            # sizing a BUY against `cash` is sizing against money that is not
-            # there. Absent -> None, never a substituted value.
+            # carries them. `buying_power` is what an order is checked against,
+            # so it is the figure a BUY is sized from -- never `cash`. Under the
+            # old CASH account the two could differ by most of the balance
+            # (2026-08-10: cash $9.20, buying_power $2.14, unsettled_funds
+            # $7.06). Since the move to LIMITED MARGIN on 2026-08-18 proceeds
+            # settle same-session and they normally agree, but the rule is
+            # unchanged because the AUTHORITY is unchanged.
+            # Absent -> None, never a substituted value.
             "buying_power": (round(float(snap["buying_power"]), 2)
                              if snap.get("buying_power") is not None else None),
             "unsettled_funds": (round(float(snap["unsettled_funds"]), 2)

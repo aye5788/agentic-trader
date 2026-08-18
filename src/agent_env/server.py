@@ -101,9 +101,11 @@ def _staleness(v: dict) -> dict | None:
     of failure available here: not zero orders, but confident wrong ones, sized
     and targeted against positions that may already have been sold.
 
-    The writers are the 10:00 fast loop and the monitor. Retiring the fast loop
-    (plan Task 8 step 5) removes one of them, so this must be loud before that
-    happens, not after.
+    The writer is now agent_env.refresh_broker_snapshot() (every session, trading
+    or not) plus record_fills() after a trade. The 10:00 fast loop used to write
+    it too; when that was deleted on 2026-08-14 nothing took over, and the
+    snapshot went two days stale on 08-16 while the monitor stop-watched a
+    position that had already been sold. That is why this is loud.
     """
     from datetime import datetime, timezone           # noqa: PLC0415
     causal = snapshot_freshness.status(
@@ -276,14 +278,14 @@ def account() -> str:
     out["buying_power"] = bp
     out["unsettled_funds"] = v.get("unsettled_funds")
     if bp is None:
-        out["spendable"] = ("UNKNOWN from this snapshot. `cash` is NOT what you "
-                            "can spend — this is a CASH account, so sale proceeds "
-                            "are unsettled until T+1. Call Robinhood's "
+        out["spendable"] = ("UNKNOWN from this snapshot. Call Robinhood's "
                             "get_portfolio for the authoritative buying_power "
-                            "before sizing any buy.")
+                            "before sizing any buy — that is the figure an order "
+                            "is checked against, and this snapshot lacks it.")
     else:
-        out["spendable"] = (f"{bp} — size buys against THIS, not `cash`. Sale "
-                            f"proceeds settle T+1 on this cash account.")
+        out["spendable"] = (f"{bp} — size buys against THIS. Limited-margin "
+                            f"account: sale proceeds are spendable the same "
+                            f"session, so a sale can fund a purchase today.")
     return json.dumps(out, indent=2, default=str)
 
 
@@ -1074,7 +1076,7 @@ def announce(headline: str, detail: str = "") -> str:
     channel.
 
     Do NOT announce the routine: every fill is already pushed with its reason,
-    and settlement/buying-power deferrals self-heal and are deliberately silent.
+    and a buying-power deferral self-heals and is deliberately silent.
 
     Delivery is best-effort and unconfirmed. The message is handed to a detached
     sender so a slow or unreachable ntfy server cannot stall you; if no push
@@ -1253,9 +1255,13 @@ def check_order(symbol: str, side: str, amount: float) -> str:
     # Funding: ADVISORY, never a block. An underfunded buy is rejected by the
     # broker, so it wastes a placement rather than endangering anything — and
     # blocking on a possibly-stale snapshot could freeze trading on bad data.
-    # But `cash` is not spendable on this CASH account (proceeds settle T+1), so
-    # an agent sizing against cash plans orders that cannot fill: on 2026-08-10
-    # cash was $9.20 and buying_power $2.14.
+    # Size against `buying_power`, never `cash`: it is what Robinhood checks an
+    # order against. Under the old CASH account those two could differ by most of
+    # the balance (2026-08-10: cash $9.20, buying_power $2.14) because proceeds
+    # sat unsettled for T+1. The account moved to LIMITED MARGIN on 2026-08-18,
+    # so proceeds are spendable the same session and the gap is normally zero --
+    # buying_power remains the authority either way, which is why this reads it
+    # rather than inferring spendability from `cash`.
     funding = None
     if sd == "buy":
         bp = v.get("buying_power") if v else None
@@ -1272,8 +1278,7 @@ def check_order(symbol: str, side: str, amount: float) -> str:
                        "unsettled_funds": v.get("unsettled_funds"),
                        "note": ("fits within buying power" if float(amount) <= bp else
                                 f"${float(amount):.2f} exceeds buying power ${bp:.2f} "
-                                f"— Robinhood will reject this. Unsettled proceeds "
-                                f"become available T+1.")}
+                                f"— Robinhood will reject this.")}
 
     liquidity_advisory = {
         "ok": liq_ok,
@@ -1802,8 +1807,8 @@ def _selftest() -> None:
                    ("account_number", "account_value", "cash", "invested",
                     "as_of", "marked_at", "buying_power", "unsettled_funds")), a
         # ...and `spendable` must still WARN rather than go quiet: silence here
-        # would read as "cash is spendable", which on a T+1 cash account is the
-        # error this field exists to prevent.
+        # would read as "size against whatever `cash` says", when the figure an
+        # order is actually checked against is missing from this snapshot.
         assert "UNKNOWN" in a["spendable"] and "get_portfolio" in a["spendable"], a
         # brief() must also degrade gracefully without a snapshot: return valid JSON
         # with account block carrying nulls, empty positions, degraded mandate,

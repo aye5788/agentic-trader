@@ -112,8 +112,8 @@ PROCEDURE — follow exactly:
     write an empty file); a `fraction` of 1.0 is refused here by design. Same
     rules as 7c: `UNANCHORED` is reported not retried, and this helper is the
     only writer.
-7e. **Ledger reconcile.** Write `research_store/rh/orders_dump.json` (same schema as the
-    fast loop's step 8) from `get_equity_orders`, then run
+7e. **Ledger reconcile.** Write `research_store/rh/orders_dump.json` (the raw
+    `get_equity_orders` response shape) from `get_equity_orders`, then run
     `.venv/bin/python scripts/reconcile_ledger.py`. Don't suppress its exit code.
 8. Report one concise line per exit: symbol, reason, amount sold, order id (or why
    skipped). That is your entire output.

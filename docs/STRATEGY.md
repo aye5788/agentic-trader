@@ -36,10 +36,14 @@ Both are ranked by the *identical* signal in §3; they are just two lists.
   Respect the `flag` column: `fresh-ipo` (e.g. SpaceX) has no 12-month history —
   it is **unrankable until it seasons**; skip it, don't crash on it. `adr` /
   `micro` / `spec` are tradeable but note them.
-- **ETF sleeve** — the 18 in [`config/etf_universe.csv`](../config/etf_universe.csv).
-  The defensive assets (GLD, TLT, AGG) are *inside* the rank on purpose: when
-  equities weaken they rise to the top and you rotate into them — that is the
-  built-in off-switch destination, not a separate rule.
+- ~~**ETF sleeve**~~ — **RETIRED 2026-08-16** (see §4). The 18 in
+  [`config/etf_universe.csv`](../config/etf_universe.csv) are still scored and
+  still tradeable, but they no longer receive their own allocation. The design
+  intent was that the defensive assets (GLD, TLT, AGG) sat *inside* the rank, so
+  that when equities weakened they rose to the top and you rotated into them —
+  a built-in off-switch destination. With the sleeve retired there is no
+  automatic rotation into them; going defensive is a judgement you make and
+  record, like any other.
 
 ## 3. The signal — compute this exactly (both engines)
 
@@ -64,18 +68,28 @@ excluded from the held set (it can still be computed, but never held).
 
 ## 4. Portfolio construction
 
-- **Single-name book:** hold the **top 10** eligible names. **Banded exit:** a
-  name you already hold is kept until it falls **below rank 15**; a new name is
-  added only when it is in the **top 10** and a slot is open. (The band stops
-  churn at the rank boundary.)
-- **ETF sleeve:** hold the **top 4** eligible ETFs by the same composite.
-- **Capital split:** **70% to the single-name book, 30% to the ETF sleeve**
-  (fixed). Size positions *within* each engine's allocation — the book's 10 names
-  share its 70%, the sleeve's 4 ETFs share its 30%.
-- **Sizing:** obey the `[risk]` mandate in `strategy.toml` — ≤10% per name, ≤10
-  holdings, ≤100% invested, and **reward:risk ≥ 2:1** (the Research Store rejects
-  any thesis that violates this on write; if a name can't be given ≥2:1 geometry,
-  it doesn't get held).
+⚠️ **These are the shapes `config/strategy.toml` actually holds. The TOML is
+authoritative — read `[portfolio]` rather than trusting this paragraph.**
+
+- **Single-name book:** hold the **top `book_hold`** eligible names (14).
+  **Banded exit:** a name you already hold is kept until it falls below rank
+  `book_band` (20); a new name is added only when it is in the top `book_hold`
+  and a slot is open. (The band stops churn at the rank boundary.)
+- **ETF sleeve: RETIRED 2026-08-16.** `[etf_sleeve] enabled = false`,
+  `sleeve_hold = 0`, `sleeve_weight = 0.0`, `book_weight = 1.0` — the single-name
+  book is the whole book. The four held ETFs were sold on 2026-08-17; retiring a
+  sleeve in config does not sell anything, so that was a separate decision.
+  Note `book_hold` moved 10 → 14 at the same time, deliberately: dropping the
+  sleeve would otherwise have concentrated per-name size from ~7% to 10%.
+- **ETFs are still SCORED.** `config/etf_universe.csv` stays — the
+  residual-momentum tilt regresses on the 11 SPDR sectors, the order gate's
+  whitelist needs held ETFs to be nameable, and a live ETF position with no
+  computable stop would be unprotected. What was retired is the sleeve as an
+  *allocation*, not ETFs as instruments.
+- **Sizing:** obey the `[risk]` mandate in `strategy.toml` — ≤10% per name,
+  ≤`max_holdings` holdings, ≤100% invested, and **reward:risk ≥ 2:1** (the
+  Research Store rejects any thesis that violates this on write; if a name can't
+  be given ≥2:1 geometry, it doesn't get held).
 
 ## 5. Cadence
 
@@ -94,9 +108,13 @@ excluded from the held set (it can still be computed, but never held).
   would have skipped XLK at 3.8% *below* its zone.) The tolerance is vol-scaled
   because `entry_zone` is a flat ±0.5% band while the rest of the geometry
   scales with vol: flat is noise for a 7%/day mover and a straitjacket for a
-  1.5%/day ETF. Enforced in `fast_loop.apply_chase_guard`, `[trade_management]
-  no_chase` + `chase_tol_sigma` (default 0.5σ ≈ 8% of entries blocked).
-  **Fails open** — a missing quote/sigma/zone lets the order through, logged.
+  1.5%/day ETF. ⛔ **NOT ENFORCED ANYWHERE since 2026-08-14** — the only
+  implementation was `fast_loop.apply_chase_guard`, which went with the deleted
+  executor. `[trade_management] no_chase` + `chase_tol_sigma` (0.5σ) remain in
+  config as the documented default for a judgement the SESSION now makes;
+  `brief()` and `terrain()` carry the entry zone it was computed from. Stated
+  plainly rather than left implied: this clause was documented as enforced for
+  months while wired to nothing, and §7 records what that cost.
 - **Stop:** volatility-adjusted (below the recent swing low / an ATR multiple) —
   **not** a flat 2–3%.
 - **Targets:** tiered scale-out at **multiples of risk** (R = entry−stop):
@@ -160,17 +178,33 @@ after the gate stopped existing in one form and was removed in the other.**
   live_approved, HALT_ENTRIES, the automatic drawdown halt, the per-order cap,
   the universe whitelist, and an active `rule_out`.
 
-## 8. Execution — the fast-loop procedure
+## 8. Execution — the sessions, with judgment
 
-1. `get_accounts` → select the **one** account with `agentic_allowed = true`
-   (nickname **"Agentic"**, a cash account). If zero or more than one match, or
-   it's ambiguous — **abort and trade nothing.**
-2. `get_equity_positions(that account)` → your actual holdings.
-3. Read the target theses the slow loop wrote to the Research Store.
-4. Diff target vs actual → the order list.
-5. Per order: `review_equity_order` → (human approval if configured) →
-   `place_equity_order`. **Fractional. Equities only. Options OFF.**
-6. **Never** read-for-decision or write to any other account. Every non-Agentic
+⚠️ **CHANGED 2026-08-14. This section described a procedural fast loop that no
+longer exists.** `scripts/fast_loop.py` diffed the stored book against holdings
+and placed the difference at 10:00 — 35 minutes before the open session reasoned
+— so it moved first every day and the session spent its run undoing it. It is
+deleted. Nothing executes the slow loop's output; that output is a PROPOSAL to a
+session, not an order.
+
+Execution is now two agent sessions per weekday (10:35 and 15:15), each handed
+`prompts/charter.md` and its own judgment rather than a procedure. What holds
+regardless of who is executing:
+
+1. `get_accounts` → act **only** in the one account with `agentic_allowed = true`
+   (nickname **"Agentic"**, `type: limited_margin` since 2026-08-18). If zero or
+   more than one match, or it is ambiguous — **abort and trade nothing.**
+2. `get_equity_positions(that account)` → actual holdings. The cached snapshot is
+   not authoritative; the broker is.
+3. Size against `buying_power`. **Fractional. Equities only. Options OFF** — the
+   account carries no option level, so the surface is absent, not merely barred.
+4. Every order passes the PreToolUse order gate, which runs in the harness and
+   cannot be skipped by forgetting. It refuses on the kill switch, `live_approved`,
+   `HALT_ENTRIES`, the automatic drawdown halt, an active `rule_out`, the
+   per-order cap, the universe whitelist and shadow mode. **A sell is refused by
+   nothing but the kill switch** — stops here are software, so blocking a sell
+   would remove a position's only protection.
+5. **Never** read-for-decision or write to any other account. Every non-Agentic
    account is off-limits for trading.
 
 ## 9. Before you go live — the proof gate

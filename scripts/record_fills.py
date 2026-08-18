@@ -83,10 +83,19 @@ def main() -> None:
     _push_summary(fills, entry.get("reentry_decisions"))
 
 
-# Skip reasons the system handles by itself and re-plans next run — settlement
-# lag in this cash account and its buying-power symptom. These are working-as-
-# intended deferrals, not incidents: keep them journaled, but off the phone.
-_EXPECTED_SKIP = ("settle", "buying_power", "insufficient", "pending")
+# Skip reasons the system handles by itself and re-plans next run. These are
+# working-as-intended deferrals, not incidents: keep them journaled, but off the
+# phone — a text about a self-healing condition trains a human to ignore the
+# channel.
+#
+# ⚠️ NARROWED 2026-08-18. "settle" and "pending" were removed when the account
+# moved from cash to LIMITED MARGIN. They belonged here while sale proceeds took
+# T+1 to return and a buy following a sell was routinely deferred a day. Proceeds
+# now settle same-session, so that deferral should not happen at all — which
+# makes a settlement skip an ANOMALY, and the first evidence that something about
+# the account changed. Suppressing it would hide exactly the signal worth having.
+# An underfunded order is still ordinary, so buying-power skips stay quiet.
+_EXPECTED_SKIP = ("buying_power", "insufficient")
 
 
 def _expected_skip(reason) -> bool:
@@ -126,14 +135,35 @@ def _selftest() -> None:
                "avg_price": 57.3479}]
     assert missing_quantity(legacy) == ["XLE"], "must flag the legacy shape"
     assert missing_quantity([ok, *legacy]) == ["XLE"], "must flag only the gap"
+    # --- _expected_skip: what stays off the phone, and what must NOT ----------
+    # This had no coverage at all until 2026-08-18, which is how the settlement
+    # entries survived the account change unexamined. An underfunded order is
+    # ordinary and stays quiet; a settlement deferral is now an anomaly on a
+    # limited-margin account and MUST reach the phone.
+    assert _expected_skip("insufficient buying_power") is True
+    assert _expected_skip("insufficient funds") is True
+    assert _expected_skip("pending_settlement") is False, \
+        "a settlement skip is an anomaly under limited margin — must NOT be muted"
+    assert _expected_skip("unsettled cash") is False, \
+        "unsettled cash should not exist on this account — must NOT be muted"
+    assert _expected_skip("review rejected") is False
+    assert _expected_skip(None) is False
+    # ...and the suppression must actually govern the push, not just the helper
+    _quiet = [{"symbol": "AAA", "status": "skipped", "reason": "insufficient buying_power"}]
+    _loud = [{"symbol": "BBB", "status": "skipped", "reason": "pending_settlement"}]
+    assert [f for f in _quiet if not _expected_skip(f["reason"])] == []
+    assert [f["symbol"] for f in _loud if not _expected_skip(f["reason"])] == ["BBB"]
+
     print("selftest OK: missing_quantity flags executed-without-shares, "
-          "ignores skips, catches the legacy shape")
+          "ignores skips, catches the legacy shape; _expected_skip mutes "
+          "buying-power deferrals and surfaces settlement ones")
 
 
 def _push_summary(fills: list, reentry: list | None) -> None:
     """Phone push: one line per order. push() never raises, so neither do we.
-    Routine settlement/buying-power deferrals are suppressed (see _EXPECTED_SKIP)
-    — a run whose only activity is one of those sends no text at all."""
+    Routine buying-power deferrals are suppressed (see _EXPECTED_SKIP) — a run
+    whose only activity is one of those sends no text at all. A SETTLEMENT skip
+    is no longer routine and is no longer suppressed."""
     placed = [f for f in fills if f.get("status") != "skipped"]
     skipped = [f for f in fills if f.get("status") == "skipped"
                and not _expected_skip(f.get("reason"))]

@@ -44,9 +44,12 @@ LAYER 4  EXECUTION       Robinhood MCP: review -> place  (thin, dumb, reliable)
 regulation — our data is EOD-shaped, the slow loop runs nightly, and the edge
 below plays out over days-to-weeks. Day trading is off the table on *data cadence
 + loop design*, **not** PDT: the Pattern-Day-Trader rule was eliminated Jun 4 2026,
-and in any case it only ever applied to *margin* accounts. Ours is a **cash
-account**, so the sole intraday constraint is **T+1 settlement** — a non-issue for
-a days-to-weeks hold.
+and in any case it only ever applied to *margin* accounts. Ours became a
+**limited-margin** account on 2026-08-18 (it was a cash account before that), so
+sale proceeds are spendable the same session and **T+1 settlement no longer
+constrains anything** — it was a non-issue for a days-to-weeks hold either way.
+Limited margin settles proceeds; it does not lend. The broker reports no
+borrowing capacity, so there is still no leverage and no short leg.
 
 **Edge: hybrid dual momentum.** Horizon ≠ edge — "swing" is how long we hold, not
 why we profit. Two independent momentum signals must **agree** to hold a name: it
@@ -356,7 +359,7 @@ on a timer, with nobody watching**. Three things make that work:
 - [x] Wrap remaining Schwab endpoints — quote, price history, option chain,
       movers, market hours (all verified live)
 - [x] Wire Alpaca news into the sensing layer (repo adapter, verified live)
-- [x] Strategy foundation decided — momentum swing (pivoted from a PEAD first pass), equities-first, cash acct
+- [x] Strategy foundation decided — momentum swing (pivoted from a PEAD first pass), equities-first; cash account until 2026-08-18, limited margin since
 - [x] Trade-management + risk rules speced — IBD-derived, vol-adjusted stops, R:R gate
 - [x] Regime-gate design — mechanical floor + agent overlay; FRED vetted as supplement
 - [x] Build **earnings event calendar** (`src/event_calendar/`) — Finnhub spine +

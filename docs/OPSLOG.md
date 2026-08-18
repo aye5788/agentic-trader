@@ -9,6 +9,127 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-18 — limited margin, and the instructions that had stopped describing the system
+
+Aaron switched the Agentic account from cash to **limited margin**. Verified at
+the broker rather than taken on trust, because the whole point of the change is
+what the system is allowed to believe:
+
+| | 08-17 (cash) | 08-18 (limited margin) |
+| --- | --- | --- |
+| `type` | `cash` | `limited_margin` |
+| `cash` | 25.13 | 25.13 |
+| `buying_power` | **2.36** | **25.13** |
+| `unleveraged_buying_power` | — | 25.13 |
+| `unsettled_funds` | 7.06 (08-10 ref) | 0 |
+
+`buying_power == unleveraged_buying_power` is the machine-readable proof that
+this is settlement, not borrowing: proceeds are usable the same session and
+there is no leverage to draw on. `option_level` is empty, so options remain
+structurally absent. The ~$22.80 stranded unsettled from the 08-17 ETF
+liquidation became spendable.
+
+**The change itself was small; the sweep it triggered was not.** Sixteen sites
+asserted the cash-account premise, six of them read by the live agent every
+session — `account()` returned "this is a CASH account" on every call, and the
+charter told the agent that selling and rebuying the same day was impossible.
+The agent was pacing against a constraint that no longer existed. `buying_power`
+remains the figure to size against everywhere: its authority never depended on
+the gap being large, so no sizing logic changed, only the claims about why.
+
+One behaviour change. `record_fills._EXPECTED_SKIP` muted `settle`/`pending`
+skips from the phone and the letter as routine self-healing. Under same-session
+settlement that deferral should not occur at all, so a settlement skip is now an
+anomaly and the first evidence the account changed underneath us — it surfaces.
+`_expected_skip` had **no test at all**, which is precisely how the settlement
+entries survived the account change unexamined; it has one now.
+
+### What the widened sweep found, which was worse than the margin text
+
+Aaron asked for every instruction surface to be checked for *all* stale
+references, not only settlement ones. Four findings, in descending order of how
+badly they could bite:
+
+- **⛔ The documented way to stop just the sessions did nothing.** The operator
+  manual said `crontab -l | grep -v run_session.sh | crontab -`. There has never
+  been a `run_session.sh` line in cron — the sessions are systemd timers. The
+  command exits 0, reports nothing wrong, and leaves both trading sessions
+  armed. A stop that fails toward trading. Replaced with `systemctl disable
+  --now agentic-session@{open,close}.timer` plus a `list-timers` VERIFY line,
+  because a command that appears to succeed is exactly what failed here.
+- **The charter promised a session that has never existed.** It said "Three run
+  each weekday" and carried a full `### 12:00 — WHAT CHANGED?` section; only
+  `@open` (10:35) and `@close` (15:15) have ever existed, and it named both of
+  those at the wrong times (10:00, 15:45 — the latter a fossil of the retired
+  risk review). An agent told a midday session is coming can defer a decision to
+  a session that never runs. Nothing caught it because `charter.py`'s selftest
+  asserted the three headings — it was testing the charter against itself. The
+  12:00 section's trim/giveback discipline (the behaviour with the best measured
+  record here) was MOVED into 15:15, not deleted, and the phantom times are now
+  asserted ABSENT so they cannot come back.
+- **The charter justified a live obligation with a deleted subsystem.**
+  `rule_out()` was explained by "the 10:00 fast loop is deterministic: it
+  rebuilds the book from the stored targets" — deleted 08-14. The obligation is
+  still enforced at the order gate; only its stated reason had died, which is
+  the shape of staleness most likely to get a real rule ignored.
+- **`render_gate` presented an incomplete refusal list as complete.** It said
+  "It refuses:" and omitted the automatic drawdown halt and an active
+  `rule_out` — the drawdown halt being the one refusal an agent cannot diagnose
+  from its own tools. Both added, interpolated from config, with the entries-only
+  scope stated.
+
+`docs/STRATEGY.md` — the file whose header says "Read this before trading" —
+still specified top-10 names, a top-4 ETF sleeve and a 70/30 split (retired
+08-16, liquidated 08-17), cited `fast_loop.apply_chase_guard` as enforcing the
+chase rule (it enforces nothing anywhere), and had a section titled "Execution —
+the fast-loop procedure". §4 now defers to `strategy.toml` rather than restating
+its numbers, which is the only version of that section that cannot rot again.
+
+**The pattern worth keeping:** every one of these was a doc describing a system
+that had been changed underneath it, and each was found by checking a claim
+against the machine rather than reading for plausibility. The claims all read
+fine. What made them false was invisible from the text.
+
+Not done, deliberately: no leverage tripwire reading `unleveraged_buying_power`,
+and no churn norm to replace the pacing that settlement used to impose by
+accident. Aaron's call — state the world accurately and let judgement operate,
+rather than layering a new static rule the moment an old accidental one falls
+away.
+
+
+## 2026-08-17 — the ETF sleeve was retired, then actually liquidated
+
+The sleeve was retired in config on 08-16 (`22151c1`: `[etf_sleeve] enabled =
+false`, book 10 → 14 names at 7.14%, band 15 → 20). **Retiring it in config does
+not sell anything** — the commit deliberately does not force-sell held ETFs, it
+drops them from the weighted book and leaves the exit to judgement. So for one
+session the account held four funds that the ranking assigned 0% and no thesis
+argued for.
+
+The 09:30 session on 08-17 closed that gap on a one-time instruction from Aaron:
+IWM, XLK, XLE and XLV sold in full as market orders at the open. All four
+gate-checked clean, filled complete, zero fees, no partials — IWM $6.19 @
+303.7081, XLK $5.76 @ 191.0601, XLE $5.41 @ 62.2401, XLV $5.41 @ 166.2828.
+
+Two things worth keeping:
+
+- **The session verified the live broker book before selling rather than
+  trusting `positions.json`.** Quantities matched Sunday's table exactly
+  (IWM 0.020380, XLK 0.030134, XLE 0.086913, XLV 0.032554) and no fifth ETF
+  existed, which is what let it assert "no ETFs remain" as a fact rather than a
+  hope. This is the 08-16 stale-snapshot lesson being applied one day later.
+- **The proceeds (~$22.80) were not redeployed**, so the book ended the week at
+  8 names and 41% cash against a 14-name target with six unowned (LITE, WDC,
+  FTNT, LRCX, NBIS, AMAT). Several are in cooldown. No `PORTFOLIO` decision was
+  journalled explaining the non-deployment — the letter states the cash position
+  as fact and does not invent a reason for it.
+
+`config/etf_universe.csv` stays: the residual-momentum tilt regresses on the 11
+SPDR sectors, and the order-gate whitelist still needs held ETFs to be nameable.
+ETFs are also still *scored* — skipping the scoring rather than the selection
+would leave a live position with no computable stop.
+
+
 ## 2026-08-16 — the account snapshot went stale and nothing could repair it
 
 **Found by a rehearsal, not by a check.** A mock run of the newsletter agent read

@@ -158,7 +158,8 @@ def concentration(positions: dict, account_value: float, max_pct: float) -> dict
     position's `value` and `account_value` are validated with
     `math.isfinite()`, not just a type check.
 
-    This is a long-only cash account: no shorting, no margin. A negative
+    This account is long-only and cannot short or borrow -- limited margin
+    settles proceeds, it does not lend. A negative
     position `value` therefore cannot be a real short exposure -- it means the
     data is corrupt. `max(shares, key=...)` would pick the signed maximum, so
     a negative mark either (a) is alone and reads as a small negative "PASS",
@@ -580,7 +581,8 @@ def _selftest() -> None:
     assert abs(r_ord["room"] - 0.05) < 1e-9, r_ord
 
     # --- negative market value discipline (review finding) ---------------------
-    # A long-only cash account cannot hold a negative position: a negative
+    # A long-only account that cannot short will not hold a negative position:
+    # a negative
     # `value` means the data is corrupt, not that there is a short exposure.
     # `max(shares, key=...)` picks the signed maximum, so a lone negative mark
     # used to read as a small negative "PASS" -- must be INSUFFICIENT instead.
