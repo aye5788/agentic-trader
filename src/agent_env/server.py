@@ -156,10 +156,24 @@ def _staleness(v: dict) -> dict | None:
 
 @mcp.tool()
 def positions() -> str:
-    """Every position actually held, with the stop and target set for it.
+    """Every position actually held, with the stop and targets ACTUALLY ENFORCED.
+
+    `stop` and `targets` are what the monitor will use, resolved by
+    src/levels.py -- not what you asked for. When an override you set was
+    refused, `LEVELS_NOT_IN_FORCE` says so and names which part, and
+    `your_stop` / `your_targets` show what you had asked for.
 
     `watched: false` means the position has NO stop being enforced — it is
     unprotected. That is deliberately reported rather than hidden.
+
+    These columns are measurements, not recommendations, and row order has no
+    policy meaning. `trade_pnl_at_stop` is P&L relative to entry and is not
+    prospective risk. `mark_to_stop` assumes execution exactly at the stop;
+    gaps and slippage can produce a larger loss. `stop_distance_sigma` is
+    standardized distance under the stated volatility estimator, not
+    stop-hit probability. No single column identifies the correct trim.
+    Portfolio exposure, cluster concentration, strategy state, and the
+    proposed order's before/after effects remain separate considerations.
     """
     prod = read_current()
     v = marks.load()
@@ -296,6 +310,33 @@ def account() -> str:
                             f"account: sale proceeds are spendable the same "
                             f"session, so a sale can fund a purchase today.")
     return json.dumps(out, indent=2, default=str)
+
+
+@mcp.tool()
+def compare_trims(notional: float, symbols: str = "") -> str:
+    """What would an equal-sized trim in each holding actually change?
+
+    Answers one counterfactual and nothing else. It does not approve, reject,
+    rank or select an action, and it returns no composite score. `symbols` is a
+    comma-separated list, or empty for every holding.
+
+    Returned per name: trim quantity and proceeds, post-trim value and weight,
+    the change in position weight, the change in gross exposure, the change in
+    stop-defined downside as a share of NAV, and the trimmed name's strategy
+    rank.
+
+    DELIBERATELY ABSENT: an estimated portfolio-volatility change, an estimated
+    slippage, and a cluster-weight change. Each needs a model this system has
+    not specified and validated, and an unvalidated estimate sitting beside
+    measured facts is indistinguishable from one.
+    """
+    v = marks.load() or {}
+    prod = read_current()
+    held = state.holdings(v, prod.theses if prod else [], _overrides())
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()] or None
+    return json.dumps(
+        state.compare_trims(held, v.get("account_value") or 0.0, float(notional), syms),
+        indent=2, default=str)
 
 
 @mcp.tool()

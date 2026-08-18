@@ -999,7 +999,33 @@ def check_once(cfg, client) -> int:
             _px = (json.loads(QUOTES.read_text()) or {}).get("prices", {})
         except Exception:                                       # noqa: BLE001
             _px = {}        # no quotes -> every stop override is refused (fail closed)
+        _pre = {s: (getattr(th, "stop", None), list(getattr(th, "targets", []) or []))
+                for s, th in held.items()}
         held = apply_overrides(held, _ov, _px)
+        # ⛔ PUBLISH WHAT WAS ACTUALLY APPLIED, from the enforcer itself.
+        # Everything else that reports levels -- positions(), the dashboard, the
+        # weekly letter -- derives them, and on 2026-08-18 a derivation
+        # disagreed with this function while looking authoritative. This is the
+        # ground truth for the poll that just ran: not a second opinion, the
+        # thing the sell order will use. Additive; it changes no behaviour.
+        _save(MON / "enforcement.json", {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "poll_id": f"{prod.as_of}:{datetime.now(timezone.utc).isoformat(timespec='seconds')}",
+            "book_asof": prod.as_of,
+            "quotes_seen": sorted(_px.keys()) if isinstance(_px, dict) else [],
+            "levels": {
+                s: {
+                    "effective_stop": getattr(th, "stop", None),
+                    "effective_targets": list(getattr(th, "targets", []) or []),
+                    "thesis_stop": _pre.get(s, (None, []))[0],
+                    "thesis_targets": _pre.get(s, (None, []))[1],
+                    "override_applied": (
+                        getattr(th, "stop", None) != _pre.get(s, (None, []))[0]
+                        or list(getattr(th, "targets", []) or []) != _pre.get(s, (None, []))[1]),
+                }
+                for s, th in held.items()
+            },
+        })
     # ⚠️ NOT a bare `return 0`. An all-cash book still has wakes to watch, and
     # that is exactly when a wake matters most: "tell me if NVDA reaches X so I
     # can re-enter" is registered precisely when the name is NOT held. Returning

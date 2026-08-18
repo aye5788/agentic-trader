@@ -554,6 +554,23 @@ a fill can land after you set levels and an order can fill partially or late.
 So: nobody has to trust that you did it. Do not treat the check as the safety
 net — you set the levels, it only reports that you did not.
 
+**What `positions()` measures, and what it does not decide.** These columns are
+measurements, not recommendations, and row order has no policy meaning.
+`trade_pnl_at_stop` is P&L relative to entry and is not prospective risk.
+`mark_to_stop` assumes execution exactly at the stop; gaps and slippage can
+produce a larger loss. `stop_distance_sigma` is standardized distance under the
+stated volatility estimator, not stop-hit probability. No single column
+identifies the correct trim. Portfolio exposure, cluster concentration, strategy
+state, and the proposed order's before/after effects remain separate
+considerations.
+
+**The stop and targets shown are the ones ENFORCED, not the ones you asked for.**
+If an override you set was refused, `LEVELS_NOT_IN_FORCE` says so and names
+which part; `your_stop` and `your_targets` show what you had asked for. A stop
+you set that is LOOSER than the book's is refused unless you pass `widen` with a
+reason, and a target list is refused unless it has the same number of entries as
+the thesis carries.
+
 **Set levels against measured behaviour, not a formula.** `terrain(symbol)` gives
 how far that name actually travels over 5, 10 and 20 days in units of its own
 volatility — the median best move, the median worst, and the tails. Use it.

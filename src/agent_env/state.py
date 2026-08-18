@@ -42,7 +42,11 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
     av = float(valued.get("account_value") or 0.0)
     out = {}
     ov = overrides or {}
-    for sym, p in (valued.get("positions") or {}).items():
+    # ⛔ STABLE, NON-SEMANTIC ORDER. Codex, 2026-08-18: "Sorting is not neutral
+    # arithmetic. It determines salience... the agent may simply sell the top row
+    # and explain afterward why proximity dominated everything else." Alphabetical
+    # carries no policy meaning, so no ordering can be read as a recommendation.
+    for sym, p in sorted((valued.get("positions") or {}).items()):
         t = by_sym.get(sym)
         book_stop = getattr(t, "stop", None) if t else None
         book_targets = list(getattr(t, "targets", []) or []) if t else []
@@ -55,6 +59,32 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
         _lv = levels.resolve(book_stop, book_targets, o,
                              price=p.get("mark"), price_guard=True,
                              thesis_as_of=getattr(t, "as_of", None))
+        _sig = dict(getattr(t, "signals", {}) or {}) if t else {}
+        _qty, _ac, _mk = p.get("qty"), p.get("avg_cost"), p.get("mark")
+        _eff = _lv["effective_stop"]
+        _cost_basis = (round(float(_qty) * float(_ac), 4)
+                       if _qty is not None and _ac is not None else None)
+        _w = (float(p["value"]) / av) if av > 0 and p.get("value") is not None else None
+        # prospective: what the position loses from HERE if the stop fires
+        _m2s_pct = (round(float(_eff) / float(_mk) - 1.0, 6)
+                    if _eff is not None and _mk else None)
+        _m2s_dollars = (round((float(_eff) - float(_mk)) * float(_qty), 4)
+                        if _eff is not None and _mk and _qty is not None else None)
+        # accounting: what the trade books against entry if the stop fires
+        _pnl_at_stop_d = (round((float(_eff) - float(_ac)) * float(_qty), 4)
+                          if _eff is not None and _ac is not None and _qty is not None else None)
+        _sg = _sig.get("sigma")
+        _stop_sigma = (round(abs(float(_mk) - float(_eff)) / (float(_sg) * float(_mk)), 3)
+                       if _eff is not None and _mk and _sg else None)
+        _r12 = _sig.get("R")
+        _eligibility = (None if t is None else
+                        ("eligible: 12-month return positive" if isinstance(_r12, (int, float)) and _r12 > 0
+                         else "INELIGIBLE: 12-month return not positive" if isinstance(_r12, (int, float))
+                         else "unknown: no stored 12-month return"))
+        _retention = (None if t is None else
+                      ("in the target book" if getattr(t, "target_weight", 0) > 0
+                       else "held but not selected by the ranking — geometry supplied "
+                            "so the monitor can watch it"))
         rec = {
             "qty": p.get("qty"),
             "avg_cost": p.get("avg_cost"),
@@ -78,6 +108,48 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
             # verdict "hold" is a HELD name the ranking did not select, given
             # geometry so it can be watched (slow_loop.protective_theses);
             # weight 0 with verdict "avoid" failed the R:R gate and is not held.
+            # ---- Codex spec step 4: SAFE deterministic fields. Every one is
+            # arithmetic over quantity, cost, mark and NAV, or a STORED thesis
+            # fact carried with its source and as-of. No estimator is invented
+            # here: `realized_vol_value` is the sigma momentum.compute already
+            # wrote, not a new calculation.
+            "shares": p.get("qty"),
+            "market_value": p.get("value"),
+            "weight_pct_nav": _w,
+            "cost_basis": _cost_basis,
+            "mark_as_of": valued.get("marked_at"),
+            "unrealized_pnl_dollars": (
+                None if _cost_basis is None or p.get("value") is None
+                else round(float(p["value"]) - _cost_basis, 4)),
+            "unrealized_pnl_pct_cost": (
+                None if not _cost_basis or p.get("value") is None
+                else round(float(p["value"]) / _cost_basis - 1.0, 6)),
+            "strategy_rank": getattr(t, "rank", None) if t else None,
+            "rank_as_of": getattr(t, "as_of", None) if t else None,
+            "twelve_month_return": _sig.get("R"),
+            "realized_vol_value": _sig.get("sigma"),
+            "realized_vol_window": ("252 trading days (momentum.compute lookback)"
+                                    if _sig.get("sigma") is not None else None),
+            "realized_vol_source": _sig.get("source"),
+            "eligibility_state": _eligibility,
+            "retention_state": _retention,
+            # ---- Codex spec step 5: STOP-DERIVED. Unblocked only because the
+            # resolver above now decides one effective stop and the replay
+            # fixtures prove it equals what the monitor enforces.
+            # mark_to_stop_* is PROSPECTIVE downside from here.
+            # trade_pnl_at_stop_* is ACCOUNTING P&L against entry. They are
+            # different quantities and are deliberately named apart: conflating
+            # them is what made a position showing "+10.27% if stopped" read as
+            # though it had no downside.
+            "mark_to_stop_pct": _m2s_pct,
+            "mark_to_stop_dollars": _m2s_dollars,
+            "mark_to_stop_pct_nav": (
+                None if _m2s_dollars is None or av <= 0 else round(_m2s_dollars / av, 6)),
+            "trade_pnl_at_stop_dollars": _pnl_at_stop_d,
+            "trade_pnl_at_stop_pct_cost": (
+                None if not _cost_basis or _pnl_at_stop_d is None
+                else round(_pnl_at_stop_d / _cost_basis, 6)),
+            "stop_distance_sigma": _stop_sigma,
             "watched": bool(t is not None and getattr(t, "stop", None)
                             and (getattr(t, "target_weight", 0) > 0
                                  or getattr(t, "verdict", "") == "hold")),
@@ -100,8 +172,8 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
             if _rej:
                 rec["LEVELS_NOT_IN_FORCE"] = (
                     f"the monitor is NOT using the {' and '.join(_rej)} you set "
-                    f"for {sym}. stop: {_lv['stop_status']}. "
-                    f"targets: {_lv['targets_status']}. What is watched: stop "
+                    f"for {sym}. stop: {_lv['effective_stop_status']}. "
+                    f"targets: {_lv['effective_targets_status']}. What is watched: stop "
                     f"{_lv['effective_stop']}, targets {_lv['effective_targets']}.")
             if o.get("reason"):
                 rec["level_reason"] = o["reason"]
@@ -317,3 +389,68 @@ def _selftest() -> None:
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         _selftest()
+
+
+# The exact semantic warning Codex specified, carried verbatim so the tool
+# description and the charter cannot drift from each other.
+LEVELS_SEMANTIC_NOTE = (
+    "These columns are measurements, not recommendations, and row order has no "
+    "policy meaning. `trade_pnl_at_stop` is P&L relative to entry and is not "
+    "prospective risk. `mark_to_stop` assumes execution exactly at the stop; "
+    "gaps and slippage can produce a larger loss. `stop_distance_sigma` is "
+    "standardized distance under the stated volatility estimator, not "
+    "stop-hit probability. No single column identifies the correct trim. "
+    "Portfolio exposure, cluster concentration, strategy state, and the "
+    "proposed order's before/after effects remain separate considerations."
+)
+
+
+def compare_trims(held: dict, account_value: float, notional: float,
+                  symbols=None) -> dict:
+    """Factual before/after deltas for an equal-notional trim in each holding.
+
+    Codex spec, 2026-08-18. It answers the counterfactual "what would this
+    same-sized trim change?" and NOTHING else: it does not approve, reject,
+    rank or select an action, and it returns no composite score.
+
+    DELIBERATELY OMITTED, per that same review:
+      - `estimated_portfolio_volatility_delta` -- needs a covariance model this
+        system does not have. "Computable, yes; honestly specified today, no."
+      - `estimated_slippage` -- likewise a model, not a measurement.
+      - `cluster_weight_delta` -- correlation clustering exists in
+        src/concentration.py but its model contract (lookback, threshold, panel
+        as-of, minimum observations, version) is not approved yet.
+    Each is absent rather than approximated, because an unvalidated estimate
+    sitting beside measured facts is indistinguishable from one.
+    """
+    out, av = {}, float(account_value or 0.0)
+    names = sorted(held) if symbols is None else sorted(symbols)
+    for sym in names:
+        p = held.get(sym) or {}
+        mk, qty = p.get("mark"), p.get("shares", p.get("qty"))
+        val, eff = p.get("market_value", p.get("value")), p.get("stop")
+        if not mk or qty is None or val is None:
+            out[sym] = {"error": "no mark or quantity — trim cannot be measured"}
+            continue
+        sell_notional = min(float(notional), float(val))
+        sell_qty = sell_notional / float(mk)
+        post_val = float(val) - sell_notional
+        d = {
+            "trim_notional": round(sell_notional, 4),
+            "trim_quantity": round(sell_qty, 8),
+            "proceeds": round(sell_notional, 4),
+            "post_trim_value": round(post_val, 4),
+            "post_trim_weight_pct_nav": round(post_val / av, 6) if av > 0 else None,
+            "position_weight_delta": (round(-sell_notional / av, 6) if av > 0 else None),
+            "gross_exposure_delta": round(-sell_notional, 4),
+            "strategy_rank_of_trimmed_name": p.get("strategy_rank"),
+        }
+        if eff is not None:
+            before = (float(eff) - float(mk)) * float(qty)
+            after = (float(eff) - float(mk)) * (float(qty) - sell_qty)
+            d["mark_to_stop_downside_nav_delta"] = (
+                round((after - before) / av, 6) if av > 0 else None)
+        else:
+            d["mark_to_stop_downside_nav_delta"] = None
+        out[sym] = d
+    return {"notional": float(notional), "note": LEVELS_SEMANTIC_NOTE, "trims": out}
