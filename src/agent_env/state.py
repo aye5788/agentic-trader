@@ -49,7 +49,12 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
         o = ov.get(sym) or {}
         agent_stop = o.get("stop")
         agent_targets = o.get("targets")
-        _lv = levels.resolve(book_stop, book_targets, o, price=p.get("mark"))
+        # price_guard=True: the live monitor always passes a prices dict, so a
+        # missing mark DROPS the override there. The display must fail closed
+        # the same way or it would show a level the monitor is not using.
+        _lv = levels.resolve(book_stop, book_targets, o,
+                             price=p.get("mark"), price_guard=True,
+                             thesis_as_of=getattr(t, "as_of", None))
         rec = {
             "qty": p.get("qty"),
             "avg_cost": p.get("avg_cost"),
@@ -81,15 +86,17 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None) -> dict:
             rec["set_by_agent"] = True
             rec["book_stop"] = book_stop
             # Say plainly when what you asked for is NOT what is being watched.
+            rec["thesis_as_of"] = _lv["thesis_as_of"]
+            rec["override_written_at"] = _lv["override_written_at"]
             rec["your_stop"] = agent_stop
             rec["your_targets"] = list(agent_targets) if agent_targets else None
-            rec["stop_status"] = _lv["stop_status"]
-            rec["targets_status"] = _lv["targets_status"]
-            rec["levels_in_force"] = (_lv["stop_source"] == "override"
-                                      or "REJECTED" not in _lv["stop_status"]) and \
-                                     "REJECTED" not in _lv["targets_status"]
+            rec["stop_status"] = _lv["effective_stop_status"]
+            rec["targets_status"] = _lv["effective_targets_status"]
+            rec["levels_in_force"] = (_lv["effective_stop_source"] == "override"
+                                      or "REJECTED" not in _lv["effective_stop_status"]) and \
+                                     "REJECTED" not in _lv["effective_targets_status"]
             _rej = [k for k in ("stop", "targets")
-                    if "REJECTED" in _lv[f"{k}_status"]]
+                    if "REJECTED" in _lv[f"effective_{k}_status"]]
             if _rej:
                 rec["LEVELS_NOT_IN_FORCE"] = (
                     f"the monitor is NOT using the {' and '.join(_rej)} you set "

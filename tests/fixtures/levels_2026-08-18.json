@@ -1,0 +1,288 @@
+{
+  "_comment": "FROZEN from the live book on 2026-08-18, the day positions() was found displaying levels the monitor had rejected. Each case states its expected result INDEPENDENTLY of the code, so a change that alters behaviour fails here instead of in production. Do not regenerate these from the code they test.",
+  "_source": "research_store/current.json + research_store/monitor/overrides.json, 2026-08-18",
+  "cases": [
+    {
+      "name": "XOM \u2014 agent stop looser, no widen, one target against two",
+      "why": "The 10:35 session opened XOM and set stop 155.00 / target 172.00. Both were refused: the stop for being below the thesis stop without widen, the target for being one where the thesis carries two. positions() displayed them as if in force.",
+      "thesis_stop": 155.0225,
+      "thesis_targets": [
+        175.6225,
+        187.2099
+      ],
+      "override": {
+        "stop": 155.0,
+        "targets": [
+          172.0
+        ],
+        "reason": "measured terrain"
+      },
+      "price": null,
+      "expect_stop": 155.0225,
+      "expect_targets": [
+        175.6225,
+        187.2099
+      ],
+      "expect_stop_rejected": true,
+      "expect_targets_rejected": true
+    },
+    {
+      "name": "RTX \u2014 same shape as XOM",
+      "thesis_stop": 212.6382,
+      "thesis_targets": [
+        241.444,
+        257.6474
+      ],
+      "override": {
+        "stop": 212.0,
+        "targets": [
+          234.0
+        ],
+        "reason": "measured terrain"
+      },
+      "price": null,
+      "expect_stop": 212.6382,
+      "expect_targets": [
+        241.444,
+        257.6474
+      ],
+      "expect_stop_rejected": true,
+      "expect_targets_rejected": true
+    },
+    {
+      "name": "BAC \u2014 same shape as XOM",
+      "thesis_stop": 61.7392,
+      "thesis_targets": [
+        68.6217,
+        72.4931
+      ],
+      "override": {
+        "stop": 61.4,
+        "targets": [
+          66.8
+        ],
+        "reason": "measured terrain"
+      },
+      "price": null,
+      "expect_stop": 61.7392,
+      "expect_targets": [
+        68.6217,
+        72.4931
+      ],
+      "expect_stop_rejected": true,
+      "expect_targets_rejected": true
+    },
+    {
+      "name": "MRK \u2014 explicit widen WITH a reason applies a looser stop",
+      "why": "The one override actually in force on 2026-08-18, and the one the enforcement report got wrong because server.py never passed the widen flag.",
+      "thesis_stop": 130.0668,
+      "thesis_targets": [
+        148.9571,
+        159.5828
+      ],
+      "override": {
+        "stop": 128.5,
+        "targets": [],
+        "widen": true,
+        "reason": "inherited stop sits inside the name's own noise"
+      },
+      "price": null,
+      "expect_stop": 128.5,
+      "expect_targets": [
+        148.9571,
+        159.5828
+      ],
+      "expect_stop_rejected": false,
+      "expect_targets_rejected": false
+    },
+    {
+      "name": "TER \u2014 stop refused, targets ACCEPTED (count matches)",
+      "why": "Proves refusal is per-field. TER supplied two targets against a two-target thesis, so those applied while its looser stop did not. The 15:15 session quoted 390.9603 and was right; the display said 385.00 and was wrong.",
+      "thesis_stop": 390.9603,
+      "thesis_targets": [
+        527.0808,
+        615.6823
+      ],
+      "override": {
+        "stop": 385.0,
+        "targets": [
+          527.0808,
+          615.6823
+        ],
+        "reason": "raising stop above cost"
+      },
+      "price": null,
+      "expect_stop": 390.9603,
+      "expect_targets": [
+        527.0808,
+        615.6823
+      ],
+      "expect_stop_rejected": true,
+      "expect_targets_rejected": false
+    },
+    {
+      "name": "widen claimed with a BLANK reason does not apply",
+      "why": "The monitor requires widen AND a reason. A blank reason must not loosen a stop.",
+      "thesis_stop": 130.0668,
+      "thesis_targets": [],
+      "override": {
+        "stop": 128.5,
+        "widen": true,
+        "reason": "   "
+      },
+      "price": null,
+      "expect_stop": 130.0668,
+      "expect_targets": [],
+      "expect_stop_rejected": true,
+      "expect_targets_rejected": false
+    },
+    {
+      "name": "a tighter stop applies with no widen needed",
+      "thesis_stop": 100.0,
+      "thesis_targets": [
+        120.0
+      ],
+      "override": {
+        "stop": 105.0,
+        "reason": "tightening"
+      },
+      "price": null,
+      "expect_stop": 105.0,
+      "expect_targets": [
+        120.0
+      ],
+      "expect_stop_rejected": false,
+      "expect_targets_rejected": false
+    },
+    {
+      "name": "a stop at or above the live price is refused (would arm already breached)",
+      "thesis_stop": 100.0,
+      "thesis_targets": [],
+      "override": {
+        "stop": 210.0,
+        "reason": "tightening"
+      },
+      "price": 200.0,
+      "expect_stop": 100.0,
+      "expect_targets": [],
+      "expect_stop_rejected": true,
+      "expect_targets_rejected": false
+    },
+    {
+      "name": "a corrupt live price refuses the override rather than sailing through",
+      "why": "A NaN quote once let a stale override be APPLIED over a thesis stop.",
+      "thesis_stop": 100.0,
+      "thesis_targets": [],
+      "override": {
+        "stop": 105.0,
+        "reason": "tightening"
+      },
+      "price": "nan",
+      "expect_stop": 100.0,
+      "expect_targets": [],
+      "expect_stop_rejected": true,
+      "expect_targets_rejected": false
+    },
+    {
+      "name": "no override at all is silent and keeps the thesis",
+      "thesis_stop": 100.0,
+      "thesis_targets": [
+        120.0
+      ],
+      "override": null,
+      "price": null,
+      "expect_stop": 100.0,
+      "expect_targets": [
+        120.0
+      ],
+      "expect_stop_rejected": false,
+      "expect_targets_rejected": false
+    },
+    {
+      "name": "an EMPTY target list is not an override and is not a refusal",
+      "thesis_stop": 100.0,
+      "thesis_targets": [
+        120.0,
+        140.0
+      ],
+      "override": {
+        "stop": 105.0,
+        "targets": [],
+        "reason": "stop only"
+      },
+      "price": null,
+      "expect_stop": 105.0,
+      "expect_targets": [
+        120.0,
+        140.0
+      ],
+      "expect_stop_rejected": false,
+      "expect_targets_rejected": false
+    },
+    {
+      "name": "targets move in EITHER direction when the count matches",
+      "why": "Raising a target adds no downside; blocking it is why nothing here has reached a take-profit.",
+      "thesis_stop": 100.0,
+      "thesis_targets": [
+        120.0,
+        140.0
+      ],
+      "override": {
+        "targets": [
+          130.0,
+          150.0
+        ],
+        "reason": "letting it run"
+      },
+      "price": null,
+      "expect_stop": 100.0,
+      "expect_targets": [
+        130.0,
+        150.0
+      ],
+      "expect_stop_rejected": false,
+      "expect_targets_rejected": false
+    },
+    {
+      "name": "price looked up and MISSING \u2014 the guard fails closed (the live monitor's mode)",
+      "why": "The production monitor always passes a prices dict, so a symbol with no quote has its override DROPPED. positions() must fail closed identically or it shows a level the monitor is not using. This case was added after the replay caught exactly that divergence in the display on 2026-08-18.",
+      "thesis_stop": 100.0,
+      "thesis_targets": [
+        120.0
+      ],
+      "override": {
+        "stop": 105.0,
+        "reason": "tightening"
+      },
+      "price": null,
+      "price_guard": true,
+      "expect_stop": 100.0,
+      "expect_targets": [
+        120.0
+      ],
+      "expect_stop_rejected": true,
+      "expect_targets_rejected": false
+    },
+    {
+      "name": "stale ownership \u2014 a thesis with no live position still resolves, and says which stop would apply",
+      "why": "Codex listed stale ownership among the cases to freeze. The monitor only watches symbols in its held set, so resolution for an unowned name must not crash and must not imply anything is being watched. Ownership is decided upstream (owned_symbols); the resolver's job is only to say which level WOULD be in force.",
+      "thesis_stop": 469.4112,
+      "thesis_targets": [
+        536.01,
+        580.0
+      ],
+      "override": {
+        "stop": 470.0,
+        "reason": "tightened before the position was sold"
+      },
+      "price": 480.0,
+      "expect_stop": 470.0,
+      "expect_targets": [
+        536.01,
+        580.0
+      ],
+      "expect_stop_rejected": false,
+      "expect_targets_rejected": false
+    }
+  ]
+}
