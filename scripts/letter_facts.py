@@ -97,6 +97,27 @@ def _flows_since(start_date, end_date):
     return round(net, 2), entries
 
 
+def _profit_but_loss(cost, mark, effective_stop):
+    """True iff the mark is above average cost AND the currently watched
+    effective stop is below it. None when any input is missing or non-finite,
+    or when no stop is in force -- claiming what a position "would close at"
+    with nothing watching implies protection that does not exist.
+
+    Same definition as src/agent_env/state.py; replaced the unstable
+    gain_protected_pct ratio on 2026-08-19.
+    """
+    import math                                           # noqa: PLC0415
+
+    def _f(x):
+        try:
+            return isinstance(x, (int, float)) and math.isfinite(float(x))
+        except (TypeError, ValueError):
+            return False
+    if not (_f(cost) and _f(mark) and _f(effective_stop)):
+        return None
+    return bool(float(mark) > float(cost) and float(effective_stop) < float(cost))
+
+
 def main() -> None:
     LETTERS.mkdir(parents=True, exist_ok=True)
     today = date.today()
@@ -171,6 +192,37 @@ def main() -> None:
     # their stops sat below cost -- both would have closed RED. The arithmetic
     # is pure in src/excursion.py (shared with positions()); only the I/O is
     # here. Best-effort: a missing panel must never stop a letter being written.
+
+    # ⛔ THE EFFECTIVE STOP, resolved by src/levels.py -- the same rule the
+    # monitor enforces and positions() displays. This file used the THESIS stop
+    # only, and read the profit-but-loss flag out of the excursion dict, which
+    # stopped producing it when the field moved on 2026-08-19; the letter would
+    # then have silently reported nothing for what its own prompt calls the most
+    # important risk fact in the book. Degrades to the thesis stop, never crashes.
+    _eff_stop = {}
+    try:
+        sys.path.insert(0, str(REPO / "src"))
+        import levels as _levels                          # noqa: PLC0415
+        try:
+            _ov_raw = json.loads((RS / "monitor" / "overrides.json").read_text())
+        except Exception:                                 # noqa: BLE001
+            _ov_raw = {}
+        try:
+            _px_raw = (json.loads((RS / "monitor" / "quotes.json").read_text())
+                       or {}).get("prices", {}) or {}
+        except Exception:                                 # noqa: BLE001
+            _px_raw = {}
+        for _sym in valued["positions"]:
+            _th = theses.get(_sym)
+            _eff_stop[_sym] = _levels.resolve(
+                getattr(_th, "stop", None) if _th else None,
+                list(getattr(_th, "targets", []) or []) if _th else [],
+                _ov_raw.get(_sym), price=_px_raw.get(_sym),
+                price_guard=True)["effective_stop"]
+    except Exception as _e:                               # noqa: BLE001
+        print(f"  effective stops unavailable ({_e.__class__.__name__}) — "
+              f"profit-but-loss flag will be null", file=sys.stderr)
+
     _exc = {}
     try:
         import pandas as _pd                                    # noqa: PLC0415
@@ -207,7 +259,8 @@ def main() -> None:
                          if e.get("peak_pct") is not None else None),
             "giveback_pct": (round(e["giveback_pct"], 4)
                              if e.get("giveback_pct") is not None else None),
-            "profitable_now_but_loss_at_stop": e.get("profitable_now_but_loss_at_stop"),
+            "profitable_now_but_loss_at_stop": _profit_but_loss(
+                p.get("avg_cost"), p.get("mark"), _eff_stop.get(symbol)),
             "symbol": symbol,
             "rank": t.rank if t else None,
             "sleeve": (symbol.upper() in etf_symbols) if etf_symbols else None,
