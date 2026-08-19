@@ -416,11 +416,35 @@ def build_brief(mode: str) -> str:
     """Render the charter for this session. Called AFTER the lock is held."""
     text = charter.render(mandate_mod.load(), strategy.load(), _tool_names())
     stamp = datetime.now(timezone.utc).astimezone()
+    # ⛔ ONE SESSION ONLY. This is operator context for the FIRST session after a
+    # recovery -- "the open session already ran, do not replay it", "MRK's stub
+    # was retained deliberately". Repeated every session it becomes standing
+    # background noise describing a morning that is no longer today, and a
+    # stateless agent has no way to tell a stale handoff from a live one.
+    #
+    # It was delivered unconditionally for as long as the file existed, with the
+    # OPSLOG noting the operator should archive it afterwards. Remembering is not
+    # a mechanism -- the same reason agentic-reload.timer exists as a backstop.
+    #
+    # Consumption is recorded in a SIBLING marker rather than by deleting the
+    # file: the operator keeps the evidence, and a session that crashes after
+    # the brief was built does not silently resurrect the handoff for the next
+    # one. The marker names which session consumed it, so the choice is auditable.
     handoff_path = REPO / "research_store" / "RECOVERY_HANDOFF.md"
+    consumed_path = REPO / "research_store" / "RECOVERY_HANDOFF.consumed"
     try:
-        handoff = handoff_path.read_text().strip()
+        handoff = "" if consumed_path.exists() else handoff_path.read_text().strip()
     except Exception:                                      # noqa: BLE001
         handoff = ""
+    if handoff:
+        try:
+            consumed_path.write_text(
+                f"consumed by the {mode} session at "
+                f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+                f"RECOVERY_HANDOFF.md is left in place as operator evidence; "
+                f"delete this marker to deliver it again.\n")
+        except Exception:                                  # noqa: BLE001
+            pass    # never let bookkeeping stop a session being briefed
     handoff_block = ("\n\n---\n\nOPERATOR RECOVERY HANDOFF — read this before acting:\n"
                      + handoff + "\n") if handoff else ""
     return (f"{text}\n\n---\n\n{render_review(last_review(), mode)}"
