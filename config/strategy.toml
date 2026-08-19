@@ -162,6 +162,22 @@ executor_timeout_secs = 300  # wall clock for the headless exit executor. The SE
 refire_retry_secs = 120   # if an exit sell FAILS, back off this long before retrying
                           #   (a failing breach re-spawns the Claude executor + re-
                           #   alerts; without backoff it storms every 15s poll)
+# ⛔ THE EXECUTOR LAUNCH CEILING (added 2026-08-19, after the incident).
+# The monitor does not sell -- it SPAWNS A MODEL to sell. Nothing counted those
+# spawns, so one trigger that would not resolve (MRK's inherited target sitting
+# BELOW the mark, re-arming every poll) launched 27 headless Opus sessions in 68
+# minutes and exhausted the account's model budget. An exhausted budget then
+# makes the executor fail, a failed executor writes no result, a missing result
+# reads as a failed exit, and the retry spends more of the budget already gone.
+# This bounds it absolutely: no repeating condition can spawn more than this.
+# A refusal does NOT drop the breach -- it journals it and pushes ONE alert
+# saying to place the exit by hand. Set max to 0 to disable the exit path
+# entirely (an operator kill switch for model spend).
+executor_max_per_window = 6      # exit-agent spawns permitted per window
+executor_window_secs    = 3600   # rolling window, seconds. A ceiling, not a latch:
+                                 #   as launches age out the monitor resumes on its
+                                 #   own, so a genuine cascade of stops in a falling
+                                 #   market is delayed rather than abandoned.
 refire_escalate_n = 3     # after this many consecutive failed exits, send ONE loud
                           #   "manual intervention — position unprotected" phone push
 feed_fail_alert = 4       # consecutive quote-poll failures (~1 min @15s) before ONE

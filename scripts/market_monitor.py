@@ -216,6 +216,71 @@ def _selftest() -> None:
     assert act == [] and esc == [], (act, esc)
     print("monitor selftest OK: refire backoff + escalation gate")
 
+    # ---- LAUNCH CEILING: the guard that was missing on 2026-08-19 ------------
+    # The monitor spawns a MODEL to sell. Nothing counted those spawns, so one
+    # trigger that would not resolve launched 27 Opus sessions in 68 minutes and
+    # exhausted the account budget -- which then guaranteed every retry failed.
+    # These exercise the FAILURE paths, because assuming the failure path is
+    # what produced every defect this system has had.
+    L0 = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    W, N = 3600, 6
+
+    # room in an empty window
+    allow, pruned = launch_gate([], L0, N, W)
+    assert allow and pruned == []
+
+    # exactly at the ceiling -> refused
+    at_cap = [(L0 + timedelta(minutes=i)).isoformat() for i in range(N)]
+    allow, pruned = launch_gate(at_cap, L0 + timedelta(minutes=N), N, W)
+    assert not allow and len(pruned) == N, (allow, pruned)
+
+    # a CEILING, not a latch: as launches age out the monitor resumes itself, so
+    # a real cascade of stops in a falling market is delayed, never abandoned
+    # (the LAST entry is at L0+5min, so the whole window clears at W+6min)
+    allow, pruned = launch_gate(at_cap, L0 + timedelta(seconds=W, minutes=N + 1), N, W)
+    assert allow and pruned == [], (allow, pruned)
+
+    # partial ageing: only the entries still inside the window count
+    mixed = [(L0 - timedelta(seconds=W + 10)).isoformat()] * 5 + at_cap[:2]
+    allow, pruned = launch_gate(mixed, L0 + timedelta(minutes=2), N, W)
+    assert allow and len(pruned) == 2, (allow, pruned)
+
+    # ⛔ THE MRK LOOP, REPLAYED, WITH THE CALLER'S ALERT-ONCE RULE. 26 identical
+    # re-arms 2.5 min apart -- what actually happened on 2026-08-19. The ceiling
+    # must bound spawns for the whole hour AND alert exactly once. A first
+    # implementation put the transition flag in the pure function, where it read
+    # True on every poll while the window stayed full: 19 alerts, i.e. the
+    # breaker reproducing the storm it exists to stop.
+    st_sim, launches, spawned, alerts = {}, [], 0, 0
+    for i in range(26):
+        now = L0 + timedelta(minutes=2.5 * i)
+        allow, launches = launch_gate(launches, now, N, W)
+        if not allow:
+            if "executor_breaker" not in st_sim:      # the caller's rule
+                alerts += 1
+                st_sim["executor_breaker"] = {"since": now.isoformat()}
+        else:
+            st_sim.pop("executor_breaker", None)
+            spawned += 1
+            launches.append(now.isoformat())
+    assert spawned <= N + 2, f"ceiling leaked: {spawned} spawns in the hour"
+    assert alerts == 1, f"alerted {alerts} times, must be exactly once per incident"
+    # ...and 26 unbounded launches is what the absence of this guard cost
+    assert spawned < 26 // 2, f"{spawned} spawns is not a meaningful bound"
+
+    # a corrupt persisted entry is DROPPED, never counted as room to spawn
+    allow, pruned = launch_gate(["not-a-timestamp", None, 42] + at_cap,
+                                L0 + timedelta(minutes=N), N, W)
+    assert not allow and len(pruned) == N, (allow, pruned)
+
+    # a ceiling of 0 refuses everything -- an operator kill switch for the path
+    allow, _ = launch_gate([], L0, 0, W)
+    assert not allow
+
+    print("monitor selftest OK: executor launch ceiling bounds model spend, "
+          "alerts exactly once per incident, releases as launches age out, and "
+          "holds against a replay of the 2026-08-19 MRK loop")
+
     # feed-failure escalation: recover on transients, alert at threshold, exit at cap
     assert _feed_action(0, 4, 12) == "recover"
     assert _feed_action(3, 4, 12) == "recover"        # below alert band
@@ -793,6 +858,50 @@ def corporate_action_suspected(px, stop, target) -> str | None:
     return None
 
 
+def launch_gate(launches, now_dt, max_per_window, window_secs):
+    """May the executor be launched right now? -> (allow, pruned_window). PURE.
+
+    ⛔ WHY THIS EXISTS -- 2026-08-19, and it is the guard that should have been
+    here from the first line of the exit path.
+
+    The monitor does not sell. It SPAWNS A MODEL to sell: run_executor() starts
+    a full headless Opus session running prompts/exit.md. Nothing counted those
+    spawns. One trigger that would not resolve -- MRK's inherited target sitting
+    BELOW the mark, so it re-armed on every poll -- launched 27 sessions in 68
+    minutes and exhausted the account's model budget.
+
+    That is a self-reinforcing failure: an exhausted budget makes the executor
+    fail, a failed executor writes no result, a missing result reads as a failed
+    exit, and the retry spends more of the budget that is already gone. The
+    thing consumed by the failure is the thing needed to recover from it.
+
+    The `paused` flag added the same day closes ONE door: an unknown broker
+    outcome. This closes the corridor. No repeating condition -- known, unknown,
+    or not yet invented -- can spawn more than `max_per_window` executors in
+    `window_secs`. It is a CEILING, not a latch: as launches age out the monitor
+    resumes on its own, so a genuine burst of real stops in a falling market is
+    delayed rather than abandoned, while an infinite loop is bounded forever.
+
+    `launches` is the persisted list of ISO timestamps. Returns the pruned list
+    so the caller writes back a window that cannot grow without bound.
+    """
+    cutoff = now_dt - timedelta(seconds=int(window_secs))
+    pruned = []
+    for s in (launches or []):
+        try:
+            if datetime.fromisoformat(s) >= cutoff:
+                pruned.append(s)
+        except (TypeError, ValueError):
+            continue            # a corrupt entry is dropped, never counted as room
+    # ⛔ NO TRANSITION FLAG HERE. A first attempt returned one, computed as
+    # `len(pruned) == max_per_window` -- which stays true on EVERY later poll
+    # while the window is full, so the breaker would have alerted 19 times in a
+    # replay of the incident it exists to stop. Whether this is the FIRST
+    # refusal is a fact about persisted state, not about the window, so the
+    # caller decides it from `executor_breaker` in state.json.
+    return len(pruned) < int(max_per_window), pruned
+
+
 def refire_gate(triggers, unresolved, now_dt, retry_secs, escalate_n):
     """Throttle re-firing breaches whose exit keeps FAILING. Pure — no I/O.
 
@@ -1186,6 +1295,51 @@ def check_once(cfg, client) -> int:
                else "moneybag")
 
     if armed:
+        # ⛔ THE LAUNCH CEILING. Checked BEFORE the request file is written and
+        # before any spawn, because the spawn is what costs. Refusing here
+        # leaves the breach detected, journalled and alerted -- the position is
+        # not silently forgotten, it is escalated to a human instead of to
+        # another model.
+        _now = datetime.now(timezone.utc)
+        _allow, _pruned = launch_gate(
+            st.get("executor_launches", []), _now,
+            int(m.get("executor_max_per_window", 6)),
+            int(m.get("executor_window_secs", 3600)))
+        # FIRST refusal of this incident? Persisted state is the only thing that
+        # knows, and it is what keeps the breaker from becoming a second storm.
+        _tripped = (not _allow) and "executor_breaker" not in st
+        st["executor_launches"] = _pruned
+        if not _allow:
+            st["executor_breaker"] = {
+                "since": st.get("executor_breaker", {}).get("since") or _now.isoformat(timespec="seconds"),
+                "window_secs": int(m.get("executor_window_secs", 3600)),
+                "max_per_window": int(m.get("executor_max_per_window", 6)),
+                "blocked": sorted({x["symbol"] for x in act}),
+            }
+            _save(STATE, st)
+            store.append_journal({
+                "event": "executor_breaker", "ts": ts,
+                "blocked": sorted({x["symbol"] for x in act}),
+                "launches_in_window": len(_pruned),
+                "reason": "executor launch ceiling reached — refusing to spawn "
+                          "another exit agent until the window clears",
+            })
+            if _tripped:                     # ONE push per incident, not per poll
+                notify("EXIT EXECUTOR HALTED — launch ceiling",
+                       f"{len(_pruned)} executor launches in the last "
+                       f"{int(m.get('executor_window_secs', 3600)) // 60} min. "
+                       f"Refusing to spawn more.\nUNSOLD: "
+                       f"{', '.join(sorted({x['symbol'] for x in act}))}\n"
+                       f"Place these exits BY HAND and reconcile Robinhood.",
+                       tags="rotating_light")
+            print(f"  ⛔ executor launch ceiling ({len(_pruned)}) — refusing to spawn; "
+                  f"unsold: {sorted({x['symbol'] for x in act})}")
+            return 0
+        st.pop("executor_breaker", None)
+        _pruned.append(_now.isoformat(timespec="seconds"))
+        st["executor_launches"] = _pruned
+        _save(STATE, st)                     # persist BEFORE spawning: a crash
+                                             # mid-run must still count the launch
         _save(EXIT_REQ, {"ts": ts, "account": "948184924", "exits": act})
         if EXIT_RES.exists():
             EXIT_RES.unlink()
