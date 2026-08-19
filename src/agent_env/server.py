@@ -172,6 +172,16 @@ def positions() -> str:
     gaps and slippage can produce a larger loss. `stop_distance_sigma` is
     standardized distance under the stated volatility estimator, not
     stop-hit probability. No single column identifies the correct trim.
+
+    `profitable_now_but_loss_at_stop` is true iff the mark is above average cost
+    and the currently watched effective stop is below average cost, assuming
+    execution at that stop; it is a state flag, not a severity score, and is
+    null when any input or the watched stop is unavailable.
+
+    `stop_distance_sigma` is absolute mark-to-stop distance divided by stored
+    252-trading-day daily-return volatility; units are daily sigmas, not
+    dollars, loss severity, or stop-hit probability, and the value is null
+    unless all inputs are finite with positive mark and sigma.
     Portfolio exposure, cluster concentration, strategy state, and the
     proposed order's before/after effects remain separate considerations.
     """
@@ -246,7 +256,7 @@ def positions() -> str:
     # monitor's own apply-time price guard (apply_overrides(), mirrored here
     # by decide.evaluate_enforcement) will REFUSE to apply it -- e.g. an
     # override that raises the thesis's stop but has no live price the
-    # monitor knows about. gain_protected_pct above is computed straight from
+    # monitor knows about. The stop-derived fields above are computed from
     # this `stop`, so an unenforceable override otherwise produces a
     # confident, wrong protection figure. Flag the record rather than
     # restructure state.holdings() -- the arithmetic already exists in
@@ -2044,12 +2054,12 @@ def _selftest() -> None:
     # ---- I4 (final review): a displayed stop the monitor will REFUSE must not
     # read as protection. state.holdings() reports `stop` as the agent's own
     # override whenever one exists, with no regard for whether apply_overrides()
-    # will actually apply it -- and positions() feeds that same value straight
-    # into excursion.facts()'s gain_protected_pct. An override that RAISES the
-    # thesis stop but has no known live price (the monitor's own quotes.json
-    # carries no entry for this symbol) is exactly what apply_overrides()
-    # refuses fail-closed -- so the displayed stop, and any gain_protected_pct
-    # computed from it, would be confidently wrong. positions() must flag it.
+    # would actually apply it. FIXED 2026-08-18: `stop` is now the EFFECTIVE
+    # stop from src/levels.py and every stop-derived field is computed from it.
+    # An override that RAISES the thesis stop but has no known live price (the
+    # monitor's own quotes.json carries no entry for this symbol) is exactly
+    # what apply_overrides() refuses fail-closed, so this asserts positions()
+    # reports the enforced value and flags the refusal.
     import types
     import tempfile
     orig_overrides_fn2 = globals()["_overrides"]

@@ -3,6 +3,7 @@ and the current product — no new valuation logic, so the agent, the dashboard 
 the equity log can never disagree about what a position is worth."""
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -10,6 +11,16 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
 import levels                                   # noqa: E402
+
+
+def _fin(x) -> bool:
+    """Finite number, or False. NaN and +/-inf are floats, so an isinstance
+    check alone lets them through and every later comparison silently reads
+    False -- which is how a corrupt value reaches a field that looks measured."""
+    try:
+        return isinstance(x, (int, float)) and math.isfinite(float(x))
+    except (TypeError, ValueError):
+        return False
 
 
 def holdings(valued: dict, theses: list, overrides: dict | None = None,
@@ -85,8 +96,19 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
         _pnl_at_stop_d = (round((float(_eff) - float(_ac)) * float(_qty), 4)
                           if _eff is not None and _ac is not None and _qty is not None else None)
         _sg = _sig.get("sigma")
+        # Exact domain: every input finite, mark > 0, sigma > 0. Truthiness
+        # alone let a negative/NaN/inf stored sigma through. NO volatility floor
+        # and NO cap on the result -- both would be thresholds, and an
+        # arbitrarily small but VALID sigma legitimately produces a large value.
         _stop_sigma = (round(abs(float(_mk) - float(_eff)) / (float(_sg) * float(_mk)), 3)
-                       if _eff is not None and _mk and _sg else None)
+                       if (_fin(_mk) and _fin(_eff) and _fin(_sg)
+                           and float(_mk) > 0 and float(_sg) > 0) else None)
+        # True iff the mark is above average cost AND the currently watched
+        # effective stop is below it. None when any input, or the watched stop,
+        # is unavailable -- claiming what a position "would close at" with no
+        # stop in force would imply protection that does not exist.
+        _prof_loss = (None if not (_fin(_ac) and _fin(_mk) and _fin(_eff))
+                      else bool(float(_mk) > float(_ac) and float(_eff) < float(_ac)))
         _r12 = _sig.get("R")
         _eligibility = (None if t is None else
                         ("eligible: 12-month return positive" if isinstance(_r12, (int, float)) and _r12 > 0
@@ -169,6 +191,11 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
                 None if not _cost_basis or _pnl_at_stop_d is None
                 else round(_pnl_at_stop_d / _cost_basis, 6)),
             "stop_distance_sigma": _stop_sigma,
+            # Replaces gain_protected_pct, removed 2026-08-19 for exploding as a
+            # position sits near its entry and ranking two holdings backwards on
+            # live money. A BOOLEAN cannot invert a comparison; magnitude comes
+            # from trade_pnl_at_stop_* and mark_to_stop_*.
+            "profitable_now_but_loss_at_stop": _prof_loss,
             "watched": bool(t is not None and getattr(t, "stop", None)
                             and (getattr(t, "target_weight", 0) > 0
                                  or getattr(t, "verdict", "") == "hold")),
@@ -290,6 +317,55 @@ def pair_with_benchmark(eq_dated: list[tuple[str, float]],
     return eq_out, bm_out
 
 
+def _levels_field_selftest() -> None:
+    """The two fields that replaced an unstable ratio, and their domains.
+
+    gain_protected_pct was removed 2026-08-19 for exploding as a position sits
+    near entry; stop_distance_sigma survives but has the same asymptote as
+    sigma -> 0 and was previously guarded only by truthiness, so a negative,
+    NaN or infinite stored sigma passed straight through into a field that
+    looks measured.
+    """
+    import types as _t
+
+    def _one(cost, mark, stop, sigma=0.02, av=100.0):
+        th = _t.SimpleNamespace(symbol="A", stop=stop, targets=[], target_weight=1.0,
+                                verdict="buy", as_of="t", signals={"sigma": sigma})
+        v = {"account_value": av,
+             "positions": {"A": {"qty": 1.0, "avg_cost": cost, "mark": mark,
+                                 "value": mark}}}
+        return holdings(v, [th], {}, {"A": mark})["A"]
+
+    # profitable now, stop below cost -> TRUE (the state the ratio existed for)
+    assert _one(100.0, 110.0, 95.0)["profitable_now_but_loss_at_stop"] is True
+    # profitable, stop at or above cost -> False (break-even is not a loss)
+    assert _one(100.0, 110.0, 100.0)["profitable_now_but_loss_at_stop"] is False
+    assert _one(100.0, 110.0, 105.0)["profitable_now_but_loss_at_stop"] is False
+    # not profitable -> False regardless of where the stop sits
+    assert _one(100.0, 100.0, 90.0)["profitable_now_but_loss_at_stop"] is False
+    assert _one(100.0, 90.0, 80.0)["profitable_now_but_loss_at_stop"] is False
+    # ⛔ NEAR-ENTRY STABILITY: a gain of one cent must not blow anything up.
+    # This is the exact condition that made the old ratio rank two positions
+    # backwards -- the boolean simply reports the state.
+    assert _one(100.0, 100.01, 95.0)["profitable_now_but_loss_at_stop"] is True
+    # no stop in force -> None, never False: claiming what a position "would
+    # close at" with nothing watching implies protection that does not exist
+    assert _one(100.0, 110.0, None)["profitable_now_but_loss_at_stop"] is None
+
+    # stop_distance_sigma domain: finite inputs, mark > 0, sigma > 0
+    assert _one(100.0, 110.0, 95.0, sigma=0.02)["stop_distance_sigma"] is not None
+    for bad in (0.0, -0.02, float("nan"), float("inf"), None, "x"):
+        assert _one(100.0, 110.0, 95.0, sigma=bad)["stop_distance_sigma"] is None, bad
+    # NO cap: a small but VALID sigma legitimately yields a large number, and
+    # capping it would be a threshold.
+    big = _one(100.0, 110.0, 95.0, sigma=0.0001)["stop_distance_sigma"]
+    assert big is not None and big > 1000, big
+
+    print("selftest OK: profitable_now_but_loss_at_stop is a state flag stable "
+          "at a one-cent gain and null with no stop; stop_distance_sigma is "
+          "null outside its domain and uncapped inside it")
+
+
 def _selftest() -> None:
     import types
     T = lambda s, stop, tgts: types.SimpleNamespace(
@@ -407,6 +483,7 @@ def _selftest() -> None:
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         _selftest()
+    _levels_field_selftest()
 
 
 # The exact semantic warning Codex specified, carried verbatim so the tool

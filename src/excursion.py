@@ -14,7 +14,7 @@ from __future__ import annotations
 
 def facts(cost: float, mark: float, stop, highs) -> dict:
     """Excursion facts for one position. Pure. None where undefined."""
-    out = {"peak_pct": None, "giveback_pct": None, "gain_protected_pct": None}
+    out = {"peak_pct": None, "giveback_pct": None}
     try:
         cost = float(cost); mark = float(mark)
     except (TypeError, ValueError):
@@ -26,11 +26,24 @@ def facts(cost: float, mark: float, stop, highs) -> dict:
         peak = max(max(prices), mark)          # today's mark can exceed the panel
         out["peak_pct"] = peak / cost - 1.0
         out["giveback_pct"] = out["peak_pct"] - (mark / cost - 1.0)
-    gain = mark - cost
-    if stop is not None and gain > 0:
-        # NEGATIVE when the stop sits below cost: the position shows a profit
-        # and would close at a loss. Stated, not implied.
-        out["gain_protected_pct"] = (float(stop) - cost) / gain
+    # ⛔ gain_protected_pct REMOVED 2026-08-19. It was (stop - cost) / (mark -
+    # cost): the denominator goes to zero as a position sits near its entry, so
+    # the ratio explodes and dominates any cross-position comparison. On
+    # 2026-08-18 a session was told to trim "the worst gain-protection" and the
+    # metric ranked TER ~9x worse than AMD when AMD was worse by every quantity
+    # describing real money -- five times the loss against cost and more than
+    # twice the decline from the mark. It nearly took the wrong position.
+    #
+    # Not repaired with an epsilon, cap or floor: those hide the singularity
+    # behind an arbitrary threshold. Replacing the denominator with cost just
+    # reproduces trade_pnl_at_stop_pct_cost, which already exists.
+    #
+    # Its one useful signal -- "shows a profit, would close at a loss" -- is now
+    # the BOOLEAN profitable_now_but_loss_at_stop in state.holdings(), computed
+    # from the EFFECTIVE stop. A boolean cannot invert a comparison. Magnitude
+    # comes from trade_pnl_at_stop_* and mark_to_stop_*.
+    #
+    # This file returns path facts only.
     return out
 
 
@@ -132,17 +145,16 @@ def _selftest() -> None:
     f = facts(cost=40.0, mark=50.0, stop=44.0, highs=[42.0, 60.0, 50.0])
     assert round(f["peak_pct"], 4) == 0.5, f            # 60/40 - 1
     assert round(f["giveback_pct"], 4) == 0.25, f       # 0.50 - 0.25
-    assert round(f["gain_protected_pct"], 4) == 0.4, f  # (44-40)/(50-40)
-
-    # STOP BELOW COST: showing a profit, would close at a LOSS. This is the
-    # AMD/TER case and it must read as negative, not as zero or absent.
-    f = facts(cost=100.0, mark=110.0, stop=95.0, highs=[112.0])
-    assert f["gain_protected_pct"] < 0, f
-    assert round(f["gain_protected_pct"], 4) == -0.5, f  # (95-100)/(110-100)
-
-    # no gain -> protected share is undefined, never a divide-by-zero
-    f = facts(cost=100.0, mark=100.0, stop=90.0, highs=[100.0])
-    assert f["gain_protected_pct"] is None, f
+    # ⛔ THE RATIO IS GONE AND MUST NOT COME BACK. It is not merely absent: a
+    # future edit that reintroduces it would restore a field that ranked two
+    # positions backwards on live money.
+    assert "gain_protected_pct" not in f, f
+    for probe in (facts(100.0, 110.0, 95.0, [112.0]),
+                  facts(100.0, 100.0, 90.0, [100.0]),
+                  facts(100.0, 90.0, 80.0, [110.0])):
+        assert "gain_protected_pct" not in probe, probe
+    # this file returns PATH facts only
+    assert set(f) == {"peak_pct", "giveback_pct"}, f
 
     # no price history -> null, never a fabricated peak
     f = facts(cost=100.0, mark=110.0, stop=95.0, highs=[])
@@ -224,9 +236,10 @@ def _selftest() -> None:
                       amount=100.0, avg_price=99.99999999999999)]
     assert entry_date(ev_noise, "NOI") is None, "float-noise-sized sell should close, not linger"
 
-    print("selftest OK: excursion -- peak/giveback/protected-gain, negative when "
-          "the stop sits below cost, null rather than guessed; entry_date tracks "
-          "running quantity so a partial trim does not null a live holding period")
+    print("selftest OK: excursion -- peak/giveback path facts only, null rather "
+          "than guessed; the unstable gain_protected_pct ratio is gone and "
+          "asserted absent; entry_date tracks running quantity so a partial "
+          "trim does not null a live holding period")
 
 
 if __name__ == "__main__":

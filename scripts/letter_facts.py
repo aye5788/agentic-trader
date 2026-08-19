@@ -198,14 +198,16 @@ def main() -> None:
         t = theses.get(symbol)
         e = _exc.get(symbol) or {}
         positions.append({
-            # NEGATIVE gain_protected_pct = shows a profit, would close at a
-            # loss because the stop never followed the price up. State it.
+            # profitable_now_but_loss_at_stop = shows a profit, would close at
+            # a LOSS because the stop never followed the price up. Was the ratio
+            # gain_protected_pct until 2026-08-19; that exploded near entry and
+            # ranked two positions backwards, so it is a boolean now and
+            # magnitude comes from the P&L fields.
             "peak_pct": (round(e["peak_pct"], 4)
                          if e.get("peak_pct") is not None else None),
             "giveback_pct": (round(e["giveback_pct"], 4)
                              if e.get("giveback_pct") is not None else None),
-            "gain_protected_pct": (round(e["gain_protected_pct"], 4)
-                                   if e.get("gain_protected_pct") is not None else None),
+            "profitable_now_but_loss_at_stop": e.get("profitable_now_but_loss_at_stop"),
             "symbol": symbol,
             "rank": t.rank if t else None,
             "sleeve": (symbol.upper() in etf_symbols) if etf_symbols else None,

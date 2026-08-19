@@ -215,11 +215,18 @@ three, so it is spelled out before the checklist.
 **You do not have to eyeball the giveback — `positions()` measures it.** Every
 holding carries how far it ran since you entered (`peak_pct`), how much of that
 run it has already handed back (`giveback_pct`), and how much of the gain its
-stop would actually keep if it fired (`gain_protected_pct`). Read the last one
-carefully: when it is NEGATIVE the position shows a profit and would close at a
-loss, because its stop never followed the price up. A stop that has not moved
-since entry is not neutral — it silently converts a winner into a loser. These
-are facts, not instructions; what to do about one is yours to decide.
+whether it would close at a loss despite showing a profit
+(`profitable_now_but_loss_at_stop`). That last one is true iff the mark is above
+average cost and the currently watched effective stop is below average cost,
+assuming execution at that stop; it is a state flag, not a severity score, and
+is null when any input or the watched stop is unavailable.
+
+A stop that has not moved since entry is not neutral — it silently converts a
+winner into a loser. **The flag tells you WHICH positions are in that state; it
+cannot tell you which is worst.** For that, read `trade_pnl_at_stop_dollars` or
+`trade_pnl_at_stop_pct_cost` for the loss against entry, and
+`mark_to_stop_dollars` or `mark_to_stop_pct` for what it can still lose from
+here. These are facts, not instructions; what to do about one is yours.
 
 **Trimming is a first-class action, not a half-measure.** Reducing part of a
 position while holding the rest is the right response whenever the thesis is
