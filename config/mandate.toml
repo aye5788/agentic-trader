@@ -10,6 +10,26 @@
 # Every criterion is three-state: PASS / FAIL / INSUFFICIENT_DATA.
 # INSUFFICIENT_DATA is never a pass.
 
+# --- IDENTITY (not an instruction about WHAT to trade) -----------------------
+# WHERE execution is permitted at all — CLAUDE.md hard rule 1.
+#
+# Pinned here because refresh_broker_snapshot used to read the expected account
+# back OUT of the snapshot it was about to overwrite: identity bootstrapped from
+# its own output. One blank write disarmed the guard permanently and nothing
+# could repair it, since every later write re-read the blank it had written
+# (2026-08-17, and once before in e49c82b).
+#
+# The second failure was subtler and worse. The Robinhood MCP payload carries no
+# account number in any field, so the ONLY way to satisfy the guard was for the
+# agent to inject the number itself — the party under verification asserting the
+# fact being verified. A guard satisfiable only by fabricating its input does not
+# check identity; it teaches the agent to manufacture whatever a check wants.
+#
+# An operator-declared constant cannot be erased by the thing it guards, and
+# cannot be supplied by the party being checked.
+[account]
+number = "948184924"     # the Agentic account — the ONLY tradeable one
+
 # --- BLOCKING (safety). A FAIL here makes the machine act. -------------------
 [drawdown]
 max_pct = 0.20        # close-to-close, from the all-time high-water mark.

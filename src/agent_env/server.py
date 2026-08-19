@@ -939,7 +939,8 @@ def _position_pages(value) -> tuple[list, str]:
 
 
 def _write_broker_snapshot(broker_positions, portfolio, ts: str,
-                           *, liquidated: bool = False) -> dict:
+                           *, liquidated: bool = False,
+                           declared_account: str = "") -> dict:
     """VALIDATE broker reads, then atomically publish the shares/cost snapshot.
 
     ⛔ THIS USED TO COERCE, NOT VALIDATE, and the difference is the whole point.
@@ -1011,7 +1012,12 @@ def _write_broker_snapshot(broker_positions, portfolio, ts: str,
         cash = port_raw.get("cash")
         if total is None or cash is None:
             raise ValueError("portfolio output lacks total_value/account_value or cash")
-        acct = str(port_raw.get("account_number") or account_number or "")
+        # Identity may come from the broker's own bytes (port_raw, or a position
+        # page) or, when the payload names none, from what the CALLER declares it
+        # queried. The two are not equivalent and the snapshot records which.
+        from_broker = str(port_raw.get("account_number") or account_number or "")
+        acct = from_broker or str(declared_account or "")
+        identity_verified = bool(from_broker)
 
         # IDENTITY. A snapshot from the wrong account is worse than none: it is
         # a confident, fresh-looking description of a book that is not yours.
@@ -1029,18 +1035,42 @@ def _write_broker_snapshot(broker_positions, portfolio, ts: str,
         # accepting the blank. Refuse instead — the caller supplies identity,
         # exactly as it must supply completeness.
         if expected and not acct:
-            raise ValueError(
-                f"no account number in the broker payload, but this system "
-                f"trades {expected}. Refusing to publish a snapshot whose "
-                f"identity cannot be checked: a blank identity is read back as "
-                f"'no expected account' and would silently disarm this guard "
-                f"for every future write.")
+            # ⛔ WHAT THIS CAN AND CANNOT CHECK, STATED HONESTLY.
+            # Refusing here was correct only while `expected` was read back out
+            # of this very file: stamping a self-derived blank disarmed the guard
+            # forever. An operator-pinned account cannot be erased by this write,
+            # so that failure is closed regardless of what happens below.
+            #
+            # What remains is unverifiable, not unsafe-by-default: Robinhood's
+            # payload frequently names no account anywhere, and refusing on that
+            # basis leaves positions.json STALE while the stop watcher runs on it
+            # — the 2026-08-14 failure this publisher exists to prevent, and it
+            # would now fire on every record_fills() whose payload omits the
+            # field. A stale book is the worse outcome, and it is the one that
+            # silently unprotects real positions.
+            #
+            # So: publish under the PINNED account and record that the broker did
+            # not confirm it. The mismatch branch below is untouched and still
+            # refuses outright whenever the broker DOES name an account.
+            if _pinned_account():
+                acct = expected
+                identity_verified = False
+            else:
+                raise ValueError(
+                    f"no account number in the broker payload and none declared, "
+                    f"but this system trades {expected}. Refusing to publish a "
+                    f"snapshot whose identity cannot be checked. Pin "
+                    f"[account].number in config/mandate.toml to anchor identity "
+                    f"outside the snapshot this call overwrites.")
         if expected and acct and acct != expected:
             raise ValueError(
                 f"account mismatch: broker payload is for {acct}, this system "
                 f"trades {expected}. Refusing to publish another account's state.")
 
         snap = {"account_number": acct,
+                # False = published under the PINNED account because the broker
+                # payload named none. Never silently equal to a confirmed read.
+                "identity_verified": identity_verified,
                 "account_value": _num(total, "portfolio.total_value"),
                 "cash": _num(cash, "portfolio.cash"),
                 "as_of": date.today().isoformat(), "ts": ts,
@@ -1061,14 +1091,40 @@ def _write_broker_snapshot(broker_positions, portfolio, ts: str,
         return {"ok": False, "error": str(e)}
 
 
-def _expected_account() -> str:
-    """The one tradeable account number, from the existing snapshot. '' if unknown.
+def _pinned_account() -> str:
+    """The operator-declared tradeable account from config/mandate.toml. '' if unset.
 
-    Deliberately read from the snapshot rather than config: the account number is
-    not in any config file, and the previous snapshot is the system's own record
-    of which account it trades. On a first-ever write there is nothing to compare
-    against and the check stands down rather than blocking setup.
+    ⛔ THE ANCHOR MUST LIVE OUTSIDE THE THING IT GUARDS. This was previously read
+    back out of the snapshot the publisher was about to overwrite, so identity
+    was bootstrapped from its own output: one blank write disarmed the guard
+    forever, because every later write re-read the blank it had just written.
+
+    Worse, the Robinhood MCP payload carries no account number anywhere, so the
+    only way to satisfy the guard was for the AGENT to supply the number — the
+    party under verification asserting the fact being verified. A check that can
+    only be passed by fabricating its input is not a check, and an agent that
+    learns to manufacture what a guard wants has been taught the wrong lesson
+    about every other guard in the system.
     """
+    try:
+        import tomllib
+        with open(REPO / "config" / "mandate.toml", "rb") as fh:
+            return str((tomllib.load(fh).get("account") or {}).get("number") or "")
+    except Exception:                                # noqa: BLE001
+        return ""
+
+
+def _expected_account() -> str:
+    """The one tradeable account number. Config first, snapshot as fallback.
+
+    The snapshot fallback is kept ONLY so a box whose mandate.toml predates
+    [account] behaves exactly as it did before rather than silently losing its
+    guard. Where config pins the account, config wins and no snapshot write can
+    override it.
+    """
+    pinned = _pinned_account()
+    if pinned:
+        return pinned
     try:
         return str(json.loads(RH_POSITIONS.read_text()).get("account_number") or "")
     except Exception:                                # noqa: BLE001
@@ -1077,7 +1133,8 @@ def _expected_account() -> str:
 
 @mcp.tool()
 def refresh_broker_snapshot(broker_positions: str, portfolio: str,
-                            liquidated: bool = False) -> str:
+                            liquidated: bool = False,
+                            account_number: str = "") -> str:
     """Publish the broker's CURRENT account state. Call this before you finish.
 
     ⛔ EVERY SESSION, WHETHER OR NOT YOU TRADED. Read get_equity_positions from
@@ -1116,12 +1173,22 @@ def refresh_broker_snapshot(broker_positions: str, portfolio: str,
     when you have confirmed the account is genuinely flat. "No positions
     returned" and "the read failed" are the same bytes.
 
+    `account_number` — the account you QUERIED, when the payload names none.
+    Robinhood's response frequently carries no account number in any field, and
+    without this the write is refused. It is checked against the operator-pinned
+    account in config/mandate.toml, so declaring the wrong one is caught; the
+    resulting snapshot records `identity_verified: false` because the broker's
+    own bytes did not confirm it. ⛔ Do NOT instead write the number into the
+    position rows to satisfy the check — that makes the payload assert the thing
+    being verified and turns the guard into a formality that always passes.
+
     `ok:false` means the snapshot was NOT updated. Say so; do not report the
     session reconciled.
     """
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    return json.dumps(_write_broker_snapshot(broker_positions, portfolio, ts,
-                                             liquidated=bool(liquidated)), indent=2)
+    return json.dumps(_write_broker_snapshot(
+        broker_positions, portfolio, ts, liquidated=bool(liquidated),
+        declared_account=str(account_number or "")), indent=2)
 
 
 @mcp.tool()
@@ -2385,17 +2452,35 @@ def _selftest() -> None:
             "wrong account")
         assert "account mismatch" in r["error"], r
         # BLANK ACCOUNT — the guard's own undoing, and it actually happened on
-        # 2026-08-17. _expected_account() reads the identity back OUT of the
-        # snapshot, so a blank one published here makes `expected` blank on
-        # every subsequent write and this check false FOREVER. Nothing repairs
-        # it, because each write re-reads the blank it wrote. A known identity
-        # may never be replaced by an unknown one.
-        r = _must_reject(good_pos, json.dumps({"data": {
-            "total_value": "500", "cash": "5"}}), "blank account")
-        assert "no account number" in r["error"], r
-        # ...and the guard must still be armed afterwards: the rejected write
-        # must not have leaked a blank identity into the file it protects.
+        # 2026-08-17. _expected_account() USED TO read the identity back OUT of
+        # the snapshot, so a blank one published here made `expected` blank on
+        # every subsequent write and this check false FOREVER; nothing repaired
+        # it, because each write re-read the blank it wrote.
+        #
+        # That class is now closed at the anchor, not at this branch: identity is
+        # pinned in config/mandate.toml, outside the file this call overwrites,
+        # so no write can erase it. Which frees the branch to do the honest thing
+        # with an unverifiable read. Robinhood's payload frequently names no
+        # account at ALL, and refusing on that basis leaves positions.json stale
+        # while the stop watcher runs on it (the 2026-08-14 failure) — including
+        # on every record_fills() after a real trade. So a blank publishes under
+        # the PINNED account and is STAMPED as unconfirmed.
+        r = json.loads(_refresh(good_pos, json.dumps({"data": {
+            "total_value": "500", "cash": "5"}})))
+        assert r["ok"] is True, r
+        _snap = json.loads(RH_POSITIONS.read_text())
+        assert _snap["account_number"] == "948184924", _snap
+        assert _snap["identity_verified"] is False, \
+            "a blank broker identity must NEVER be recorded as confirmed"
+        # ...and a broker that DOES name the account is recorded as confirmed —
+        # the two must never be indistinguishable in the file.
+        r = json.loads(_refresh(good_pos, good_port))
+        assert json.loads(RH_POSITIONS.read_text())["identity_verified"] is True
+        # ⛔ THE RELAXATION IS ONLY FOR SILENCE, NEVER FOR CONTRADICTION. A payload
+        # that names the WRONG account is still refused outright (asserted above),
+        # and the anchor survives every one of these writes.
         assert _expected_account() == "948184924", _expected_account()
+        assert _pinned_account() == "948184924", "identity must come from config"
         # non-finite portfolio numbers
         for bad_port, why in (
                 ({"total_value": "NaN", "cash": "5", "account_number": "948184924"}, "NaN total"),
