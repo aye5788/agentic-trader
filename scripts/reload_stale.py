@@ -57,11 +57,40 @@ MON = REPO / "research_store" / "monitor"
 EXIT_REQ = MON / "exit_request.json"
 EXIT_RES = MON / "exit_result.json"
 
+# ⛔ HOW LONG A SALE CAN CREDIBLY STILL BE HAPPENING.
+# market_monitor spawns the exit executor under `executor_timeout_secs`
+# (default 300) and kills it at that bound, so a request older than a
+# comfortable multiple of it is not a sale in progress — it is a sale whose
+# executor is already dead. 900s = 3x the default timeout.
+MAX_IN_FLIGHT_SECS = 900
+
 
 def exit_in_flight(req: pathlib.Path | None = None,
-                   res: pathlib.Path | None = None) -> bool:
-    """Is the monitor mid-sale? market_monitor writes the request and unlinks
-    the result, so request-without-result is exactly the in-flight window.
+                   res: pathlib.Path | None = None,
+                   now: dt.datetime | None = None,
+                   max_secs: int = MAX_IN_FLIGHT_SECS) -> bool:
+    """Is the monitor mid-sale RIGHT NOW? market_monitor writes the request and
+    unlinks the result, so request-without-result opens the in-flight window.
+
+    ⛔ THE WINDOW MUST BE ABLE TO CLOSE ON ITS OWN, AND IT COULD NOT.
+    market_monitor.py deletes exit_result.json before spawning the executor and
+    NEVER clears exit_request.json afterwards. So any exit whose executor died
+    without writing a result — the precise failure of the 2026-08-19 incident —
+    left request-without-result on disk PERMANENTLY, and this guard then refused
+    to restart the stop watcher forever. Measured on 2026-08-19: MRK's request
+    (15:19:46) outlived its own position by hours; the monitor had long since
+    dropped MRK from `unresolved`, the book was clean, and the reload backstop
+    was nonetheless armed to refuse the next monitor restart with no expiry and
+    no alert. A liveness signal with no timeout is not a guard; it is a latch.
+
+    This is the failure CLASS being closed: any "X is happening" flag written by
+    a process that can die mid-write must carry its own expiry, because the
+    thing that would clear it is the thing that failed.
+
+    An expired request is reported as NOT in flight — the sale it described
+    cannot still be running. It is left ON DISK deliberately: it is evidence for
+    reconciliation, and deleting broker-adjacent state to unblock a restart is
+    the wrong trade.
 
     ⚠️ The paths are resolved from the module globals at CALL time, not bound as
     default arguments — Python evaluates defaults once at def time, which
@@ -70,7 +99,12 @@ def exit_in_flight(req: pathlib.Path | None = None,
     """
     req = req or EXIT_REQ
     res = res or EXIT_RES
-    return req.exists() and not res.exists()
+    if not req.exists() or res.exists():
+        return False
+    now = now or dt.datetime.now(dt.timezone.utc)
+    age = (now - dt.datetime.fromtimestamp(
+        req.stat().st_mtime, dt.timezone.utc)).total_seconds()
+    return age <= max_secs
 
 
 def blocked_reason(unit: str) -> str | None:
@@ -79,9 +113,10 @@ def blocked_reason(unit: str) -> str | None:
     Pure policy, kept apart from the doing so it can be tested without systemd.
     """
     if unit == "agentic-monitor.service" and exit_in_flight():
-        return ("an exit is in flight (exit_request.json with no "
-                "exit_result.json) — restarting the stop watcher mid-sale "
-                "could orphan the sell; deferred to the next run")
+        return ("an exit is in flight (exit_request.json newer than "
+                f"{MAX_IN_FLIGHT_SECS}s with no exit_result.json) — restarting "
+                "the stop watcher mid-sale could orphan the sell; deferred to "
+                "the next run")
     return None
 
 
@@ -158,6 +193,29 @@ def _selftest() -> None:
         assert exit_in_flight(req, res) is False, "result present = sale concluded"
         req.unlink(); res.unlink()
         assert exit_in_flight(req, res) is False
+
+        # ⛔ THE LATCH. A request whose executor died is not a sale in progress.
+        # Without an expiry this returned True forever and silently disabled the
+        # stop watcher's reload backstop -- the real state of the box at
+        # 2026-08-19 16:35, hours after MRK had been closed and dropped from the
+        # monitor's `unresolved`. Age is measured against the request's mtime, so
+        # a fabricated `now` is enough to prove both sides of the boundary.
+        req.write_text("{}")
+        _mtime = dt.datetime.fromtimestamp(
+            req.stat().st_mtime, dt.timezone.utc)
+        assert exit_in_flight(req, res, now=_mtime) is True, \
+            "a request written just now IS in flight"
+        assert exit_in_flight(
+            req, res,
+            now=_mtime + dt.timedelta(seconds=MAX_IN_FLIGHT_SECS - 1)) is True, \
+            "inside the window it is still in flight"
+        assert exit_in_flight(
+            req, res,
+            now=_mtime + dt.timedelta(seconds=MAX_IN_FLIGHT_SECS + 1)) is False, \
+            "past the window the executor is dead, not selling"
+        # and the expired request is NOT deleted -- it is evidence
+        assert req.exists(), "an expired request must survive as evidence"
+        req.unlink()
 
     # the dashboard is never blocked — it is a read-only page and blocking it
     # would recreate the very alert this script exists to retire

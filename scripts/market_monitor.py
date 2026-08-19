@@ -69,6 +69,7 @@ _LAST_UNPROTECTED: frozenset = frozenset()
 _LAST_SUSPECT_EMPTY: bool = False
 _LAST_NO_TARGET: frozenset = frozenset()
 _LAST_STALE_OWNERSHIP: bool = False
+_LAST_TARGET_SUPPRESSED: frozenset = frozenset()   # journal on change, not every 15s tick
 
 
 def _now_et():
@@ -148,7 +149,20 @@ def _selftest() -> None:
         assert (got.stop != c["thesis_stop"]) == c["stop_enforced"], c["name"]
         assert (list(got.targets) != c["thesis_targets"]) == c["target_enforced"], \
             c["name"]
+    # ---- stops and targets must not fail the same way -----------------------
+    _trig = [{"symbol": "MRK", "reason": "target1", "price": 153.1, "level": 148.07},
+             {"symbol": "AMD", "reason": "stop", "price": 400.0, "level": 429.7},
+             {"symbol": "MU", "reason": "target2", "price": 1500.0, "level": 1422.3}]
+    _fire, _held = suppress_unowned_targets(_trig, stale=False)
+    assert len(_fire) == 3 and _held == [], "a fresh snapshot suppresses nothing"
+    _fire, _held = suppress_unowned_targets(_trig, stale=True)
+    assert [t["symbol"] for t in _fire] == ["AMD"], _fire
+    assert {t["symbol"] for t in _held} == {"MRK", "MU"}, _held
+    assert all(t["reason"] == "stop" for t in _fire), \
+        "a stale snapshot must NEVER suppress a stop -- that is the protection"
+    assert suppress_unowned_targets([], True) == ([], [])
     print("monitor selftest OK: apply_overrides pinned against src/level_rules.CASES")
+    print("monitor selftest OK: stale ownership holds targets, never stops")
 
     # ⛔ WEIGHT 0 MEANS TWO DIFFERENT THINGS. A protective thesis (verdict
     # "hold") is a name the AGENT holds that the ranking did not select --
@@ -472,6 +486,33 @@ def _last_price(block: dict):
 
 
 import copy
+
+
+def suppress_unowned_targets(triggers: list, stale: bool) -> tuple:
+    """Split triggers into (fire_now, suppressed) when ownership is unverifiable.
+
+    ⛔ A STOP AND A TARGET MUST NOT FAIL THE SAME WAY.
+    When positions.json predates the newest journalled execution, check_once
+    FAILS OPEN: it disables the ownership filter and watches every eligible
+    thesis. That is right for a stop -- an old ownership set must never exclude
+    a newly-bought real position from the only protection it has, and a missed
+    stop is an unbounded loss.
+
+    It is WRONG for a target. A target is profit-taking, not protection: missing
+    one costs foregone upside and nothing else. Firing one against an ownership
+    set known to be out of date is how the same position gets sold twice --
+    which is exactly the 2026-08-19 incident, where "a fractional TARGET was
+    retried against the reduced current quantity", and exactly what happened to
+    MRK at 19:19:46 that day, 47 seconds after the session had already closed
+    the whole position. The trade is asymmetric, so the failure mode must be.
+
+    Pure, so the asymmetry is asserted in the selftest rather than trusted.
+    """
+    if not stale:
+        return list(triggers), []
+    fire = [t for t in triggers if t.get("reason") == "stop"]
+    held = [t for t in triggers if t.get("reason") != "stop"]
+    return fire, held
 
 
 def apply_overrides(held: dict, overrides: dict, prices: dict | None = None) -> dict:
@@ -1248,6 +1289,30 @@ def check_once(cfg, client) -> int:
                    f"position is watched again. Verify by hand.",
                    tags="rotating_light")
         _LAST_SUSPECT_ACTION = cur_suspect
+
+    # ⛔ Ownership is unverifiable while the snapshot is stale (see the fail-open
+    # above). Stops still fire; profit-taking does NOT -- see
+    # suppress_unowned_targets for why the asymmetry is deliberate.
+    global _LAST_TARGET_SUPPRESSED
+    triggers, _suppressed = suppress_unowned_targets(triggers, bool(freshness["stale"]))
+    _supp_key = frozenset(f"{t['symbol']}:{t['reason']}" for t in _suppressed)
+    if _supp_key != _LAST_TARGET_SUPPRESSED:
+        if _suppressed:
+            for t in _suppressed:
+                print(f"  ⏸ HOLDING {t['reason']} on {t['symbol']}: positions "
+                      f"snapshot predates the last fill, so ownership is "
+                      f"unverified — profit-taking waits, stops do not")
+            store.append_journal({
+                "event": "target_suppressed_stale_snapshot",
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "suppressed": [{"symbol": t["symbol"], "reason": t["reason"],
+                                "price": t.get("price"), "level": t.get("level")}
+                               for t in _suppressed],
+                "why": "positions.json predates the newest journalled execution; "
+                       "firing a fractional target against an unverified quantity "
+                       "is the 2026-08-19 double-sell mechanism",
+            })
+        _LAST_TARGET_SUPPRESSED = _supp_key
 
     # drop unresolved entries whose breach has cleared (price recovered above stop)
     unresolved = st.setdefault("unresolved", {})
