@@ -24,7 +24,8 @@ def _fin(x) -> bool:
 
 
 def holdings(valued: dict, theses: list, overrides: dict | None = None,
-             monitor_prices: dict | None = None) -> dict:
+             monitor_prices: dict | None = None,
+             min_fractional_order_usd: float = 1.0) -> dict:
     """Merge broker positions with the levels the agent set for them.
 
     `overrides` is research_store/monitor/overrides.json — the levels the agent
@@ -109,6 +110,12 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
         # stop in force would imply protection that does not exist.
         _prof_loss = (None if not (_fin(_ac) and _fin(_mk) and _fin(_eff))
                       else bool(float(_mk) > float(_ac) and float(_eff) < float(_ac)))
+        # value of a HALF trim if target-1 were reached now
+        _t1 = (_lv["effective_targets"] or [None])[0]
+        _half_trim = (round(float(_qty) * float(_t1) / 2.0, 2)
+                      if _qty is not None and _fin(_t1) else None)
+        _trim_ok = (None if _half_trim is None
+                    else _half_trim >= float(min_fractional_order_usd))
         _r12 = _sig.get("R")
         _eligibility = (None if t is None else
                         ("eligible: 12-month return positive" if isinstance(_r12, (int, float)) and _r12 > 0
@@ -196,6 +203,16 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
             # live money. A BOOLEAN cannot invert a comparison; magnitude comes
             # from trade_pnl_at_stop_* and mark_to_stop_*.
             "profitable_now_but_loss_at_stop": _prof_loss,
+            # ⛔ CAN A PARTIAL TRIM ACTUALLY BE PLACED? A take-profit here is a
+            # HALF trim, and the broker refuses a fractional order under
+            # min_fractional_order_usd. Once half a position is below that, the
+            # trim is not a smaller action -- it is NO action: the order is
+            # refused, no result is written, and the monitor re-fires. That is
+            # the state that spawned 27 exit agents on 2026-08-19 (MRK stub
+            # $1.66, half-trim $0.87). Reported as a FACT about what is
+            # executable. What to do about it is judgement; see the charter.
+            "half_trim_at_target1_usd": _half_trim,
+            "partial_trim_placeable": _trim_ok,
             "watched": bool(t is not None and getattr(t, "stop", None)
                             and (getattr(t, "target_weight", 0) > 0
                                  or getattr(t, "verdict", "") == "hold")),
@@ -352,6 +369,37 @@ def _levels_field_selftest() -> None:
     # close at" with nothing watching implies protection that does not exist
     assert _one(100.0, 110.0, None)["profitable_now_but_loss_at_stop"] is None
 
+    # ---- can a partial trim actually be PLACED? -----------------------------
+    # The 2026-08-19 MRK stub: $1.66 of stock, half-trim $0.87, refused by the
+    # broker. The refusal writes no result, so the monitor re-fires -- which is
+    # how one un-executable take-profit became 27 exit agents.
+    def _trim(qty, target, floor=1.0):
+        th = _t.SimpleNamespace(symbol="A", stop=1.0, targets=[target],
+                                target_weight=1.0, verdict="buy", as_of="t",
+                                signals={"sigma": 0.02})
+        v = {"account_value": 100.0,
+             "positions": {"A": {"qty": qty, "avg_cost": 10.0, "mark": 11.0, "value": 11.0}}}
+        return holdings(v, [th], {}, {"A": 11.0}, floor)["A"]
+
+    # the live MRK shape: 0.011057 sh, target 158 -> $0.87 half -> NOT placeable
+    r = _trim(0.011057, 158.0)
+    assert r["half_trim_at_target1_usd"] == 0.87, r["half_trim_at_target1_usd"]
+    assert r["partial_trim_placeable"] is False, r
+    # the live FTNT shape: comfortably placeable
+    r = _trim(0.039290, 159.5)
+    assert r["half_trim_at_target1_usd"] == 3.13 and r["partial_trim_placeable"] is True, r
+    # EXACTLY at the floor is placeable; a cent under is not -- the boundary is
+    # where a rejected order and a filled one differ, so it is asserted, not assumed
+    r = _trim(2.0, 1.0); assert r["half_trim_at_target1_usd"] == 1.0 and r["partial_trim_placeable"] is True, r
+    r = _trim(1.98, 1.0); assert r["partial_trim_placeable"] is False, r
+    # no target -> nothing to trim at, and the field must be null rather than False:
+    # "cannot be placed" and "there is no trim to place" are different facts
+    r = _trim(1.0, None)
+    assert r["half_trim_at_target1_usd"] is None and r["partial_trim_placeable"] is None, r
+    # the floor is configurable, not hardcoded in the arithmetic
+    r = _trim(0.011057, 158.0, floor=0.5)
+    assert r["partial_trim_placeable"] is True, r
+
     # stop_distance_sigma domain: finite inputs, mark > 0, sigma > 0
     assert _one(100.0, 110.0, 95.0, sigma=0.02)["stop_distance_sigma"] is not None
     for bad in (0.0, -0.02, float("nan"), float("inf"), None, "x"):
@@ -363,7 +411,8 @@ def _levels_field_selftest() -> None:
 
     print("selftest OK: profitable_now_but_loss_at_stop is a state flag stable "
           "at a one-cent gain and null with no stop; stop_distance_sigma is "
-          "null outside its domain and uncapped inside it")
+          "null outside its domain and uncapped inside it; partial_trim_placeable "
+          "catches the un-executable half-trim at its exact boundary")
 
 
 def _selftest() -> None:

@@ -238,6 +238,19 @@ require_whitelist = true                   # only ever trade names in config/uni
 # config/universe.csv on 2026-08-09.
 min_dollar_volume_20d = 50_000_000.0
 
+# ⛔ A BROKER FACT, NOT A STRATEGY THRESHOLD. Robinhood rejects a fractional
+# order below this notional. It matters because a take-profit here is a HALF
+# trim: once a position is small enough that half of it is under this figure,
+# the trim cannot be placed at all -- the order is refused, no result is
+# written, and that is the exact state that spawned 27 exit agents on
+# 2026-08-19 (MRK stub $1.66, half-trim $0.87).
+#
+# It is surfaced to the agent as a FACT about what is executable, never as an
+# instruction. On such a position a partial trim is simply not an available
+# action; closing it or adding to it are, and which of those is right is the
+# same judgement as any other position decision.
+min_fractional_order_usd = 1.0
+
 # --- How much proof before / during live trading ----------------------------
 [proof]
 mode          = "backtest_first"  # validate the signal vs history before the $20

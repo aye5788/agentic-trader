@@ -188,7 +188,9 @@ def positions() -> str:
     prod = read_current()
     v = marks.load()
     ov = _overrides()
-    out = state.holdings(v, prod.theses if prod else [], ov, _monitor_prices())
+    out = state.holdings(v, prod.theses if prod else [], ov, _monitor_prices(),
+                         float((strat.load().get("governance") or {})
+                               .get('min_fractional_order_usd', 1.0)))
     # Excursion facts: what the path looked like, not just where it stands.
     # I/O lives here; the arithmetic is pure in src/excursion.py.
     try:

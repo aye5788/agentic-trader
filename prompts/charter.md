@@ -228,6 +228,21 @@ cannot tell you which is worst.** For that, read `trade_pnl_at_stop_dollars` or
 `mark_to_stop_dollars` or `mark_to_stop_pct` for what it can still lose from
 here. These are facts, not instructions; what to do about one is yours.
 
+**A position can be too small to trim, and then trimming is not the smaller
+option — it is no option.** `positions()` reports `partial_trim_placeable` for
+every holding, with `half_trim_at_target1_usd` beside it. When that reads
+`false`, the broker will refuse a half trim outright: the order is rejected, no
+result comes back, and the monitor re-fires against a position it cannot reduce.
+Leaving it alone is therefore not a neutral choice — it schedules a failure.
+
+**On such a position the real actions are to CLOSE it or to ADD to it**, and
+both are ordinary judgements made exactly the way you make any other. Closing
+asks whether you still want this exposure at all, given that you can no longer
+manage it in halves. Adding asks whether the thesis is strong enough to deserve
+a full-sized position, which also restores your ability to trim later. A name
+still ranked and still trending argues for adding; a stub left over from an exit
+you already decided on argues for closing. Say which you did and why.
+
 **Trimming is a first-class action, not a half-measure.** Reducing part of a
 position while holding the rest is the right response whenever the thesis is
 still intact but a specific, bounded risk has appeared — earnings inside the
