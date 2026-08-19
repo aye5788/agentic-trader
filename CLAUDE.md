@@ -43,6 +43,38 @@ in `docs/DESIGN.md`.
 4. **Secrets never leave the box.** `.env` and `secrets/` are git-ignored — never
    commit them, never print their contents, never paste a key/token into chat.
 
+### Active incident state (2026-08-19)
+
+The system experienced a serious execution/retry incident and is intentionally
+HALTED while it is reconciled. If `research_store/HALT` exists:
+
+- Do not remove it, place orders, or start sessions manually.
+- `deploy/run_session.sh` must refuse to launch any model session.
+- The scheduled Codex review is intentionally disabled in that wrapper because
+  it consumes a second model budget and is advisory only.
+- `agentic-monitor.service` and the open/close session timers may be disabled
+  during the recovery window. The controlled resume path is
+  `deploy/resume_after_halt.sh`; it must be used only after the operator has
+  reviewed the broker state and incident log.
+
+The root execution bug was a missing `research_store/monitor/exit_result.json`
+after an exit executor placed an order but failed during Claude exhaustion or
+post-order bookkeeping. The monitor treated the unknown outcome as a normal
+failure and retried a fractional target against the reduced current quantity,
+which can sell the same position repeatedly. `scripts/market_monitor.py` now
+pauses a symbol when the result file is absent; it must never automatically
+retry that unknown outcome. Reconcile against Robinhood first.
+
+On this incident, MRK target-1 was retried and 75% of the original position was
+sold; the remaining `0.011057` shares were retained and levels were repaired.
+Later, the scheduled open session bought FTNT (`0.039290` shares at `$152.71`,
+order `6a85c11a-5ff0-422c-b525-8ad9075ea820`). This was a real session decision,
+not a Codex review action. Do not infer authorization from the fact that a
+session was scheduled: while HALT is present, no session may launch.
+
+Full chronology and recovery steps are in `docs/OPSLOG.md` under
+`2026-08-19 — execution retry / unexpected order incident`.
+
 ---
 
 ## Data sources and their roles

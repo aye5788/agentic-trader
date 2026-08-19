@@ -27,6 +27,14 @@ esac
 # which is the whole point of classify().
 source deploy/alert.sh "session:$MODE" "logs/session.log"
 
+# Emergency operator halt: do not even launch a model session while HALT is
+# present. The order hook remains a second line of defence, but the runner must
+# not spend model budget or reach the broker during an operator pause.
+if [ -e research_store/HALT ]; then
+  echo "HALT active — refusing to launch session:$MODE" >&2
+  exit 0
+fi
+
 # Footgun guard (docs/DESIGN.md): a stray ANTHROPIC_API_KEY silently switches
 # billing from the subscription to per-token. Refuse to run if it's set.
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
@@ -64,7 +72,10 @@ rc=$?
 # `codex`, the run-time bound and the no-overlap guarantee are all declared in
 # /etc/systemd/system/agentic-review.service. `--wait` keeps this sequential, so
 # the review still never runs beside a session.
-systemctl start --wait agentic-review.service || true
+# TEMPORARILY DISABLED: the independent Codex review is advisory and consumes
+# a second model budget after every session. Re-enable this invocation only
+# after the operator confirms capacity is available again.
+# systemctl start --wait agentic-review.service || true
 
 # Score BOTH parties against the panel. Pure pandas, no model, ~1s — and it is
 # what stops the reviewer being decoration: a verdict nobody prices is a second

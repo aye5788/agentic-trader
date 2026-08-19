@@ -209,6 +209,11 @@ def _selftest() -> None:
     unr = {"MU": {"fails": 5, "last_try_ts": t0.isoformat(), "escalated": True}}
     act, esc = refire_gate(trg, unr, t0 + timedelta(seconds=200), 120, 3)
     assert [t["symbol"] for t in act] == ["MU"] and esc == [], (act, esc)
+    # unknown result is terminal until broker state is reconciled: retrying a
+    # fractional target can sell the same position repeatedly
+    unr = {"MU": {"fails": 1, "last_try_ts": t0.isoformat(), "paused": True}}
+    act, esc = refire_gate(trg, unr, t0 + timedelta(hours=1), 120, 3)
+    assert act == [] and esc == [], (act, esc)
     print("monitor selftest OK: refire backoff + escalation gate")
 
     # feed-failure escalation: recover on transients, alert at threshold, exit at cap
@@ -808,6 +813,11 @@ def refire_gate(triggers, unresolved, now_dt, retry_secs, escalate_n):
         if u is None:                                    # fresh breach — always act
             act.append(t)
             continue
+        # A missing executor result is an UNKNOWN outcome, not a retryable
+        # failure. Retrying a fractional target against current quantity can
+        # sell the same position repeatedly (the MRK incident on 2026-08-19).
+        if u.get("paused"):
+            continue
         elapsed = (now_dt - datetime.fromisoformat(u["last_try_ts"])).total_seconds()
         if elapsed < retry_secs:                         # still in backoff — suppress
             continue
@@ -1180,6 +1190,7 @@ def check_once(cfg, client) -> int:
         if EXIT_RES.exists():
             EXIT_RES.unlink()
         result = run_executor(int(m.get("executor_timeout_secs", 300)))
+        result_present = EXIT_RES.exists()
         sold = {s["symbol"] for s in result.get("sold", [])}
         failed = {t["symbol"] for t in act} - sold
         if failed:
@@ -1192,6 +1203,11 @@ def check_once(cfg, client) -> int:
             u = unresolved.setdefault(sym, {"fails": 0, "last_try_ts": ts, "escalated": False})
             u["fails"] += 1
             u["last_try_ts"] = ts
+            if not result_present:
+                # The subprocess may have traded and then exhausted Claude or
+                # timed out during bookkeeping. Do not place another order
+                # until broker state is reconciled by a human.
+                u["paused"] = True
             if sym in escalate:
                 u["escalated"] = True
         for sym in sold:

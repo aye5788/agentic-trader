@@ -416,7 +416,15 @@ def build_brief(mode: str) -> str:
     """Render the charter for this session. Called AFTER the lock is held."""
     text = charter.render(mandate_mod.load(), strategy.load(), _tool_names())
     stamp = datetime.now(timezone.utc).astimezone()
+    handoff_path = REPO / "research_store" / "RECOVERY_HANDOFF.md"
+    try:
+        handoff = handoff_path.read_text().strip()
+    except Exception:                                      # noqa: BLE001
+        handoff = ""
+    handoff_block = ("\n\n---\n\nOPERATOR RECOVERY HANDOFF — read this before acting:\n"
+                     + handoff + "\n") if handoff else ""
     return (f"{text}\n\n---\n\n{render_review(last_review(), mode)}"
+            f"{handoff_block}"
             f"THIS SESSION: **{mode}**, "
             f"{stamp.strftime('%A %Y-%m-%d %H:%M %Z')}.\n")
 

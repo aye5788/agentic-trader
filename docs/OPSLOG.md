@@ -1970,3 +1970,117 @@ yesterday's already-executed plan (with `live_approved: true`) sat on disk. A
 run that blindly trusted the file could re-place old orders (~$54 double-buy
 with zero cash). The 2026-07-09 run detected the staleness and placed nothing.
 FIXED same day in commit c5a3e28 — the plan file is now rewritten every run.
+
+## 2026-08-19 — execution retry / unexpected order incident
+
+**Status:** emergency HALT active; monitor and session timers disabled pending
+controlled recovery. Codex review disabled. Do not remove HALT or restart units
+manually until the broker state has been checked.
+
+### What happened
+
+1. MRK crossed its inherited target-1. The monitor launched the Claude exit
+   executor, which placed two partial sells. The broker position went from
+   `0.044229` shares to `0.011057` shares; there are no open MRK orders.
+2. The executor did not leave `research_store/monitor/exit_result.json`.
+   The monitor therefore classified the outcome as a failed exit even though
+   the broker had sold shares.
+3. The monitor's retry policy treated a fractional target as retryable and
+   computed each retry as a fraction of the *current* remaining quantity. It
+   repeatedly paged `Exit executor result` and could sell more of the same
+   position. `monitor/state.json` reached 22 unresolved MRK failures before the
+   service was stopped.
+4. During the same morning, the scheduled open session ran and intentionally
+   bought FTNT: `0.039290` shares at `$152.71`, order
+   `6a85c11a-5ff0-422c-b525-8ad9075ea820`. This was a session execution, not a
+   Codex review action. It completed before the emergency HALT was activated.
+
+### Immediate containment
+
+- Created `research_store/HALT`. This makes the monitor alert-only and blocks
+  the session wrapper from launching any new model session.
+- Stopped and disabled `agentic-monitor.service`.
+- Stopped and disabled `agentic-session@open.timer` and
+  `agentic-session@close.timer` so no scheduled run can start during review.
+- Confirmed no Claude, session, monitor, or review process remained active.
+- Disabled the post-session `systemctl start --wait agentic-review.service` call
+  in `deploy/run_session.sh`; the review is advisory and consumes a second
+  model budget.
+
+### Code changes
+
+`scripts/market_monitor.py` now treats a missing `exit_result.json` as an
+**unknown broker outcome**, not a normal transient failure. The affected symbol
+is marked `paused` and `refire_gate()` refuses all automatic retries until a
+human reconciles Robinhood. This is deliberately conservative: an unknown
+outcome must never be retried when the order may already have filled.
+
+`deploy/run_session.sh` now refuses to launch if `research_store/HALT` exists,
+and the Codex review invocation is commented out. `deploy/resume_after_halt.sh`
+is the only controlled recovery path: it verifies the review remains disabled,
+enables/starts the monitor and session timers, then removes HALT.
+
+### Recovery procedure
+
+Before recovery, confirm in Robinhood:
+
+- FTNT position and the fill above; decide separately whether it is retained or
+  manually unwound.
+- MRK position is `0.011057` shares and no MRK sell order is open.
+- No unexpected open orders exist in the Agentic account.
+- `research_store/rh/positions.json`, `fills.json`, `orders_dump.json`, and
+  `realized.json` are reconciled from broker truth.
+
+The scheduled resume is intentionally delayed two hours from the incident
+response. It must re-enable the monitor and timers while leaving Codex review
+off. After resume, watch the first monitor poll and the next close session
+closely. Do not remove the HALT manually; use the scheduled recovery script.
+
+### Future-proofing recommendations
+
+These are follow-up safeguards for the next Claude session; do not implement
+them by assumption during recovery:
+
+1. **Make exit requests idempotent.** Store the intended absolute quantity,
+   broker account, trigger ID, and a deterministic client reference in
+   `exit_request.json`. A retry must never reinterpret `fraction` against the
+   newly reduced position. The executor should refuse a second order when the
+   original trigger ID already has a broker fill.
+2. **Reconcile broker truth before retrying.** When `exit_result.json` is absent,
+   query Robinhood orders and positions before deciding whether anything is
+   still owed. Missing local bookkeeping is not evidence that an order failed.
+3. **Separate target and stop retry policies.** A missing result on a target
+   should pause quietly because holding is safe; a missing result on a stop
+   should raise one manual-intervention alert and never create an unbounded
+   Claude retry loop.
+4. **Add a persistent notification circuit breaker.** Any alert family that
+   exceeds a small hourly budget should deduplicate and disable itself while
+   preserving a local journal entry. ntfy must never be able to amplify a
+   model/broker failure into a second outage.
+5. **Add model-budget telemetry.** Record executor/session start, model,
+   duration, exit status, and provider error class locally without recording
+   credentials or prompt contents. A daily budget alarm should fire before a
+   quota exhaustion causes a trading-path failure.
+6. **Fail closed on startup and deployment drift.** Before enabling services,
+   verify the broker snapshot age, no open unexpected orders, no unresolved
+   exit request, the active code hash, and that review/notification settings
+   match the operator’s declared mode.
+7. **Use a non-LLM emergency executor path.** A small deterministic emergency
+   routine should be able to cancel pending orders, query positions, and
+   reconcile an already-filled exit without spending Claude quota. It should
+   remain sell-only and account-scoped.
+8. **Test crash windows explicitly.** Self-tests should simulate: fill then
+   process kill, timeout before result write, result write then bookkeeping
+   failure, duplicate monitor ticks, and a quota/auth error. The invariant is
+   “at most the intended quantity is sold, and at most one alert per incident
+   window.”
+
+The highest-priority follow-up is items 1–3: absolute quantities plus broker
+reconciliation are what prevent a successful-but-unreported fractional exit
+from becoming a chain of duplicate sells.
+
+The next session also receives `research_store/RECOVERY_HANDOFF.md` directly in
+its brief. That handoff records that the open session already ran, the FTNT fill,
+the MRK retained stub and repaired levels, the retry incident, and the disabled
+Codex review. It is intentionally a one-time operator context file; archive it
+after the first post-recovery close session has verified broker truth.
