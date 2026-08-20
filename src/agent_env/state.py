@@ -186,7 +186,28 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
             "unrealized_pnl_pct_cost": (
                 None if not _cost_basis or p.get("value") is None
                 else round(float(p["value"]) / _cost_basis - 1.0, 6)),
-            "strategy_rank": getattr(t, "rank", None) if t else None,
+            # ⛔ THE MOMENTUM RANK, NOT THE SLOT SENTINEL. This reported
+            # `Thesis.rank`, which is a portfolio-SLOT marker: build_theses
+            # numbers the selection from 1, and protective_theses numbers
+            # held-but-unselected names from 200 (and strays from 400) purely so
+            # the monitor can order them. Surfaced as "strategy_rank" it reads as
+            # a ranking, and 200 reads as "worst in the universe".
+            #
+            # It cost a live trade. On 2026-08-20 the close session sold BAC and
+            # recorded "the ranking places 200th of ~200" as its reason for
+            # spending no more risk budget on it. BAC's real momentum rank was
+            # 24 of 96 eligible, +31.8% over twelve months, four places outside
+            # the retention band -- not the worst name in the book. The agent
+            # did not invent the number; this field handed it over. The hazard
+            # was written up in docs/REPOSITORY_INSPECTION.md on 2026-08-09 and
+            # left in place until it took money.
+            #
+            # The true cross-sectional rank has always been in signals["rank"].
+            # `book_slot` keeps the sentinel available under a name that cannot
+            # be mistaken for a ranking, because the monitor and the report
+            # ordering still use it.
+            "momentum_rank": _sig.get("rank"),
+            "book_slot": getattr(t, "rank", None) if t else None,
             "rank_as_of": getattr(t, "as_of", None) if t else None,
             "twelve_month_return": _sig.get("R"),
             "realized_vol_value": _sig.get("sigma"),
@@ -199,7 +220,7 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
             # override existed -- so a stored number could be read with no way
             # to tell how old it was.
             "realized_vol_as_of": getattr(t, "as_of", None) if t else None,
-            "strategy_rank_source": _sig.get("source"),
+            "momentum_rank_source": _sig.get("source"),
             "thesis_as_of": getattr(t, "as_of", None) if t else None,
             "eligibility_state": _eligibility,
             "retention_state": _retention,
@@ -513,6 +534,33 @@ def _selftest() -> None:
         _h = holdings(v_solo, [], ov_solo, {"JNJ": _px})
         assert _h["JNJ"]["watched"] is False, (_px, _h["JNJ"])
 
+    # ⛔ A SLOT SENTINEL MUST NEVER BE SURFACED AS A RANKING.
+    # protective_theses numbers held-but-unselected names from 200 (strays from
+    # 400) so the monitor can order them. Reported as "strategy_rank" that read
+    # as "200th of ~200" and, on 2026-08-20, was the stated reason the close
+    # session declined to spend risk budget on BAC -- whose real momentum rank
+    # was 24. The agent did not invent it; this module handed it over.
+    class _PT:                       # a protective thesis, exactly as built
+        symbol, rank, verdict, stop = "XOM", 202, "hold", 150.0
+        targets, target_weight, as_of = [200.0], 0.0, "2026-08-20"
+        entry_zone = []
+        signals = {"rank": 32, "score": 0.61, "sigma": 0.02, "source": "protective"}
+    v_pt = {"account_value": 100.0, "cash": 0.0, "invested": 100.0,
+            "positions": {"XOM": {"qty": 1.0, "avg_cost": 160.0, "mark": 165.0,
+                                  "value": 165.0}}}
+    h_pt = holdings(v_pt, [_PT()])["XOM"]
+    assert h_pt["momentum_rank"] == 32, h_pt          # the REAL rank
+    assert h_pt["book_slot"] == 202, h_pt             # the sentinel, plainly named
+    assert "strategy_rank" not in h_pt, \
+        "a slot sentinel must not be exposed under a name that reads as a ranking"
+    # ...and a SELECTED name's two numbers agree, so the fix cannot be read as
+    # merely renaming the problem
+    class _SEL(_PT):
+        rank = 3
+        signals = {"rank": 3, "score": 0.9, "sigma": 0.02, "source": "momentum.compute"}
+    h_sel = holdings(v_pt, [_SEL()])["XOM"]
+    assert h_sel["momentum_rank"] == 3 and h_sel["book_slot"] == 3, h_sel
+
     # divergent combination against a single held position.
     valued2 = {"account_value": 100.0,
                "positions": {"CCC": {"qty": 1.0, "avg_cost": 10.0, "mark": 10.0,
@@ -671,7 +719,7 @@ def compare_trims(held: dict, account_value: float, notional: float,
             "post_trim_weight_pct_nav": round(post_val / av, 6) if av > 0 else None,
             "position_weight_delta": (round(-sell_notional / av, 6) if av > 0 else None),
             "gross_exposure_delta": round(-sell_notional, 4),
-            "strategy_rank_of_trimmed_name": p.get("strategy_rank"),
+            "momentum_rank_of_trimmed_name": p.get("momentum_rank"),
         }
         if eff is not None:
             before = (float(eff) - float(mk)) * float(qty)

@@ -36,6 +36,63 @@ A consolidated account of everything that changed on 2026-08-20 — the six
 commits, the two Codex audits, and what was deliberately left undone — is in
 [`docs/2026-08-20-changes.md`](2026-08-20-changes.md).
 
+## 2026-08-20 — the agent was told a slot number was a ranking, and it sold BAC on it
+
+Found by the independent reviewer of the close session, which checked the
+agent's stated fact against the data instead of reading it for plausibility.
+
+**What the agent recorded as its reason for closing BAC:** *"Widening allocates
+more risk budget to a name the ranking places 200th of ~200."*
+
+**BAC's actual momentum rank: 24 of 96 eligible, `eligible: true`, +31.8% over
+twelve months** — four places outside the rank-20 retention band, not the worst
+name in the universe.
+
+**The agent did not invent the number. `positions()` handed it over.**
+`state.holdings()` exposed `strategy_rank = Thesis.rank`, which is a portfolio
+SLOT marker: `build_theses` numbers the selection from 1, `protective_theses`
+numbers held-but-unselected names from 200, and the stray pass from 400. Under a
+field called `strategy_rank`, 200 reads as a ranking, and as the worst one.
+`scripts/letter_facts.py` reported the same sentinel to the investor letter.
+
+⚠️ **This was written up as a hazard on 2026-08-09** in
+`docs/REPOSITORY_INSPECTION.md` §10 — *"Thesis rank has two meanings… the true
+cross-sectional signal rank lives in `Thesis.signals['rank']`"* — and left in
+place until it took money. A documented defect that nobody wired a check to is
+indistinguishable from an unknown one.
+
+**Blast radius.** BAC (slot 200 / rank 24) was sold at −2.63%. RTX carried the
+same distortion (slot 201 / rank 27) before it stopped out. XOM carries it right
+now: every session has been told it ranks **202nd** when it ranks **32nd**.
+
+**Whether the BAC sale was wrong is not settled and this entry does not claim
+it.** The stop-decay argument was independent and sound, and rank 24 IS outside
+the retention band. But the agent framed a three-way choice — widen, hold, close
+— and resolved it on the rank: "don't spend risk budget on the worst name in the
+universe" is conclusive at 200/200 and an open question at 24/96. The false
+premise was the pivot, not a footnote. It was first described here as "right
+conclusion, wrong premise"; the principal rejected that framing and was correct
+to.
+
+**Fixed:** `positions()` now reports `momentum_rank` from `signals["rank"]` —
+the real cross-sectional rank — and the sentinel survives as `book_slot`, a name
+that cannot be mistaken for a ranking (the monitor and report ordering still use
+it). Same fix in the investor-letter facts. A selftest asserts a protective
+thesis reports rank 32 and slot 202 SEPARATELY, that no key reading as a ranking
+carries the sentinel, and that for a selected name the two agree — so the fix
+cannot be read as a rename. Mutation-tested: restoring the old field fails the
+suite with `KeyError: 'momentum_rank'`.
+
+**The pattern this belongs to**, which the principal named and which the record
+supports: surfaces that read as true and are not. `no_chase` documented three
+times and wired to nothing; a signal panel documented as running that had never
+fired; a health check that measured a log and so read green for a job that
+accomplished nothing; `rule_out()` recording the right fact and gating nothing;
+protective geometry excluded by the very field chosen to mean "not prescribing
+this"; a reviewer whose silence was recorded as a verdict; `identity_verified`
+written, tested and consumed by nothing. A field name is the same class of
+defect as a dead flag, and this one reached the tape.
+
 ## 2026-08-20 — third Codex audit: SPLIT, and every finding implemented
 
 Aaron asked for the full report before any action, having objected — fairly —

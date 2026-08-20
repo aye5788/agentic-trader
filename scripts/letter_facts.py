@@ -256,7 +256,12 @@ def main() -> None:
             "profitable_now_but_loss_at_stop": _profit_but_loss(
                 p.get("avg_cost"), p.get("mark"), _eff_stop.get(symbol)),
             "symbol": symbol,
-            "rank": t.rank if t else None,
+            # ⛔ signals["rank"] is the MOMENTUM rank; t.rank is a portfolio-slot
+            # sentinel (200+ for a held-but-unselected name). Reporting the
+            # sentinel told the letter a rank-24 name ranked 200th — the same
+            # confusion that sold BAC on 2026-08-20.
+            "rank": (t.signals or {}).get("rank") if t else None,
+            "book_slot": t.rank if t else None,
             # A thesis carrying rank>=100 AND zero target weight is not a
             # recommendation: the loop did not select this name, the AGENT
             # bought it, and the geometry exists only so the monitor can watch
@@ -282,7 +287,9 @@ def main() -> None:
         for t in sorted(prod.theses, key=lambda x: x.rank):
             if t.target_weight > 0 and t.symbol not in held_symbols:
                 proposed_positions.append({
-                    "symbol": t.symbol, "rank": t.rank,
+                    "symbol": t.symbol,
+                    "rank": (t.signals or {}).get("rank"),
+                    "book_slot": t.rank,
                     "target_weight": round(t.target_weight, 4),
                     "thesis": t.thesis,
                 })
