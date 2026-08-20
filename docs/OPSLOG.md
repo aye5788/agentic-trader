@@ -9,6 +9,29 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+### "How do we know it will reconcile?" — we did not, and now we do
+
+Aaron asked the right question about the un-journalled RTX fill: what actually
+guarantees anything records it? Checked instead of assumed, and the answer was
+**nothing**.
+
+`health.unrecorded_fills` — the one check whose entire job is "an order executed
+and nobody wrote it down" — keyed ONLY off `agent_decision` events. A
+monitor-triggered stop journals `exit_signal`, not `agent_decision`, so RTX never
+entered the expected-a-fill set and the check reported clean. It was
+structurally blind to the path that places the most urgent orders in the system.
+
+Now it also expects a fill for every ARMED, un-halted `exit_signal` trigger.
+Alert-only and kill-switched signals are excluded on purpose: the monitor
+deliberately places nothing in those modes, and a check that cries wolf on the
+system working as designed is how a real alarm gets ignored (the 2026-08-18
+issue #11 lesson).
+
+Proven against the REAL journal, both directions: with the RTX execution removed
+it returns `['RTX']`; with the fill recorded it returns nothing. The fill itself
+was journalled through `scripts/record_fills.py` from the broker's order record
+(0.026963 @ 216.0601, $5.83), not hand-appended to the ledger.
+
 ## 2026-08-20 — RTX: the stop worked, and the permission to RECORD it did not
 
 **The trade was correct. The bookkeeping was structurally impossible.** Second

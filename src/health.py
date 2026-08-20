@@ -214,13 +214,34 @@ def unrecorded_fills(journal: list, day: str) -> list:
     issue #11). The symbol field is therefore SPLIT, which also means a
     partially-executed multi-symbol decision now reports the specific names that
     are missing instead of an opaque blob nobody can act on.
+
+    ⛔ AND A MONITOR-TRIGGERED EXIT COUNTS TOO (added 2026-08-20). This keyed
+    ONLY off `agent_decision`, so it was structurally blind to the path that
+    places the most urgent orders in the system: a stop breach journals
+    `exit_signal` and the fill is journalled separately by the exit executor.
+    On 2026-08-20 an RTX stop fired, the market sell FILLED, and the executor was
+    then denied permission to write its result — so nothing recorded the trade,
+    and this check reported clean because RTX had never been an `agent_decision`.
+    The one check whose job is "an order executed and nobody wrote it down" could
+    not see the case where that actually happened.
+
+    Only ARMED, un-halted signals count: in alert-only mode or under the kill
+    switch the monitor deliberately places nothing, so expecting a fill there
+    would cry wolf on the system working as designed.
     """
     traded = {"exit", "trim", "sell", "buy", "add", "open", "increase", "reduce"}
     want, got = set(), set()
     for e in journal:
         if str(e.get("ts", ""))[:10] != day:
             continue
-        if e.get("event") == "agent_decision":
+        if e.get("event") == "exit_signal":
+            if not e.get("armed") or e.get("halted"):
+                continue          # nothing was meant to be placed
+            for t in (e.get("triggers") or []):
+                sym = str(t.get("symbol") or "").strip().upper()
+                if sym:
+                    want.add(sym)
+        elif e.get("event") == "agent_decision":
             sym = e.get("symbol")
             if sym and sym != "PORTFOLIO" and str(e.get("action", "")).lower() in traded:
                 for one in str(sym).upper().split(","):
@@ -613,6 +634,37 @@ def _selftest() -> None:
     # other days are not this day's problem
     assert unrecorded_fills(j, "2026-08-11") == []
     assert unrecorded_fills([], "2026-08-12") == []
+
+    # ⛔ A MONITOR-TRIGGERED STOP EXIT IS A TRADE THIS CHECK MUST SEE.
+    # It keyed only off `agent_decision` and was therefore blind to the path
+    # that places the most urgent orders in the system. On 2026-08-20 an RTX
+    # stop fired, the sell FILLED, and the executor was denied permission to
+    # write its result -- nothing recorded the trade, and this check reported
+    # clean because RTX had never been an `agent_decision`.
+    je = [{"event": "exit_signal", "ts": "2026-08-20T15:52:12Z", "armed": True,
+           "triggers": [{"symbol": "RTX", "reason": "stop", "fraction": 1.0}]}]
+    assert unrecorded_fills(je, "2026-08-20") == ["RTX"], unrecorded_fills(je, "2026-08-20")
+    # ...and it goes quiet once the fill IS journalled
+    je_ok = je + [{"event": "execution", "ts": "2026-08-20T15:53:01Z",
+                   "fills": [{"symbol": "RTX"}]}]
+    assert unrecorded_fills(je_ok, "2026-08-20") == [], unrecorded_fills(je_ok, "2026-08-20")
+    # ⚠️ ALERT-ONLY AND HALTED SIGNALS PLACE NOTHING, so expecting a fill there
+    # would cry wolf on the system working exactly as designed -- which is how a
+    # real alarm gets ignored (the 2026-08-18 issue #11 lesson).
+    assert unrecorded_fills(
+        [dict(je[0], armed=False)], "2026-08-20") == []
+    assert unrecorded_fills(
+        [dict(je[0], halted=True)], "2026-08-20") == []
+    # a multi-symbol trigger list reports each missing name
+    jm = [{"event": "exit_signal", "ts": "2026-08-20T15:52:12Z", "armed": True,
+           "triggers": [{"symbol": "RTX"}, {"symbol": "MRK"}]},
+          {"event": "execution", "ts": "2026-08-20T15:53:00Z",
+           "fills": [{"symbol": "MRK"}]}]
+    assert unrecorded_fills(jm, "2026-08-20") == ["RTX"], unrecorded_fills(jm, "2026-08-20")
+    # a trigger with no symbol must not become an empty-string finding
+    assert unrecorded_fills(
+        [{"event": "exit_signal", "ts": "2026-08-20T15:52:12Z", "armed": True,
+          "triggers": [{"reason": "stop"}]}], "2026-08-20") == []
 
     # ⚠️ A MULTI-SYMBOL DECISION IS ONE RECORD, NOT ONE SYMBOL. The real
     # 2026-08-17 ETF liquidation journalled symbol="IWM,XLK,XLE,XLV" for a
