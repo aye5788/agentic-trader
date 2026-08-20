@@ -134,8 +134,10 @@ around it rather than guessing. You are the narrator, not the calculator.
      silence is not: issue 008 showed TER at rank 12 on full weight, unremarked,
      the same name issue 007 had trimmed as "the weakest-ranked name".
 
-   `sleeve` means the symbol is in the ETF universe. It is NOT a rank test, and
-   the ETF sleeve as an allocation was retired 2026-08-16.
+   ⛔ There is no `sleeve` field any more. The ETF sleeve was deleted
+   2026-08-20 (retired 08-16, positions sold 08-17) and the book is single
+   names only, so every position is an equity. Do not describe a sleeve, a
+   split, or an ETF allocation — none exists.
 
 1f. ⛔ **A POSITION SHOWING A PROFIT THAT WOULD CLOSE AT A LOSS MUST BE
    STATED.** Every position carries `peak_pct` (how far it ran from cost),

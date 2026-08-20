@@ -46,6 +46,54 @@ blocking one would strip a position of its only protection. Pinned by a test
 that forces both sides through `vet_plan` and by one asserting a stale
 `[etf_sleeve]` table in a local override cannot re-open it.
 
+### Second Codex audit, same day — DISSENT, and it was right twice
+
+Aaron asked for an independent check of the deletion. Verdict DISSENT. Verified
+each claim rather than accepting it; two were real defects in code written hours
+earlier, two were overstated, and the rest were stale strings.
+
+**REAL — the equity probe said "FAILS CLOSED" and did not.** The comment was
+written by me and was false in the one place it mattered. If the moomoo probe
+threw, or returned partial rows, every unprobed candidate fell through to
+`row is None -> True` and was added on the NAME-SHAPE regex alone — the regex
+that passes SPY, GLD and XLK — on the single path that writes the order-gate
+whitelist. Second hole: `cand` excluded incumbents, but `propose_membership()`
+can re-add a DROPPED incumbent, so a name it would consider was never probed.
+Now: probe the full add set (`ranked[:add_rank_max]`, incumbent or not), and a
+probe that fails or comes back incomplete means **no adds at all** plus a forced
+HOLD with a stated reason. A week with no adds is a non-event; a fund in the
+whitelist is not. Pinned by a test.
+
+**REAL — stale strings.** `prompts/newsletter.md` still told the letter-writer
+what a `sleeve` field meant (the field was deleted); `sweep.py`'s baseline
+markers still said `top-10`/`70/30` so the `*` marked a row that was no longer
+the baseline; `backtest_pit.py` still printed "70/30" as its header; and
+`[risk] max_weight_per_name` still called 10% "of the sleeve".
+
+**OVERSTATED — "whitelist bypass".** The reviewer marked claim A DISPROVEN
+because `require_whitelist=false` would disable the check and because
+`.claude/settings.json` carries no order hook. Live config has
+`require_whitelist = true` (verified), and the hook is deliberately wired in
+`deploy/loop_settings.json` for the LOOPS and not for interactive sessions —
+documented in CLAUDE.md since 2026-08-11, not a regression from this work. A
+config value that COULD be set wrong is not the same as one that IS.
+
+**KNOWN AND ACCEPTED — non-sector funds have no computable stop.** IWM, EFA,
+EEM, GLD, TLT and AGG are no longer price-fetched, so a manually-bought one
+would get no protective geometry. Nothing in the system can buy them, none are
+held, and the case is LOUD rather than silent: the slow loop prints
+`⛔ STILL UNPROTECTED (no computable stop)` and `market_monitor` writes
+`unprotected.json` every tick with the health check watching it. Fetching six
+fund series permanently, to protect a position that can only arrive by hand, is
+the wrong trade — but it is stated here rather than left for someone to
+discover.
+
+**F, on "nothing mandates a trade":** the reviewer is technically right that
+slow-loop geometry feeds an automatic SELL, because the monitor enforces the
+stop it supplies. That is the pre-existing stop mechanism and it is protection,
+not a mandate — but the distinction is worth stating plainly rather than
+claiming the loop can never cause an order.
+
 ### The hole that would have undone all of it, found by asking
 
 Aaron: *"check the screen the universe is built from to make sure it is

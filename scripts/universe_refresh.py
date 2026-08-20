@@ -88,8 +88,20 @@ def _selftest() -> None:
     assert "GOOD" in pf2["result"][-1]["ticker"] or any(
         r["ticker"] == "GOOD" for r in pf2["result"]), pf2["result"]
 
+    # ⚠️ AND AN UNVERIFIABLE CANDIDATE IS NEVER ADDED. The first version of the
+    # probe claimed "fails closed" and fell back to the name-shape regex when
+    # the probe threw or returned partial rows — the regex that passes SPY, GLD
+    # and XLK, on the one path that writes the order-gate whitelist.
+    def _eq_probe_down(t):
+        return False          # probe_ok False -> nothing is verifiable
+    pf3 = um.propose_membership(["GOOD", "ALSO"], {"GOOD": 999.0, "ALSO": 900.0},
+                                cur1, set(), fp, is_equity=_eq_probe_down)
+    assert pf3["add"] == [], f"a failed probe must add NOTHING, got {pf3['add']}"
+    assert set(pf3["rejected_non_equity"]) == {"GOOD", "ALSO"}, pf3
+
     print("universe_maint selftest OK: rank_pond + propose_membership + "
-          "equities-only adds (denylist AND market-cap test)")
+          "equities-only adds (denylist, market-cap test, and no adds when "
+          "the probe cannot verify)")
 
     cp = {"target_size": 150, "auto_apply_max_changes": 5}
     # routine → AUTO_APPLY
@@ -214,44 +226,72 @@ def run(asof: str, dry: bool) -> dict:
     # itself buyable and undo the sleeve deletion by another route.
     #
     # The positive test: moomoo serves NO `total_market_val` for a fund — the
-    # documented cause of the capital-flow ETF null (OPSLOG 2026-07-28). Only
-    # candidates actually up for addition are probed, so this costs one batched
-    # snapshot, not a second pass over the pond.
+    # documented cause of the capital-flow ETF null (OPSLOG 2026-07-28).
     #
-    # FAILS CLOSED, deliberately: if the probe returns nothing (OpenD down, a
-    # rejected batch), every candidate is unverifiable and the name-shape
-    # backstop decides. An unverifiable candidate is never added on trust.
+    # ⚠️ THIS BLOCK CLAIMED "FAILS CLOSED" AND DID NOT (found by the independent
+    # reviewer, 2026-08-20, hours after it was written). Two real holes:
+    #   1. A probe that threw, or that returned partial rows, left every
+    #      unprobed candidate at `row is None -> True`, i.e. added on the
+    #      name-shape backstop alone — which is exactly the regex that passes
+    #      SPY, GLD and XLK. That is fail-OPEN, on the one path that writes the
+    #      whitelist.
+    #   2. `cand` excluded incumbents, but propose_membership() can re-add a
+    #      DROPPED incumbent — so a candidate it would consider was never
+    #      probed. The probed set must be the considered set.
+    # Both fixed below, and the honest failure mode is now: probe unavailable ->
+    # NO ADDS AT ALL and the proposal HOLDs for a human. A weekly screen that
+    # adds nothing for one week is a non-event; one that adds a fund to the
+    # order-gate whitelist is not.
     def _equity_probe(tickers):
-        mcap = {}
+        """-> (mcap_by_ticker, ok). ok=False means the probe is untrustworthy."""
+        mcap, ok = {}, True
         try:
             ctx = mm.quote_ctx()
             try:
                 for i in range(0, len(tickers), 200):
-                    mcap.update(mm.snapshot_fields(ctx, tickers[i:i + 200]))
+                    batch = tickers[i:i + 200]
+                    got = mm.snapshot_fields(ctx, batch)
+                    if not got:                  # a batch returned nothing
+                        ok = False
+                    mcap.update(got)
             finally:
                 ctx.close()
         except Exception as e:                                # noqa: BLE001
-            print(f"  equity probe unavailable ({type(e).__name__}) — "
-                  f"name-shape backstop only")
-        return mcap
+            print(f"  equity probe FAILED ({type(e).__name__}) — no adds this run")
+            return {}, False
+        missing = [t for t in tickers if t not in mcap]
+        if missing:
+            ok = False
+            print(f"  equity probe incomplete for {len(missing)} candidate(s) — "
+                  f"no adds this run")
+        return mcap, ok
 
-    cand = [t for t in ranked if t not in set(incumbents)][:params["add_rank_max"]]
-    mcaps = _equity_probe(cand) if cand else {}
+    # Probe EVERY name propose_membership could add: anything ranked within
+    # add_rank_max, incumbent or not (a dropped incumbent is re-addable).
+    cand = ranked[:params["add_rank_max"]]
+    mcaps, probe_ok = _equity_probe(cand) if cand else ({}, True)
 
     def is_equity(t: str) -> bool:
         if not um._looks_like_common_stock(t):        # denylist + name shape
             return False
+        if not probe_ok:
+            return False                              # unverifiable -> never add
         row = mcaps.get(t)
         if row is None:
-            return True                                # unprobed -> backstop only
+            return False                              # unprobed -> never add
         mv = row.get("total_market_val")
-        return bool(mv) and float(mv) > 0              # a fund carries none
+        return bool(mv) and float(mv) > 0             # a fund carries none
 
     proposal = um.propose_membership(ranked, turnovers, current, seed_flags,
                                      params, is_equity=is_equity)
     if proposal.get("rejected_non_equity"):
         print(f"  rejected as non-equity: {', '.join(proposal['rejected_non_equity'])}")
     decision = um.classify(proposal, len(ranked), params)
+    if not probe_ok:
+        decision["decision"] = "HOLD"
+        decision["reasons"] = list(decision["reasons"]) + [
+            "equity probe unavailable/incomplete — adds suppressed this run "
+            "(a fund must never be added on the name-shape check alone)"]
 
     # ⛔ A DRY RUN WRITES TO A SEPARATE DIRECTORY. It used to write the proposal
     # into PROP_DIR before the `if dry` check below, which had two consequences:

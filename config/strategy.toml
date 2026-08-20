@@ -18,7 +18,7 @@ account    = "robinhood-agentic" # execution: RH Agentic account ONLY
 # --- Risk gates: enforced by the Research Store on every write_product() -----
 # (These ARE research_store.validate.DEFAULT_MANDATE, externalized.)
 [risk]
-max_weight_per_name = 0.10        # IBD "full position" = 10% of the sleeve
+max_weight_per_name = 0.10        # IBD "full position" = 10% of the book
 max_total_weight    = 1.0         # fully-invested ceiling (sum of weights)
 min_reward_risk     = 2.0         # require >= 2:1 reward:risk geometry
 max_holdings        = 14          # concentration guard = equity-only book_hold(14)
@@ -49,7 +49,7 @@ chase_tol_sigma = 0.5                   # how far ABOVE entry_zone[1] still coun
                                         #   Raise to loosen, 0 = only the raw zone.
 
 # --- The momentum signal (see docs/STRATEGY.md §3 for exact math) ------------
-# Deterministic. Run as CODE, do not eyeball. Same signal on both engines.
+# Deterministic. Run as CODE, do not eyeball. One engine: single names only.
 [signal]
 lookback_days     = 252     # 12-month formation window
 skip_recent_days  = 0       # 12-0: INCLUDE the most recent month (no skip)
@@ -209,7 +209,11 @@ halt_entries_file = "research_store/HALT_ENTRIES"  # touch to stop BUYING only
 max_drawdown     = 0.25                    # halt new buys if account down >25% from its tracked peak
                                            #   (blocks entries only — never an exit)
 max_order_pct    = 0.15                    # reject any single order > 15% of account value
-require_whitelist = true                   # only ever trade names in config/universe.csv + etf_universe.csv
+require_whitelist = true                   # BUYS only ever name config/universe.csv
+                                           #   (single names; etf_universe.csv was
+                                           #   deleted 2026-08-20). A SELL is not
+                                           #   whitelist-checked — blocking one would
+                                           #   strip a position of its only stop.
 
 # Tradeability floor (safety, not selection) -- moved here from config/mandate.toml
 # 2026-08-10 (FIX C). The universe whitelist above encoded "these names are

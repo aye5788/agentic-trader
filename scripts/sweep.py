@@ -46,7 +46,10 @@ def sweep_axis(label, panel, names, spy, variants):
     return rows
 
 
-_BASE_MARK = {"252d", "top-10", "70/30", "regime ON", "band 15"}
+# Baseline markers must match BASE above; "70/30" and "top-10" were left here
+# after the sleeve was deleted and the book moved to 14 names (2026-08-20), so
+# the "*" marked a row that was no longer the baseline.
+_BASE_MARK = {"252d", "top-14", "regime ON", "band 20"}
 
 
 def _is_base(vname):
@@ -72,14 +75,14 @@ def main():
 
     sweep_axis("BOOK HOLD COUNT (concentration)", panel, names, spy, [
         ("top-8", {"book_hold": 8, "book_band": 12}),
-        ("top-10", {"book_hold": 10, "book_band": 15}),
-        ("top-15", {"book_hold": 15, "book_band": 22}),
+        ("top-14", {"book_hold": 14, "book_band": 20}),
+        ("top-20", {"book_hold": 20, "book_band": 28}),
     ])
 
     sweep_axis("BAND WIDTH (vs hard top-N)", panel, names, spy, [
-        ("band 10", {"book_band": 10}),   # == hold_n: no hysteresis
-        ("band 15", {"book_band": 15}),
+        ("band 14", {"book_band": 14}),   # == hold_n: no hysteresis
         ("band 20", {"book_band": 20}),
+        ("band 26", {"book_band": 26}),
     ])
 
     sweep_axis("REGIME FILTER (SPY>50DMA)", panel, names, spy, [

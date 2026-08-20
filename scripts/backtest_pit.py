@@ -159,7 +159,8 @@ def main() -> None:
     bcagr, bvol, bsharpe = bt.annualized(bench_eq.pct_change().dropna(), 52.0)
 
     print("\n" + "=" * 62)
-    print("POINT-IN-TIME BACKTEST  (survivorship-corrected, weekly, 70/30)")
+    print("POINT-IN-TIME BACKTEST  (survivorship-corrected, weekly, "
+          "single-name book — NOT comparable with pre-2026-08-20 70/30 runs)")
     print("=" * 62)
     print(f"period          : {res.index[0].date()} .. {res.index[-1].date()}  "
           f"({len(res)} weeks)")
