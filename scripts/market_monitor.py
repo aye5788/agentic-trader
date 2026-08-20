@@ -68,6 +68,11 @@ _LAST_HALTED: bool | None = None      # log kill-switch mode on transition, not 
 _LAST_UNPROTECTED: frozenset = frozenset()
 _LAST_SUSPECT_EMPTY: bool = False
 _LAST_NO_TARGET: frozenset = frozenset()
+# Positions watched on an agent-set stop with no thesis, and the ones
+# refused because their stop could not be proven below spot. Fire-on-change,
+# matching _LAST_DROPPED/_LAST_UNPROTECTED rather than re-pushing every 15s.
+_LAST_SOLO: frozenset = frozenset()
+_LAST_SOLO_REFUSED: frozenset = frozenset()
 _LAST_STALE_OWNERSHIP: bool = False
 _LAST_TARGET_SUPPRESSED: frozenset = frozenset()   # journal on change, not every 15s tick
 
@@ -394,6 +399,61 @@ def _selftest() -> None:
     print("monitor selftest OK: every position needs BOTH a stop and a target "
           "(missing target announced separately, no double-report, fail-open)")
 
+    # ---- AGENT-SET STOP WITH NO THESIS IS WATCHED --------------------------
+    # The defect this closes: theses come from the NIGHTLY slow loop, so a
+    # position opened intraday was unwatched for the rest of the session no
+    # matter what stop the agent wrote. Twice in two days (BAC/FTNT 08-19,
+    # JNJ 08-20).
+    ov_solo = {"JNJ": {"stop": 261.0, "targets": [279.5, 288.5]},
+               "NOSTOP": {"targets": [10.0]},
+               "JUNK": {"stop": "not-a-number"},
+               "NEG": {"stop": -5.0}}
+    cands = standalone_candidates({"JNJ", "NOSTOP", "JUNK", "NEG", "HASTH"},
+                                  ov_solo, {"HASTH"})
+    assert set(cands) == {"JNJ"}, cands          # only a real, positive stop counts
+    assert standalone_candidates(None, ov_solo, set()) == {}, "no ownership -> nothing"
+    assert standalone_candidates({"JNJ"}, "garbage", set()) == {}, "torn file -> nothing"
+    # a symbol that ALREADY has a thesis is never duplicated here
+    assert standalone_candidates({"HASTH"}, {"HASTH": {"stop": 1.0}}, {"HASTH"}) == {}
+
+    armed_solo, refused = arm_standalone(cands, {"JNJ": 270.02})
+    assert set(armed_solo) == {"JNJ"} and not refused, (armed_solo, refused)
+    j = armed_solo["JNJ"]
+    assert j.stop == 261.0 and j.targets == [279.5, 288.5], j
+    assert j.verdict == "hold" and j.target_weight == 0.0, j
+    assert in_book(j) and j.stop, "an armed standalone must pass the watch predicate"
+
+    # ⛔ THE LIQUIDATION GUARD. A stop at or above spot must NEVER arm: the
+    # monitor would read it as an instant breach and market-sell the whole
+    # position without any order having been placed (2026-08-12, AMD 474.00
+    # against a 473.65 mark). Refuse, alarm, stay unprotected.
+    _, ref_hi = arm_standalone(cands, {"JNJ": 260.0})
+    assert set(ref_hi) == {"JNJ"} and "at or above spot" in ref_hi["JNJ"], ref_hi
+    _, ref_eq = arm_standalone(cands, {"JNJ": 261.0})
+    assert set(ref_eq) == {"JNJ"}, "stop EQUAL to spot must also refuse"
+    # ...and an unknown price is refused rather than guessed
+    _, ref_np = arm_standalone(cands, {})
+    assert set(ref_np) == {"JNJ"} and "no live price" in ref_np["JNJ"], ref_np
+    _, ref_bad = arm_standalone(cands, {"JNJ": "x"})
+    assert set(ref_bad) == {"JNJ"}, "unreadable price must refuse"
+
+    # a target-less agent stop still arms -- a stop with no target is legal
+    solo_nt = standalone_candidates({"Z"}, {"Z": {"stop": 5.0}}, set())
+    a_nt, _ = arm_standalone(solo_nt, {"Z": 6.0})
+    assert a_nt["Z"].targets == [], a_nt["Z"].targets
+
+    # ...and the invariant report must count it PROTECTED, not raise a false alarm
+    u = unprotected_positions([], {"JNJ"}, extra_watched={"JNJ"},
+                              extra_targets={"JNJ": [279.5]})
+    assert u["unprotected"] == [] and u["no_target"] == [], u
+    u2 = unprotected_positions([], {"JNJ"}, extra_watched={"JNJ"},
+                               extra_targets={"JNJ": []})
+    assert u2["unprotected"] == [] and u2["no_target"] == ["JNJ"], u2
+    # with no extra_watched it is still reported unprotected (the old behaviour)
+    assert unprotected_positions([], {"JNJ"})["unprotected"] == ["JNJ"]
+    print("monitor selftest OK: an agent-set stop with NO thesis is watched, and a "
+          "stop at/above spot is REFUSED rather than fired")
+
     print("monitor selftest OK: unprotected-position invariant (held-no-thesis, "
           "held-no-stop, empty-snapshot suspicion, torn-snapshot fail-open, "
           "all-protected no-alert)")
@@ -679,7 +739,8 @@ def _publish_enforcement(held, pre, prices, book_asof) -> None:
         pass        # never let a report block the scan that places the sell
 
 
-def unprotected_positions(theses, owned) -> dict:
+def unprotected_positions(theses, owned, extra_watched=None,
+                          extra_targets=None) -> dict:
     """Classify the invariant in docs/superpowers/specs/2026-08-09-agent-authority
     -inversion-design.md §8: "every position has an agent-set stop, or it is
     loudly flagged unprotected." Pure — no I/O.
@@ -706,7 +767,12 @@ def unprotected_positions(theses, owned) -> dict:
     """
     if owned is None:
         return {"unprotected": [], "no_target": [], "suspect_empty_snapshot": False}
-    watched = {t.symbol for t in theses if in_book(t) and t.stop}
+    # `extra_watched` = positions watched on an AGENT-SET stop with no thesis
+    # (see standalone_candidates). They ARE protected, so reporting them
+    # unprotected would be a false alarm -- and a false alarm here is not
+    # harmless: this is the row the operator scans for the real ones.
+    watched = {t.symbol for t in theses if in_book(t) and t.stop} | set(extra_watched or ())
+    targets_extra = {sym for sym, tg in (extra_targets or {}).items() if tg}
     if not owned:
         expects_holdings = any(in_book(t) for t in theses)
         return {"unprotected": [], "no_target": [],
@@ -718,10 +784,95 @@ def unprotected_positions(theses, owned) -> dict:
     # an unfinished decision -- but both are announced, because the standing
     # instruction is that every position carries both and neither is optional.
     targeted = {t.symbol for t in theses
-                if in_book(t) and t.stop and (t.targets or [])}
+                if in_book(t) and t.stop and (t.targets or [])} | targets_extra
     return {"unprotected": sorted(owned - watched),
             "no_target": sorted((owned & watched) - targeted),
             "suspect_empty_snapshot": False}
+
+
+def standalone_candidates(owned, overrides, thesis_syms) -> dict:
+    """Owned positions carrying an AGENT-SET stop but no thesis. -> {sym: ov}.
+
+    ⛔ WHY THIS EXISTS. The monitor's watch set was theses ∩ owned, and theses
+    are written by the NIGHTLY slow loop -- so a position opened intraday was
+    unwatched for the rest of that session no matter what stop the agent wrote.
+    `set_levels` said so out loud ("no thesis for this symbol -- the monitor is
+    not watching it at all") and the position stayed unprotected anyway. It
+    surfaced on 2026-08-19 and again on 2026-08-20 (JNJ, bought 10:40, stop
+    261.00 written and enforced by nothing).
+
+    An agent-set stop IS a stop. The stricter-only override machinery needs a
+    base thesis to be stricter THAN, but that is an argument about how to merge
+    two stops, not a reason to enforce neither.
+
+    Pure: no clock, no I/O. Expiry is handled by the caller's override reader.
+    """
+    if not isinstance(overrides, dict) or not owned:
+        return {}
+    out = {}
+    for sym in sorted(set(owned) - set(thesis_syms)):
+        ov = overrides.get(sym)
+        if not isinstance(ov, dict):
+            continue
+        try:
+            stop = float(ov.get("stop"))
+        except (TypeError, ValueError):
+            continue
+        if not (stop > 0) or stop != stop:            # NaN/inf/<=0 -> not a stop
+            continue
+        out[sym] = ov
+    return out
+
+
+def arm_standalone(candidates: dict, prices: dict, start_rank: int = 900):
+    """Turn override-only candidates into watchable theses. -> (armed, refused).
+
+    ⛔ THE PRICE GUARD IS THE WHOLE SAFETY ARGUMENT, and it is not optional.
+    On 2026-08-12 `set_levels` accepted a stop ABOVE the live price and reported
+    it enforced; the armed monitor reads that as an instant breach and market-
+    sells the entire position -- a full liquidation reached without any order
+    being placed. Creating watches out of overrides re-opens exactly that door,
+    so a candidate arms ONLY when a live price is known AND sits strictly above
+    the stop.
+
+    Anything else is REFUSED, with a reason, and stays in `unprotected` where it
+    is already alarmed. Refusing costs a position the protection it did not have
+    a moment ago; arming wrongly sells it at market. Those are not symmetric.
+    """
+    from research_store.models import Thesis                   # noqa: PLC0415
+    armed, refused = {}, {}
+    rank = start_rank
+    for sym, ov in sorted(candidates.items()):
+        stop = float(ov["stop"])
+        px = prices.get(sym)
+        if px is None:
+            refused[sym] = "no live price yet — cannot verify the stop is below spot"
+            continue
+        try:
+            px = float(px)
+        except (TypeError, ValueError):
+            refused[sym] = "unreadable price"
+            continue
+        if not (px > stop):
+            refused[sym] = (f"stop {stop:g} is at or above spot {px:g} — arming it "
+                            f"would fire an immediate market sell")
+            continue
+        tg = ov.get("targets")
+        if not isinstance(tg, list):
+            tg = [ov["target"]] if ov.get("target") is not None else []
+        try:
+            targets = [float(x) for x in tg]
+        except (TypeError, ValueError):
+            targets = []
+        armed[sym] = Thesis(
+            symbol=sym, rank=rank, verdict="hold",
+            thesis=("HELD with an agent-set stop and no thesis (opened intraday). "
+                    "Watched on the agent's own levels; the loop is not "
+                    "prescribing this position."),
+            entry_zone=[], stop=stop, targets=targets, target_weight=0.0,
+            signals={"source": "agent_override"})
+        rank += 1
+    return armed, refused
 
 
 def in_book(t) -> bool:
@@ -1210,12 +1361,21 @@ def check_once(cfg, client) -> int:
     # same class of lie the file exists to remove. Found by review 2026-08-18.
     _publish_enforcement(held, _pre, _px, prod.as_of)
 
+    # ⛔ POSITIONS WITH AN AGENT-SET STOP AND NO THESIS. Theses come from the
+    # NIGHTLY slow loop, so before 2026-08-20 anything opened intraday was
+    # unwatched for the rest of that session however carefully the agent set its
+    # levels -- set_levels even said so and the position stayed unprotected
+    # anyway (JNJ, 2026-08-20; BAC/FTNT the day before). An agent-set stop is a
+    # stop. These are quoted with everything else below and ARMED only once a
+    # live price proves the stop sits under spot.
+    _pending = standalone_candidates(owned, _ov, set(held))
+
     # ⚠️ NOT a bare `return 0`. An all-cash book still has wakes to watch, and
     # that is exactly when a wake matters most: "tell me if NVDA reaches X so I
     # can re-enter" is registered precisely when the name is NOT held. Returning
     # here on an empty book would leave those wakes silently unevaluated for as
     # long as the book stayed flat.
-    if not _should_poll(held, _wake_symbols()):
+    if not _should_poll(dict(held, **{k: None for k in _pending}), _wake_symbols()):
         return 0
 
     st = _load(STATE, {})
@@ -1228,7 +1388,8 @@ def check_once(cfg, client) -> int:
     # all: it was written, selftested, and nothing ever fed it a price.
     wake_syms = _wake_symbols()
     try:
-        quotes = mmp.live_quotes(sorted(set(held) | wake_syms), ctx=client)
+        quotes = mmp.live_quotes(sorted(set(held) | wake_syms | set(_pending)),
+                                 ctx=client)
     except Exception as e:
         # Do NOT swallow: signal the main loop so it rebuilds the client and, if
         # the feed stays wedged, exits for a clean systemd restart + phone alert.
@@ -1236,7 +1397,7 @@ def check_once(cfg, client) -> int:
 
     # persist the marks we just paid for — the dashboard + equity logger value
     # positions from this file (via src/marks.py) instead of stale snapshots
-    prices = {sym: px for sym in (set(held) | wake_syms)
+    prices = {sym: px for sym in (set(held) | wake_syms | set(_pending))
               if (px := _last_price(quotes.get(sym))) is not None}
     _save(QUOTES, {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                    "prices": prices})
@@ -1246,6 +1407,43 @@ def check_once(cfg, client) -> int:
     # it first costs the stop watcher nothing and means a wake is not skipped
     # by an early return further down.
     _fire_wakes(prices, armed)
+
+    # Arm the override-only watches now that this tick's prices are in hand.
+    # arm_standalone REFUSES anything it cannot prove is below spot -- a stop at
+    # or above the live price would fire an immediate market sell, which is the
+    # 2026-08-12 whole-position-liquidation path.
+    if _pending:
+        _armed_solo, _refused_solo = arm_standalone(_pending, prices)
+        held.update(_armed_solo)
+        global _LAST_SOLO, _LAST_SOLO_REFUSED
+        cur_solo = frozenset(_armed_solo)
+        if cur_solo != _LAST_SOLO:
+            if cur_solo:
+                print(f"  watching on agent-set stops (no thesis): "
+                      f"{', '.join(sorted(cur_solo))}")
+            _LAST_SOLO = cur_solo
+        cur_ref = frozenset(_refused_solo)
+        if cur_ref != _LAST_SOLO_REFUSED:
+            for sym, why in sorted(_refused_solo.items()):
+                print(f"  ⚠ NOT arming {sym} on its agent-set stop: {why}")
+            if cur_ref:
+                names = ", ".join(f"{s} ({w})" for s, w in sorted(_refused_solo.items()))
+                notify("⚠️ Agent-set stop NOT enforceable",
+                       f"{names}. The position stays UNPROTECTED — set a stop "
+                       f"below the live price, or exit by hand.", tags="warning")
+            _LAST_SOLO_REFUSED = cur_ref
+        # Re-publish the invariant now that the armed set is known, so a
+        # genuinely protected position is not reported unprotected.
+        if _armed_solo:
+            unprot2 = unprotected_positions(
+                prod.theses, owned, extra_watched=set(_armed_solo),
+                extra_targets={s: t.targets for s, t in _armed_solo.items()})
+            _save(MON / "unprotected.json", {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "unprotected": unprot2["unprotected"],
+                "no_target": unprot2.get("no_target", []),
+                "suspect_empty_snapshot": unprot2["suspect_empty_snapshot"],
+            })
 
     if not held:
         return 0        # wakes-only tick: nothing to stop-watch

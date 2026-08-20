@@ -1391,7 +1391,115 @@ def check_units_match_installed(root: pathlib.Path,
     return out
 
 
+# ---------------------------------------------------------------- exit writes
+#
+# Files the STOP-EXIT path must be able to write, and the ones it must not.
+# Declared here rather than scraped from prompts/exit.md: a prompt edit should
+# not silently change what this check enforces, and the check must be able to
+# fail when the prompt and the permissions disagree.
+EXIT_MUST_WRITE = (
+    "research_store/monitor/exit_result.json",   # the ONLY thing the monitor
+                                                 # reads to learn a sale fired
+    "research_store/rh/fills.json",
+    "research_store/rh/exit_closes.json",
+    "research_store/rh/positions.json",
+    "research_store/rh/realized.json",
+    "research_store/rh/orders_dump.json",
+)
+# Writable by the exit executor would be a live-risk defect: overrides.json IS
+# the enforced stops, state.json holds the fired flags, exit_request.json is the
+# monitor's instruction TO the executor.
+EXIT_MUST_NOT_WRITE = (
+    "research_store/monitor/overrides.json",
+    "research_store/monitor/state.json",
+    "research_store/monitor/exit_request.json",
+    "research_store/monitor/cooldown.json",
+    "research_store/current.json",
+    "research_store/journal.jsonl",
+)
+
+
+def _perm_verdict(rules: dict, path: str) -> str:
+    """-> 'allow' | 'deny' | 'unset' for `path` under a settings permissions dict.
+
+    Mirrors Claude Code's matching closely enough for this check's purpose: a
+    rule is `Tool(pattern)`, `**` matches any suffix, and DENY WINS over allow
+    (which is exactly why a blanket deny silently beat the allow that was
+    supposed to let the executor record its own fill).
+    """
+    def _matches(rule: str) -> bool:
+        if "(" not in rule or not rule.endswith(")"):
+            return False
+        tool, pat = rule.split("(", 1)
+        if tool.strip() not in ("Edit", "Write"):
+            return False
+        pat = pat[:-1].strip().lstrip("./")
+        target = path.lstrip("./")
+        if pat.endswith("**"):
+            return target.startswith(pat[:-2])
+        return pat == target
+
+    if any(_matches(r) for r in (rules.get("deny") or ())):
+        return "deny"
+    if any(_matches(r) for r in (rules.get("allow") or ())):
+        return "allow"
+    return "unset"
+
+
+def check_exit_path_can_record(root: pathlib.Path) -> list[str]:
+    """The stop-exit executor must be able to write what the monitor reads.
+
+    ⛔ WHY THIS EXISTS. On 2026-08-20 an RTX stop fired, the executor PLACED the
+    market sell — it filled, in full, correctly — and was then denied permission
+    to write `research_store/monitor/exit_result.json`, because
+    deploy/loop_settings.json carried a blanket `Edit(./research_store/monitor/**)`
+    deny. That file is the ONLY thing the monitor reads to learn a sale fired, so
+    the outcome read as UNKNOWN: the position showed as unprotected, the fill was
+    never journalled, and a headless executor sat asking a human for approval that
+    could never arrive. The same shape had cost a duplicate-sell incident the day
+    before (MRK, 2026-08-19).
+
+    Nothing detected it until a real stop fired against real money, because a
+    permission rule is only exercised on the path it guards. This check exercises
+    it statically, every day, without needing a position to break.
+
+    It asserts BOTH directions — a required write that is denied is a defect, and
+    a protected file that became writable is a bigger one.
+    """
+    out = []
+    path = root / "deploy" / "loop_settings.json"
+    if not path.is_file():
+        return ["deploy/loop_settings.json: missing — the loops (and the exit "
+                "executor) would run under the permissive interactive settings"]
+    try:
+        rules = (json.loads(path.read_text()).get("permissions") or {})
+    except Exception as e:                                    # noqa: BLE001
+        return [f"deploy/loop_settings.json: unreadable ({type(e).__name__})"]
+
+    for f in EXIT_MUST_WRITE:
+        v = _perm_verdict(rules, f)
+        if v != "allow":
+            out.append(
+                f"deploy/loop_settings.json: the stop-exit executor CANNOT write "
+                f"{f} ({v}) — a stop that fires will place its order and then be "
+                f"unable to record it, so the monitor reads the outcome as "
+                f"unknown (2026-08-20 RTX)")
+    for f in EXIT_MUST_NOT_WRITE:
+        if _perm_verdict(rules, f) == "allow":
+            out.append(
+                f"deploy/loop_settings.json: {f} is WRITABLE by the loops — it "
+                f"must not be; this file is enforced state (a live stop, a fired "
+                f"flag, or the monitor's own instruction to the executor)")
+    if rules.get("ask"):
+        out.append(
+            f"deploy/loop_settings.json: {len(rules['ask'])} `ask` rule(s) — the "
+            f"loops are HEADLESS, so an approval prompt is never answered: the "
+            f"run stalls mid-procedure, after any order it already placed")
+    return out
+
+
 CHECKS = (
+    check_exit_path_can_record,
     check_cron_paths,
     check_scheduled_jobs_armed,
     check_units_match_installed,
@@ -2415,8 +2523,17 @@ jobs:
         # A clean tree HAS the loop settings — its absence is a finding (check 7),
         # so a fixture asserting "no findings" must supply it or it is asserting
         # that a repo with no lockdown is clean.
-        _write(root, _SETTINGS_JSON,
-               '{"permissions": {"deny": ' + json.dumps(list(_REQUIRED_DENIES)) + '}}')
+        # One settings file satisfying BOTH lockdown checks: the required denies
+        # (check 7) AND the stop-exit path's ability to record its own fills
+        # (check 11). They are not in tension -- _REQUIRED_DENIES never covered
+        # research_store/monitor/, which is exactly why a blanket deny could be
+        # added there in 2026-08 and pass every check until a stop fired.
+        _write(root, _SETTINGS_JSON, json.dumps({"permissions": {
+            "allow": ["Edit(./research_store/**)", "Write(./research_store/**)"],
+            "deny": list(_REQUIRED_DENIES)
+                    + [f"Edit(./research_store/monitor/{f})" for f in
+                       ("overrides.json", "state.json", "cooldown.json",
+                        "exit_request.json")]}}))
         # ...and the timer-armed jobs, for the same reason: since 2026-08-14 a
         # clean tree defines its schedules in deploy/*.timer, so a fixture
         # asserting "no findings" must supply them or it asserts that a repo
@@ -2429,6 +2546,62 @@ jobs:
         # leave crontab.template entirely absent -> multiple checks fire
         bad = checks(root)
         assert len(bad) >= 2, bad
+
+    # ---- the exit executor must be able to record what it just sold --------
+    # Pinned because this cost a live incident: on 2026-08-20 an RTX stop fired,
+    # the sell FILLED, and the executor could not write exit_result.json, so the
+    # monitor read the outcome as unknown. Both directions are asserted -- a
+    # required write that is denied, and a protected file that became writable.
+    import json as _json
+    def _write_settings(root, perms):
+        _write(root, "deploy/loop_settings.json",
+               _json.dumps({"permissions": perms}))
+
+    good = {"allow": ["Edit(./research_store/**)", "Write(./research_store/**)"],
+            "deny": [f"Edit(./research_store/monitor/{f})"
+                     for f in ("overrides.json", "state.json", "cooldown.json",
+                               "exit_request.json")]
+                    + ["Edit(./research_store/current.json)",
+                       "Edit(./research_store/journal.jsonl)"]}
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td); _write_settings(root, good)
+        assert check_exit_path_can_record(root) == [], check_exit_path_can_record(root)
+
+    # the REAL regression: a blanket deny swallows exit_result.json
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        blanket = dict(good, deny=good["deny"] + ["Edit(./research_store/monitor/**)"])
+        _write_settings(root, blanket)
+        bad = check_exit_path_can_record(root)
+        assert any("exit_result.json" in b for b in bad), bad
+        assert any("place its order" in b for b in bad), bad
+
+    # the opposite defect: the live stops become writable
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        loose = {"allow": good["allow"] + ["Edit(./research_store/monitor/overrides.json)"],
+                 "deny": [d for d in good["deny"] if "overrides" not in d]}
+        _write_settings(root, loose)
+        bad = check_exit_path_can_record(root)
+        assert any("overrides.json is WRITABLE" in b for b in bad), bad
+
+    # an `ask` rule in a HEADLESS runner stalls the procedure mid-flight
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write_settings(root, dict(good, ask=["Bash(rm *)"]))
+        assert any("headless" in b.lower() for b in check_exit_path_can_record(root))
+
+    # a missing settings file is itself the finding, not a crash
+    with tempfile.TemporaryDirectory() as td:
+        assert check_exit_path_can_record(pathlib.Path(td)), "missing file must report"
+
+    # deny beats allow, which is the precedence that caused the incident
+    assert _perm_verdict({"allow": ["Edit(./a/b.json)"],
+                          "deny": ["Edit(./a/**)"]}, "a/b.json") == "deny"
+    assert _perm_verdict({"allow": ["Write(./a/b.json)"]}, "a/b.json") == "allow"
+    assert _perm_verdict({}, "a/b.json") == "unset"
+    print("repo_checks selftest OK: the stop-exit path can record its own fills "
+          "(and cannot touch enforced state)")
 
     print("repo_checks selftest: PASS")
 

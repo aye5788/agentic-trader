@@ -9,6 +9,103 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-20 — RTX: the stop worked, and the permission to RECORD it did not
+
+**The trade was correct. The bookkeeping was structurally impossible.** Second
+day running that a stop-exit ended in an unknown outcome; the cause is not the
+retry logic fixed on 08-19, it is one line in a permissions file.
+
+### What happened
+
+11:52:12 ET — RTX breached its stop (216.13 against a 216.32 level). The monitor
+fired the exit executor, which placed a market sell. Verified against the broker,
+not the cache: order `6a8722dd-97a6-40ef-b76f-f1799e8aac93`, **state filled,
+cumulative_quantity 0.026963 of 0.026963, average_price 216.0601, one execution,
+zero fees.** Exactly ONE RTX order exists for the day. The software stop did its
+job.
+
+11:53:59 — the executor then reported it could not write
+`research_store/monitor/exit_result.json`, tried every path it had, and stopped
+to ask a human for approval. It is headless. Nobody was there.
+
+**Root cause: `deploy/loop_settings.json` carried a blanket
+`Edit(./research_store/monitor/**)` deny, and that rule covers `Write` too.**
+`exit_result.json` lives in that directory and is **the only thing the monitor
+reads to learn a sale fired**. The deny was not wrong in spirit — that directory
+also holds `overrides.json` (the enforced stops), `state.json` (fired flags) and
+`exit_request.json` (the monitor's instruction TO the executor), none of which an
+agent should touch. It was written as a blanket and swallowed the one file the
+executor must write.
+
+**The 08-19 guard held.** One executor launch, one EXECUTE line, `unresolved: {}`,
+no retry, no duplicate sell. That fix worked exactly as designed; it bounded the
+damage to bookkeeping.
+
+### Reconciled from broker truth
+
+`exit_result.json` written from the broker's order record; snapshot republished
+through `refresh_broker_snapshot()` (11 positions, RTX gone) rather than
+hand-edited — the 2026-08-16 lesson about hand-writing that file.
+
+### The guard, so it cannot recur
+
+Fixing the rule fixes today. What made this expensive is that **a permission rule
+is only exercised on the path it guards**, so the defect was undiscoverable until
+a real stop fired against real money — the same shape as the allowlist outage of
+2026-07-30 and `check_settings_no_exec_wildcard` running nowhere that mattered
+(2026-08-10).
+
+`repo_checks.check_exit_path_can_record` now asserts this statically, daily,
+without needing a position to break. It declares the files the exit path MUST be
+able to write and the files it must NOT, models Claude Code's deny-beats-allow
+precedence (the precedence that caused this), and fails in both directions:
+a required write that is denied, and enforced state that became writable. It also
+fails on any `ask` rule, because an approval prompt in a headless runner stalls
+the procedure *after* an order is already placed — which is precisely what
+happened here.
+
+Mutation-tested: run against the pre-fix settings it reports
+`the stop-exit executor CANNOT write research_store/monitor/exit_result.json`.
+Against the current settings it is clean.
+
+The permission itself is now per-file: `exit_result.json` allowed for Edit and
+Write; `overrides.json`, `state.json`, `cooldown.json`, `quotes.json`,
+`exit_request.json`, `unprotected.json`, `enforcement.json`, `wakes.json` denied
+for both. Narrowing Edit without mirroring Write would have silently widened the
+other tool, so every deny is now stated twice on purpose.
+
+## 2026-08-20 — an agent-set stop with no thesis is now actually enforced
+
+Same day, same class, found because JNJ was bought at 10:40 and sat unprotected.
+
+The monitor's watch set was `theses ∩ owned`, and **theses are written by the
+NIGHTLY slow loop** — so any position opened intraday was unwatched for the rest
+of that session no matter how carefully the agent set its levels. `set_levels`
+said so out loud ("no thesis for this symbol -- the monitor is not watching it at
+all") and the position stayed unprotected anyway. It surfaced on 08-19 (BAC,
+FTNT) and again on 08-20 (JNJ: stop 261.00 written, enforced by nothing).
+
+An agent-set stop IS a stop. The stricter-only override machinery needs a base
+thesis to be *stricter than*, but that is an argument about how to merge two
+stops, not a reason to enforce neither.
+
+`standalone_candidates()` + `arm_standalone()`: an owned symbol carrying an
+agent-set stop and no thesis is quoted with everything else and watched.
+
+⛔ **The price guard is the whole safety argument.** On 2026-08-12 `set_levels`
+accepted a stop ABOVE the live price and reported it enforced; an armed monitor
+reads that as an instant breach and market-sells the entire position — a full
+liquidation reached without any order being placed. Creating watches out of
+overrides re-opens exactly that door, so a candidate arms ONLY when a live price
+is known AND sits strictly above the stop. Anything else is refused with a
+reason, alarms, and stays in `unprotected` where it was already flagged.
+Refusing costs a position protection it did not have a moment ago; arming
+wrongly sells it at market. Those are not symmetric. Mutation-tested: deleting
+the `px > stop` test fails the selftest.
+
+Live within 2 seconds of the restart: `watching on agent-set stops (no thesis):
+JNJ`, and `unprotected.json` went from `["JNJ"]` to `[]`.
+
 ## 2026-08-20 (later) — the ETF sleeve is DELETED, not disabled
 
 Aaron, on being shown that the independent reviewer kept discussing ETFs:
