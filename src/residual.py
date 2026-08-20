@@ -16,6 +16,53 @@ import numpy as np
 import pandas as pd
 
 
+# The 11 SPDR sector ETFs the "sector" variant regresses on. Lives HERE, not in
+# scripts/slow_loop.py, because two callers now need it and a constant with two
+# copies is a divergence waiting to happen — see kwargs_from_config below.
+SECTOR_ETFS = ["XLE", "XLF", "XLK", "XLV", "XLI", "XLP",
+               "XLY", "XLU", "XLB", "XLRE", "XLC"]
+
+
+def kwargs_from_config(cfg, closes, spy=None, *, log=print) -> dict:
+    """Build momentum.compute()'s residual kwargs from [signal] config.
+
+    ⛔ THE SINGLE SOURCE OF THE TILT. This was `slow_loop.residual_kwargs` and
+    the slow loop was its only caller, so the BOOK was ranked with the adopted
+    0.75 sector-residual tilt while `candidates()` / `universe()` — the ranked
+    list the agent actually reads each session — called `momentum.compute()`
+    bare and ranked WITHOUT it. Same names, different sort, no reason: the tilt
+    is a structural signal choice adopted 2026-07-24 on the PIT backtest, not a
+    book-construction detail. Two lists that disagree about which name is
+    strongest is exactly the "documented one way, wired another" class this repo
+    keeps paying for. One function, every caller (2026-08-20).
+
+    residual_tilt<=0 or residual_factors="none" -> {} (plain momentum).
+    "sector" -> {residual_tilt, factors=<the SPDR sector closes present>}.
+    "market" -> {residual_tilt, market=spy}.
+    Missing sector data, an unknown mode, or an absent [signal] table all FAIL
+    OPEN to {} (a plain rank) with a logged note — a ranking must never crash
+    the caller. `log` is injected so a library caller can stay silent.
+    """
+    sig = (cfg or {}).get("signal", {}) or {}
+    tilt = float(sig.get("residual_tilt", 0.0) or 0.0)
+    mode = str(sig.get("residual_factors", "none")).lower()
+    if tilt <= 0.0 or mode == "none":
+        return {}
+    if mode == "market":
+        if spy is None:
+            log("  residual: no market series -> plain rank this run")
+            return {}
+        return {"residual_tilt": tilt, "market": spy}
+    if mode == "sector":
+        have = [s for s in SECTOR_ETFS if s in getattr(closes, "columns", [])]
+        if not have:
+            log("  residual: no sector ETFs in price cache -> plain rank this run")
+            return {}
+        return {"residual_tilt": tilt, "factors": closes[have]}
+    log(f"  residual: unknown residual_factors={mode!r} -> plain rank this run")
+    return {}
+
+
 def residual_mom_from_returns(rets: pd.DataFrame, mkt: pd.Series) -> pd.Series:
     """Per-ticker residual momentum from daily returns. rets: dates×tickers; mkt:
     market daily returns (same index). Regress each column on mkt (skipna),
@@ -133,7 +180,33 @@ def _selftest() -> None:
     mf_nan = mf.copy(); mf_nan.iloc[5, 0] = np.nan
     assert pd.isna(residual_mom_multifactor(mf_nan, S)["PURE"]), "NaN-window name -> NaN"
 
-    print("selftest OK: residual (single + multi-factor)")
+    # ---- kwargs_from_config: ONE tilt, every caller ------------------------
+    closes = pd.DataFrame({"XLE": [1.0], "XLK": [1.0], "AAPL": [1.0]})
+    spy = pd.Series([1.0])
+    quiet = lambda _m: None                                      # noqa: E731
+
+    off = {"signal": {"residual_tilt": 0.0, "residual_factors": "sector"}}
+    assert kwargs_from_config(off, closes, spy, log=quiet) == {}, "tilt 0 -> plain"
+    none = {"signal": {"residual_tilt": 0.75, "residual_factors": "none"}}
+    assert kwargs_from_config(none, closes, spy, log=quiet) == {}, "'none' -> plain"
+
+    sec = {"signal": {"residual_tilt": 0.75, "residual_factors": "sector"}}
+    k = kwargs_from_config(sec, closes, spy, log=quiet)
+    assert k["residual_tilt"] == 0.75 and list(k["factors"].columns) == ["XLE", "XLK"], k
+
+    mkt = {"signal": {"residual_tilt": 0.5, "residual_factors": "market"}}
+    k2 = kwargs_from_config(mkt, closes, spy, log=quiet)
+    assert k2["residual_tilt"] == 0.5 and k2["market"] is spy, k2
+
+    # missing sector data and an unknown mode both FAIL OPEN to a plain rank
+    bare = pd.DataFrame({"AAPL": [1.0]})
+    assert kwargs_from_config(sec, bare, spy, log=quiet) == {}, "no sector ETFs -> plain"
+    weird = {"signal": {"residual_tilt": 0.75, "residual_factors": "banana"}}
+    assert kwargs_from_config(weird, closes, spy, log=quiet) == {}, "unknown mode -> plain"
+    # ...and a missing [signal] table must not raise
+    assert kwargs_from_config({}, closes, spy, log=quiet) == {}, "no config -> plain"
+
+    print("selftest OK: residual (single + multi-factor + kwargs_from_config)")
 
 
 if __name__ == "__main__":

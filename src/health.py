@@ -158,6 +158,22 @@ SPECS = {
     # mtime -- that moves even when the run failed.
     "review":        ("Independent review",      4,  "codex_review journal event"),
     "newsletter":    ("Investor letter",        10,  "research_store/newsletters/"),
+    # ⚠️ THE JOB THAT HAD NEVER RUN. Armed 2026-07-20 as a QUARTERLY screen
+    # (first Sunday of Jan/Apr/Jul/Oct) and it fired exactly zero times before
+    # the cadence was changed to weekly on 2026-08-20 — so the candidate pool
+    # the agent picks from was frozen at its inception list for a month while
+    # every check read green. It had no liveness check at all; that is why.
+    #
+    # 10d for a weekly job, matching signal_panel: a Friday 17:00 run -> the
+    # following Monday 08:00 check is ~2.6d, and one missed week must alarm
+    # without a holiday-shifted run crying wolf.
+    #
+    # The artifact is the PROPOSAL, not logs/universe.log: run() writes a
+    # proposal on every real screen, whereas the log moves even when the script
+    # exits early on the wrong weekday. Same reasoning as the 2026-07-30
+    # output-not-log switch.
+    "universe_refresh": ("Universe refresh (weekly)", 10,
+                         "research_store/universe/proposals/"),
     "adaptive_tune": ("Adaptive tuner (CI)",    10,  "GitHub Actions run"),
     # Design spec 2026-08-09 §8 invariant: "every position has an agent-set
     # stop, or it is loudly flagged unprotected — checked every monitor cycle
@@ -542,6 +558,8 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "session":       _mtime(root / "logs" / "session.log"),
         "review":        _newest_journal_event(root, "codex_review"),
         "newsletter":    _newest_in_dir(root / "research_store" / "newsletters", "*.sent"),
+        "universe_refresh": _newest_in_dir(
+            root / "research_store" / "universe" / "proposals", "*.json"),
         "adaptive_tune": _last_actions_run() if use_network else SKIPPED,
         "unprotected_positions": _unprotected_probe(root),
         "unrecorded_fills": _unrecorded_fills_probe(root),

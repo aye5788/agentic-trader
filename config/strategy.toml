@@ -278,6 +278,17 @@ earnings_window_days = 5       # flag earnings within this many days (overnight-
 
 # --- Universe maintenance (Piece 1) — quarterly liquidity refresh + weekly seed-watch ---
 [universe_maintenance]
+# ⚠️ CADENCE CHANGED 2026-08-20: quarterly -> WEEKLY, every Friday.
+# It was `0 19 1-7 1,4,7,10 *` + a Sunday guard in the bash wrapper — the real
+# cadence (first Sunday of Jan/Apr/Jul/Oct) was spelled nowhere a reader would
+# look, and it had NEVER ONCE FIRED since being armed 2026-07-20. The candidate
+# pool the agent selects from was therefore frozen at its inception list.
+# This key is the single authority: universe_maint.screen_due() reads it, the
+# refresh script refuses to run on any other day, and the slow loop's stale-seed
+# accrual is gated on the same predicate so `stale_seed_weeks` below really does
+# count WEEKS. Friday: after the close, before the 18:00 slow loop, so Friday's
+# ranking already sees the fresh pool.
+screen_day             = "friday"
 target_size            = 150          # universe size
 keep_rank_max          = 180          # incumbent kept while $-vol rank <= this (band)
 add_rank_max           = 150          # non-incumbent eligible to add while rank <= this
@@ -286,5 +297,11 @@ screen_top_n           = 400          # market-cap screen depth for the pond
 screen_min_mktcap      = 2_000_000_000
 auto_apply_max_changes = 5            # > this many changes ⇒ HOLD for review
 stale_seed_rank_floor  = 100          # seed in bottom third (of 150) counts toward stale
-stale_seed_weeks       = 8            # consecutive weeks flagged ⇒ surface for decision
+stale_seed_weeks       = 8            # consecutive WEEKS flagged ⇒ surface for decision.
+                                      #   ⚠️ Until 2026-08-20 the slow loop accrued this
+                                      #   reading EVERY NIGHT while the key said "weeks",
+                                      #   so 8 meant ~1.6 weeks and a seed could be flagged
+                                      #   — which forces the screen to HOLD — five times
+                                      #   faster than declared. Accrual is now gated on
+                                      #   screen_day, one reading per week.
 seed_watch_history     = 16           # weeks of rank history to retain per seed

@@ -241,6 +241,7 @@ CRON_SUBSTRINGS = {
     "ledger_backup": "backup_ledger.sh",
     "signal_panel":  "collect_signals.py",
     "newsletter":    "run_newsletter.sh",
+    "universe_refresh": "run_universe_refresh.sh",
     # The review has no cron line of its own — it runs INSIDE run_session.sh,
     # sequentially after the session (never beside it; two model runs at once
     # took the droplet down 2026-08-12). So the session's arming is its arming:
@@ -1647,6 +1648,7 @@ HOME=/root
 0 10 * * 1-5 /opt/agentic-trader/deploy/run_slow_loop.sh >> logs/slow.log 2>&1
 0 12 * * 1-5 /opt/agentic-trader/deploy/run_risk_review.sh >> logs/risk_review.log 2>&1
 0 21 * * 0   /opt/agentic-trader/deploy/run_newsletter.sh >> logs/newsletter.log 2>&1
+0 17 * * 5   /opt/agentic-trader/deploy/run_universe_refresh.sh >> logs/universe.log 2>&1
 30 22 * * *  cd /opt/agentic-trader && deploy/backup_ledger.sh >> logs/backup.log 2>&1
 35 10 * * 1-5 /opt/agentic-trader/deploy/run_session.sh open >> logs/session.log 2>&1
 15 15 * * 1-5 /opt/agentic-trader/deploy/run_session.sh close >> logs/session.log 2>&1

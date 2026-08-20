@@ -156,7 +156,12 @@ HOME=/root
 # scripts/health_check.py.
 0 8 * * *    cd /opt/agentic-trader && .venv/bin/python scripts/health_check.py --open-issue >> logs/health.log 2>&1
 
-# --- QUARTERLY UNIVERSE REFRESH (Piece 1) — first Sunday of Jan/Apr/Jul/Oct, 19:00 ET ---
-# DOW left as * to avoid cron's day-of-month OR day-of-week gotcha; the wrapper's
-# `date +%u`==7 guard enforces "first Sunday" (cron restricts to days 1-7).
-0 19 1-7 1,4,7,10 *  /opt/agentic-trader/deploy/run_universe_refresh.sh >> /opt/agentic-trader/logs/universe.log 2>&1
+# --- WEEKLY UNIVERSE REFRESH (Piece 1) — every Friday 17:00 ET ---
+# ⚠️ WAS QUARTERLY (`0 19 1-7 1,4,7,10 *` + a `date +%u`==7 guard in the wrapper,
+# i.e. the first Sunday of Jan/Apr/Jul/Oct). Changed 2026-08-20: the candidate
+# pool the agent selects from was being rescreened four times a year on paper
+# and, in practice, NEVER — armed 2026-07-20, zero fires.
+# 17:00: after the 16:00 close, before the 18:00 slow loop, so Friday's ranking
+# already sees the fresh pool. The DAY is not enforced here — it lives in
+# `[universe_maintenance] screen_day` and the script checks it itself.
+0 17 * * 5   /opt/agentic-trader/deploy/run_universe_refresh.sh >> /opt/agentic-trader/logs/universe.log 2>&1

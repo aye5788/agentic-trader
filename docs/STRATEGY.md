@@ -28,17 +28,29 @@ it must be **strong relative to its peers** (cross-sectional rank) **and** in it
 6–12-month horizon; the absolute filter is what takes you to cash when the trend
 breaks, since long-only has no short leg to hedge you.
 
-## 2. Universe — two parallel engines, one signal
+## 2. Universe — the single-name pool, rescreened weekly
 
-Both are ranked by the *identical* signal in §3; they are just two lists.
+⚠️ This section described **two parallel engines** until 2026-08-20. There is
+one: the single-name book. The ETF sleeve was retired 2026-08-16 and its four
+positions sold 2026-08-17.
 
-- **Single-name book** — the fixed 150 in [`config/universe.csv`](../config/universe.csv).
+- **Single-name book** — the 150 in [`config/universe.csv`](../config/universe.csv),
+  **rescreened every Friday** (17:00 ET) on trailing dollar-volume by
+  `scripts/universe_refresh.py`. ⚠️ This was a QUARTERLY job that had never once
+  fired (armed 2026-07-20, zero runs), so the pool was frozen at its inception
+  list; changed 2026-08-20. Seeds are protected, incumbents are kept while their
+  $-vol rank holds, and a routine change auto-applies while anything anomalous
+  HOLDs for your review — it is a liquidity screen, not a signal.
   Respect the `flag` column: `fresh-ipo` (e.g. SpaceX) has no 12-month history —
   it is **unrankable until it seasons**; skip it, don't crash on it. `adr` /
   `micro` / `spec` are tradeable but note them.
-- ~~**ETF sleeve**~~ — **RETIRED 2026-08-16** (see §4). The 18 in
-  [`config/etf_universe.csv`](../config/etf_universe.csv) are still scored and
-  still tradeable, but they no longer receive their own allocation. The design
+- ~~**ETF sleeve**~~ — **RETIRED 2026-08-16** (see §4). ⛔ **The 18 in
+  [`config/etf_universe.csv`](../config/etf_universe.csv) are NOT in your ranked
+  candidate list** — `candidates()` and `universe()` return single names only as
+  of 2026-08-20. They had been pooled into the same percentile rank, which both
+  re-elevated a retired allocation and distorted every stock's score. They are
+  still *scoreable* and still tradeable if you have a reason, but they no longer
+  receive an allocation and are not put in front of you as candidates. The design
   intent was that the defensive assets (GLD, TLT, AGG) sat *inside* the rank, so
   that when equities weakened they rose to the top and you rotated into them —
   a built-in off-switch destination. With the sleeve retired there is no
@@ -57,6 +69,14 @@ For each ticker:
 2. **Trailing volatility** `σ = stdev(daily returns over the same 252 days)`.
 3. **Return view** = `R / σ` (risk-adjusted momentum).
 4. **Trend view** = `close_today / SMA200 − 1` (distance above the 200-day mean).
+
+⚠️ **The ranking is over the SINGLE NAMES only, and it carries the residual
+tilt** (`[signal] residual_tilt`, 0.75 sector variant). Until 2026-08-20 the
+agent-facing `candidates()`/`universe()` did neither — no tilt, and all 18 ETFs
+pooled into the same percentile — so the list the agent read could order the same
+names differently from the list the book was built from. One ranking now:
+`screen.rank_book()` and `scripts/slow_loop.py` both go through
+`residual.kwargs_from_config()`, and a selftest asserts the two agree.
 
 **Relative rank score** (no tunable weights — do not add any):
 - percentile-rank the *Return view* across the eligible universe → `p_ret`
@@ -81,11 +101,14 @@ authoritative — read `[portfolio]` rather than trusting this paragraph.**
   sleeve in config does not sell anything, so that was a separate decision.
   Note `book_hold` moved 10 → 14 at the same time, deliberately: dropping the
   sleeve would otherwise have concentrated per-name size from ~7% to 10%.
-- **ETFs are still SCORED.** `config/etf_universe.csv` stays — the
+- **ETFs are still SCORED — for three specific reasons, none of which is
+  "rank them as candidates".** `config/etf_universe.csv` stays because the
   residual-momentum tilt regresses on the 11 SPDR sectors, the order gate's
   whitelist needs held ETFs to be nameable, and a live ETF position with no
   computable stop would be unprotected. What was retired is the sleeve as an
-  *allocation*, not ETFs as instruments.
+  *allocation*, not ETFs as instruments — and since 2026-08-20 they are also out
+  of the ranked candidate list, which is what "retired as an allocation" should
+  always have meant in practice.
 - **Sizing:** obey the `[risk]` mandate in `strategy.toml` — ≤10% per name,
   ≤`max_holdings` holdings, ≤100% invested, and **reward:risk ≥ 2:1** (the
   Research Store rejects any thesis that violates this on write; if a name can't
@@ -93,10 +116,18 @@ authoritative — read `[portfolio]` rather than trusting this paragraph.**
 
 ## 5. Cadence
 
-- **Weekly:** full rebalance — recompute §3, apply the §4 bands, rotate.
-- **Nightly (between rebalances):** recompute *exits only* — stop breaches,
-  21-day MA breaks, regime flips. A blowup does not wait for the weekly cycle;
-  only the reassessment of *winners* is weekly.
+- **Friday 17:00:** **rescreen the universe** — the candidate pool itself
+  (§2), refreshed on trailing dollar-volume before the evening's ranking sees it.
+- **Weekly (Sunday):** full rebalance — recompute §3, apply the §4 bands, rotate.
+- **Nightly (between rebalances):** recompute the ranking and *exits* — stop
+  breaches, 21-day MA breaks, regime flips. A blowup does not wait for the weekly
+  cycle; only the reassessment of *winners* is weekly.
+  ⚠️ The nightly re-rank used to be **discarded**: rotation is weekly, so Mon–Fri
+  the fresh ranks were computed and thrown away and nothing ever saw them. Since
+  2026-08-20 each run records its ranking (`research_store/ranks/`) and `brief()`
+  shows the agent what moved — entries and exits from the top 20, absolute-gate
+  flips, the biggest rank moves, and any universe churn from the Friday screen.
+  It still rotates nothing: what the movement means is the session's call.
 
 ## 6. Trade management (per position, IBD-derived)
 

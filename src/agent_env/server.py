@@ -39,6 +39,7 @@ import notify                                   # noqa: E402
 import governance as gov                        # noqa: E402
 import strategy as strat                        # noqa: E402
 import momentum                                 # noqa: E402
+import rank_history                             # noqa: E402
 import snapshot_freshness                       # noqa: E402
 import pandas as pd                             # noqa: E402
 
@@ -413,22 +414,36 @@ def _panel():
 
 
 def _all_tickers() -> list:
+    """Every symbol the system knows how to price — single names PLUS ETFs.
+
+    ⛔ NOT the candidate list. `candidates()`/`universe()` rank single names
+    only (the sleeve is retired). This stays ETF-inclusive because a held ETF
+    must still be nameable for the whitelist and must still be scoreable for a
+    stop; it is not a screen.
+    """
     return screen.read_universe(UNIVERSE) + screen.read_universe(ETF_UNIVERSE)
 
 
 @mcp.tool()
 def candidates(n: int = 10) -> str:
-    """The momentum screen's top `n` names, strongest first, with their numbers.
+    """The momentum screen's top `n`, strongest first, with their numbers.
 
     This is an ATTENTION BUDGET, not a boundary — it exists so you are not
     scanning 168 names every session. The full ranked list is one `universe()`
     call away, and you may trade something outside the top n; say why when you do.
 
+    SINGLE NAMES ONLY (config/universe.csv, rescreened every Friday), ranked
+    with the adopted residual tilt — the IDENTICAL ranking the slow loop builds
+    the book from. Until 2026-08-20 it was not: this list was ranked without the
+    tilt and with 18 ETFs pooled in, so it could order the same names
+    differently from the book. The ETF sleeve is retired; ETFs are regression
+    factors for the tilt, not candidates.
+
     Columns: R (12-month return), sigma (daily volatility), trend (distance above
     the 200-day mean), score (the rank-average), eligible (12-month return > 0).
     """
     panel = _panel()
-    r = screen.rank(panel, panel.index[-1], _all_tickers())
+    r = screen.rank_book(panel, panel.index[-1], screen.read_universe(UNIVERSE))
     return r.head(int(n)).round(4).to_json(orient="index", indent=2)
 
 
@@ -440,32 +455,32 @@ def universe() -> str:
     and why.
 
     Returns a JSON object with two parts:
-    - "ranked": scored and sorted names with their R, sigma, trend, score, eligible, rank
-    - "unscoreable": names from config/universe.csv + ETF sleeve that exist in the price
-      panel but lack sufficient history to compute momentum (need 252+ trading days for
-      the 12-month return, 200 for the trend moving average)
+    - "ranked": every scoreable single name (config/universe.csv, rescreened
+      every Friday) with its R, sigma, trend, score, eligible, rank — ranked
+      with the adopted residual tilt, exactly as scripts/slow_loop.py ranks it
+    - "unscoreable": names that exist in the price panel but lack sufficient
+      history to compute momentum (need 252+ trading days for the 12-month
+      return, 200 for the trend moving average)
+
+    ETFs are NOT here. The sleeve was retired 2026-08-16 and its positions sold;
+    the 11 SPDR sectors are regression factors for the tilt, not candidates.
     """
     panel = _panel()
-    all_tickers = _all_tickers()
+    book_t = screen.read_universe(UNIVERSE)
+    r = screen.rank_book(panel, panel.index[-1], book_t)
 
-    # Get the ranked results
-    r = screen.rank(panel, panel.index[-1], all_tickers)
+    # Requested but not scored: present in the panel, dropped by
+    # momentum.compute() for insufficient history.
+    unscoreable = sorted(t for t in book_t
+                         if t in panel.columns and t not in r.index)
 
-    # Find which tickers were requested but not scored:
-    # these exist in the panel but were dropped by momentum.compute() due to insufficient history
-    tickers_in_panel = [c for c in all_tickers if c in panel.columns]
-    unscoreable = sorted([t for t in tickers_in_panel if t not in r.index])
-
-    # Build the result with both ranked names and unscoreable list
-    ranked_json = json.loads(r.round(4).to_json(orient="index"))
-    result = {
-        "ranked": ranked_json,
+    return json.dumps({
+        "ranked": json.loads(r.round(4).to_json(orient="index")),
         "unscoreable": [
             {"ticker": t, "reason": "insufficient price history (need 252+ trading days)"}
             for t in unscoreable
-        ]
-    }
-    return json.dumps(result, indent=2)
+        ],
+    }, indent=2)
 
 
 @mcp.tool()
@@ -1930,7 +1945,19 @@ def brief() -> str:
                           "call means for this book is your judgement."}
 
     held = state.holdings(v, prod.theses if prod else [], _overrides(), _monitor_prices())
-    top = screen.rank(panel, asof, _all_tickers()).head(10).round(4)
+    # Ranked exactly as the book is built (residual tilt, sections kept apart) —
+    # see screen.rank_sections. These used to be two different rankings.
+    top = screen.rank_book(panel, asof, screen.read_universe(UNIVERSE)).head(10).round(4)
+
+    # WHAT THE NIGHTLY RE-RANK CHANGED. The slow loop re-ranks every weeknight;
+    # before 2026-08-20 that result was discarded on six nights out of seven
+    # because rotation is weekly, so the agent never saw it and the work existed
+    # only to look like something had happened. It is now recorded each run and
+    # diffed here. It moves nothing on its own -- what it means is your call.
+    try:
+        rank_diff = rank_history.latest_diff()
+    except Exception as e:                                   # noqa: BLE001
+        rank_diff = {"status": "unavailable", "error": type(e).__name__}
 
     # Degrade mandate_status gracefully when no snapshot exists yet
     try:
@@ -1948,9 +1975,11 @@ def brief() -> str:
         "snapshot_freshness": _staleness(v),
         "unprotected": [s for s, h in held.items() if not h["watched"]],
         "candidates": json.loads(top.to_json(orient="index")),
+        "rank_diff": rank_diff,
         "regime": regime,
-        "available": "candidates() shows 10 of ~168; universe() shows all. "
-                     "terrain(symbol) gives measured excursions for any name.",
+        "available": "candidates() shows the top 10 single names; universe() "
+                     "shows all of them. terrain(symbol) gives measured "
+                     "excursions for any name.",
     }, indent=2, default=str)
 
 

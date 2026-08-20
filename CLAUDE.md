@@ -191,8 +191,10 @@ src/adapters/moomoo/    Data-only moomoo client via OpenD — RUNS UNDER SYSTEM
                         python3. (fast_loop deleted 2026-08-14; risk_review retired
                         into the sessions 2026-08-13.)
                         research.py serves scripts/universe_refresh.py (snapshot_turnover,
-                        screen_top_marketcap, candidate_pond — quarterly universe
-                        maintenance; ⚠️ has NEVER once run, next window Oct 1-7)
+                        screen_top_marketcap, candidate_pond — WEEKLY universe
+                        maintenance, Fridays 17:00 ET, `[universe_maintenance]
+                        screen_day`. ⚠️ WAS QUARTERLY and had NEVER once run
+                        (armed 2026-07-20, zero fires); changed 2026-08-20)
                         and scripts/collect_signals.py (capital_flow_daily,
                         short_interest, option_overview, snapshot_fields — the
                         weekly Sun 20:15 forward-log signal panel; running since
@@ -216,6 +218,14 @@ config/universe.csv     Fixed 150-name momentum universe (human-seed reconciled
                         adr/micro/spec/fresh-ipo model-caveats. Referenced by
                         [universe] in strategy.toml.
 config/etf_universe.csv 18 ETFs (11 SPDR sectors + broad + intl + defensive).
+                        ⛔ NOT CANDIDATES. Since 2026-08-20 `candidates()` /
+                        `universe()` / `brief()` rank SINGLE NAMES ONLY. They
+                        used to pool all 18 ETFs into the ranked list, which
+                        both re-elevated a retired allocation and shifted every
+                        stock's percentile (score IS a percentile rank, so the
+                        pool defines it). ETFs remain scored strictly for the
+                        three reasons below — factors, whitelist, stop — none of
+                        which is "show them to the agent as things to buy".
                         ⚠️ THE SLEEVE IS RETIRED (2026-08-16: [etf_sleeve]
                         enabled=false, sleeve_weight 0.0, book_weight 1.0,
                         book_hold 10→14 so per-name size did not jump to 10%);

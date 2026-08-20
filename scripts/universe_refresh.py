@@ -1,10 +1,17 @@
-"""Universe maintenance — quarterly liquidity refresh. Data-only, offline.
+"""Universe maintenance — WEEKLY (Friday) liquidity refresh. Data-only, offline.
+
+⚠️ CADENCE CHANGED 2026-08-20: quarterly -> weekly. The candidate pool the agent
+selects stocks from was being rescreened four times a year on paper and, in
+practice, never — the job was armed 2026-07-20 and had not fired once. The day
+now lives in `[universe_maintenance] screen_day` and is enforced HERE by
+`universe_maint.screen_due()`, not by a `date +%u` literal in the bash wrapper.
+
 See docs/superpowers/specs/2026-07-19-universe-maintenance-design.md."""
 import argparse
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -72,6 +79,21 @@ def _selftest() -> None:
     w2 = um.update_seed_watch({"X": [1, 2, 3]}, {"X": 4}, max_history=3)
     assert w2["X"] == [2, 3, 4], w2
     print("universe_maint selftest OK: seed-watch")
+
+    # ---- screen_due: the cadence is config, and it fails toward RUNNING ----
+    from datetime import date as _date
+    fri, thu = _date(2026, 8, 21), _date(2026, 8, 20)
+    assert fri.weekday() == 4 and thu.weekday() == 3
+    cfg_fri = {"universe_maintenance": {"screen_day": "friday"}}
+    assert um.screen_due(cfg_fri, fri) and not um.screen_due(cfg_fri, thu)
+    # a different day is honoured...
+    cfg_thu = {"universe_maintenance": {"screen_day": "Thursday"}}   # case-insensitive
+    assert um.screen_due(cfg_thu, thu) and not um.screen_due(cfg_thu, fri)
+    # ...and an unreadable/absent one falls back to Friday rather than never
+    # running, which is what quarterly-and-never-fired actually looked like.
+    assert um.screen_due({"universe_maintenance": {"screen_day": "blursday"}}, fri)
+    assert um.screen_due({}, fri) and not um.screen_due({}, thu)
+    print("universe_maint selftest OK: screen_due (weekly, config-driven, fails toward running)")
 
     import tempfile, os
     rows = [{"ticker": "AAA", "source": "seed", "sector": "S", "exchange": "NYSE", "flag": "", "as_of": "old"},
@@ -191,6 +213,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--run", action="store_true", help="run the refresh (auto-apply or hold)")
+    ap.add_argument("--force", action="store_true",
+                    help="run even when today is not the configured screen_day")
     ap.add_argument("--dry-run", action="store_true", help="compute + write proposal, change nothing")
     ap.add_argument("--asof", default=None, help="YYYY-MM-DD stamp (default: today UTC)")
     ap.add_argument("--apply", metavar="ASOF", default=None,
@@ -205,6 +229,16 @@ def main() -> None:
         return
 
     if args.run or args.dry_run:
+        cfg = strategy.load()
+        today = date.today()
+        # The day gate applies to the SCHEDULED path only. A --dry-run is a
+        # human looking, and --force is a human deciding; neither is the cron
+        # job, and refusing them would just teach people to edit the config.
+        if args.run and not args.force and not um.screen_due(cfg, today):
+            want = (cfg.get("universe_maintenance") or {}).get("screen_day", "friday")
+            print(f"not the screen day (today={today:%A}, screen_day={want}) — "
+                  f"nothing done. Use --force to override, or --dry-run to look.")
+            return
         asof = args.asof or datetime.now(timezone.utc).date().isoformat()
         run(asof, dry=args.dry_run)
         return

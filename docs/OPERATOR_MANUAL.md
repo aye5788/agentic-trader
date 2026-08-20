@@ -25,7 +25,8 @@ through the order gate.
 | 10:35 | `agentic-session@open` — the agent decides and trades |
 | 15:15 | `agentic-session@close` — the agent reviews and trades |
 | 16:15 | equity logged for the dashboard curve |
-| 18:00 (Sun 20:00) | `run_slow_loop.sh` — ranks candidates, records the regime, supplies default stop/target geometry. **It does not decide the book and nothing executes its output.** |
+| Fri 17:00 | `run_universe_refresh.sh` — **rescreens the 150-name candidate pool** on trailing dollar-volume. Routine changes auto-apply and commit; anything anomalous HOLDs and phones you. ⚠️ Weekly since 2026-08-20 — it was quarterly and had never once fired. |
+| 18:00 (Sun 20:00) | `run_slow_loop.sh` — ranks candidates, records the regime, supplies default stop/target geometry, and **records the ranking so the next brief can show what moved**. **It does not decide the book and nothing executes its output.** |
 | always | `agentic-monitor.service` — watches stops/targets every 15s during RTH. **This IS the stop.** |
 
 **The agent sessions — the agent DECIDES.** New, live since 2026-08-12:

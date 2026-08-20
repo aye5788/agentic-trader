@@ -9,6 +9,130 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-20 — the candidate pipeline was doing work nobody could see
+
+Aaron, on being walked through how the ranking is maintained: *"this whole
+process sounds like it's a useless mess ... just useless junk that serves no
+purpose but to look like something was done."* He was describing three separate
+things, and on inspection each was real.
+
+### 1. The universe screen had never run. Not "rarely" — never.
+
+`run_universe_refresh.sh` rescreens the 150-name pool the agent picks stocks
+from. It was armed 2026-07-20 as `0 19 1-7 1,4,7,10 *` plus a
+`[ "$(date +%u)" -eq 7 ]` guard in the wrapper — the first Sunday of
+Jan/Apr/Jul/Oct. July had already passed when it was armed, so the first real
+fire would have been **Sun 2026-10-04**. In the meantime the candidate pool was
+frozen at its inception list while the docs described a maintained universe.
+
+Now **weekly, Fridays 17:00 ET** — after the close, before the 18:00 slow loop,
+so Friday's ranking already sees the fresh pool.
+
+The cadence had been spelled in two languages (a cron field and a bash `date +%u`
+test) and stated plainly in neither. It now lives in `[universe_maintenance]
+screen_day` and is enforced by `universe_maint.screen_due()` — a pure, selftested
+predicate the script itself checks, so a wrong cron line cannot fire it on the
+wrong day and the config cannot be contradicted by a shell literal. It fails
+toward RUNNING on an unreadable value, because a screen that silently stops is
+precisely what the last month looked like.
+
+It also had **no liveness check at all**, which is why nobody noticed — added as
+`health.SPECS["universe_refresh"]`, keyed to the PROPOSAL artifact rather than
+`logs/universe.log` (the log moves even when the script exits early; same
+output-not-log reasoning as 2026-07-30).
+
+⚠️ **First weekly run will almost certainly HOLD, not auto-apply.** The 2026-07-28
+dry run proposed 16 changes against an `auto_apply_max_changes` of 5. That is
+correct behaviour after a month of drift, not a fault — it phones and waits.
+
+### 2. The nightly re-rank was computed and thrown away
+
+Rotation is weekly, so on the five weeknight runs `hold_selection()` discarded
+the fresh ranking entirely and nothing downstream ever saw it. The slow loop was
+doing the work and deleting it — the same shape as the signal panel that never
+ran (2026-07-24) and the reviewer that never launched (2026-08-13), except here
+the job ran perfectly and its output had no consumer.
+
+`src/rank_history.py` now records each run to `research_store/ranks/<as_of>.json`
+and `brief()` carries the diff into every session: top-20 entries and exits,
+absolute-gate flips, the biggest rank moves, and universe joins/leaves (which is
+how Friday's screen shows up on Friday night). Verified on two real consecutive
+sessions, 08-18 -> 08-19: 80 names moved, MRK/KO/MNST entered the top 20,
+**BAC and RTX — both held — fell out of it**, and LIN/MDT/PLTR regained the
+absolute gate. That is decision-relevant and it was being deleted nightly.
+
+`diff()` is pure and distinguishes `no_snapshot` / `no_comparison` / `ok`, so a
+first run can never render as "nothing changed" — the `unscoreable` mistake from
+docs/2026-08-19-scorecard-consumer-gap.md §3. `--dry` records nothing.
+
+⛔ **It rotates nothing.** The re-rank is a fact delivered to the session; what
+it means is the agent's call, as with everything else since 2026-08-14.
+
+### 3. The agent was reading a different ranking from the one the book uses
+
+Found while explaining the above; Aaron: *"there is no reason the scoring should
+be different ... the two should be consistent."* There were **two** divergences
+producing one symptom:
+
+- **The tilt was missing.** `scripts/slow_loop.py` ranks with the adopted 0.75
+  sector-residual blend (PIT-backtested, adopted 2026-07-24).
+  `candidates()`/`universe()` called `momentum.compute()` bare. The agent's list
+  was ranked on a different signal from the book's.
+- **ETFs were pooled in.** The agent-facing screen ranked all 18 ETFs alongside
+  the 150 single names. `score` is a PERCENTILE rank, so the pool DEFINES it:
+  ETFs carry structurally lower sigma, flattering themselves on R/sigma and
+  shifting every single name's percentile. The slow loop has always kept them
+  apart.
+
+`residual.kwargs_from_config()` is now the single source of the tilt (moved out
+of `slow_loop`, which was its only caller — which is exactly why the screen never
+got it), and `screen.rank_book()` is the one ranking both paths produce. The
+selftest asserts BEHAVIOURAL equality against `momentum.compute()` called the way
+the loop calls it, and separately asserts the tilt actually changes the order —
+without that second assertion the first would be vacuous, the 2026-08-14 lesson.
+
+**ETFs are out of the ranked candidate list entirely.** The sleeve was retired
+2026-08-16 and its four positions sold 08-17; ranking them as candidates
+re-elevated an allocation that had been retired. They remain scored for the three
+narrow reasons CLAUDE.md gives — tilt regression factors, order-gate whitelist,
+and a computable stop for anything held — none of which is "put them in front of
+the agent as things to buy". Their PRICE columns stay load-bearing and a selftest
+proves it: strip the sector columns and the tilt correctly falls back to a plain
+rank.
+
+### 4. A latent crash, found on the way, that the weekly churn made likelier
+
+`protective_theses()` — the function that gives a held-but-unselected name a base
+stop — built its thesis text with `int(row["rank"])`, and **rank is NaN for a
+name that fails the absolute gate**, which is precisely the case it exists for.
+`int(NaN)` raises `ValueError`, outside the per-name `try`, so it would have
+taken down the whole slow loop on a rotation night. Non-rotation nights hid it
+because `hold_selection()` keeps ineligible held names covered.
+
+Latent since 2026-08-14. Found now because a weekly universe rescreen makes a
+held name leaving the ranked set materially more likely. Fixed, and the fix was
+**mutation-tested**: reverting it reproduces
+`ValueError: cannot convert float NaN to integer`.
+
+The requirement pinned by the new test is not "does not crash" — it is that such
+a name still gets **a real stop**, still carries `target_weight 0.0`, and is
+never told to sell. Aaron, explicitly: *"that is up to the agent to decide to
+close or not."* The thesis text now states the fact and says the choice is the
+agent's.
+
+### What was NOT changed
+
+- Nothing here places, sizes, or mandates a trade. The selection remains a
+  proposal; the sessions decide.
+- The Sunday rotation cadence, `book_hold`, `book_band`, the signal math and the
+  stop geometry are all untouched.
+- `agentic-monitor` imports none of the changed modules — the stop watcher's
+  behaviour is unaffected. Verified rather than assumed.
+
+One knock-on worth stating: `config/universe.csv` **is** the order-gate
+whitelist, so a weekly screen that drops a name now blocks new BUYS of it. It can
+never block a sell, and a held name keeps its protective stop.
+
 ## 2026-08-18 — limited margin, and the instructions that had stopped describing the system
 
 Aaron switched the Agentic account from cash to **limited margin**. Verified at

@@ -82,6 +82,11 @@ VENV_SELFTESTS=(
     "src/level_rules.py"
     "src/excursion.py"
     "src/history.py"
+    # The nightly re-rank's durable output + its pure diff (2026-08-20). Listed
+    # from the start, deliberately: the two omissions flagged above (slow_loop,
+    # letter_facts) both shipped selftests that then ran only by hand.
+    "src/rank_history.py"
+    "src/residual.py"
 )
 
 # Scripts that `import moomoo` at module scope — MUST run under system python3.

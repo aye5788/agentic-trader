@@ -6,6 +6,30 @@ import re
 
 FIELDS = ["ticker", "source", "sector", "exchange", "flag", "as_of"]
 
+_DAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+         "friday": 4, "saturday": 5, "sunday": 6}
+DEFAULT_SCREEN_DAY = "friday"
+
+
+def screen_due(cfg: dict, today) -> bool:
+    """Is the universe rescreen due on `today`? -> bool. Pure; takes no clock.
+
+    ⛔ THE CADENCE LIVES IN CONFIG, NOT IN A CRON LITERAL. It was quarterly —
+    `0 19 1-7 1,4,7,10 *` plus a `[ "$(date +%u)" -eq 7 ]` guard in the bash
+    wrapper — so the schedule was spelled in two places, in two languages, and
+    the real cadence (first Sunday of Jan/Apr/Jul/Oct) was not written anywhere
+    a reader would look. It also never once fired. Now: WEEKLY on
+    `[universe_maintenance] screen_day`, and this predicate is the authority.
+
+    An unrecognised day falls back to Friday rather than raising or refusing —
+    a screen that silently stops running is the failure mode this whole module
+    exists to avoid, and it is exactly what quarterly-and-never-fired looked
+    like.
+    """
+    want = str((cfg.get("universe_maintenance") or {}).get(
+        "screen_day", DEFAULT_SCREEN_DAY)).strip().lower()
+    return today.weekday() == _DAYS.get(want, _DAYS[DEFAULT_SCREEN_DAY])
+
 
 def read_universe(path) -> list:
     with open(path, newline="") as f:

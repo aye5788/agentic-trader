@@ -245,7 +245,8 @@ systemctl status agentic-monitor agentic-dashboard cloudflared   # all: active (
 crontab -l                                    # 10 agentic-trader lines (+3 box-only, see below)
 # slow (Sun 20:00, M-F 18:00) · signal panel (Sun 20:15) · fast (M-F 10:00)
 # sessions (M-F 10:35 + 15:15, systemd) · letter (Sun 21:00) · upkeep check (daily 8:00)
-# ledger backup (daily 22:30) · universe refresh (quarterly, 1st Sun 19:00)
+# ledger backup (daily 22:30) · universe refresh (WEEKLY, Fri 17:00 — was
+#   quarterly/never-fired until 2026-08-20)
 # box-only, NOT this project: moomoo-vol-desk 9:30/9:35, data-collector 16:30
 timedatectl                                   # MUST be America/New_York or cron fires at wrong times
 cat research_store/monitor/state.json         # {"book_asof": <date>, "fired": {}} = monitor polled OK

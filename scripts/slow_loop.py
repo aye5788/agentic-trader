@@ -37,6 +37,8 @@ import pandas as pd
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 import momentum as mom          # noqa: E402
+import rank_history             # noqa: E402
+import residual                 # noqa: E402
 import strategy as strat        # noqa: E402
 from research_store import read_current, write_product         # noqa: E402
 from research_store.models import Thesis, ResearchProduct      # noqa: E402
@@ -116,8 +118,15 @@ def build_theses(sel, scored, closes, asof, per_slot, tm, start_rank):
     return held, dropped
 
 
-SECTOR_ETFS = ["XLE", "XLF", "XLK", "XLV", "XLI", "XLP",
-               "XLY", "XLU", "XLB", "XLRE", "XLC"]
+# ⛔ MOVED to src/residual.py 2026-08-20, along with residual_kwargs() below.
+# Re-exported here only so an existing import keeps working; do not add a second
+# definition. The agent-facing screen needs the same constant, and a constant
+# with two copies is how the two rankings drifted apart in the first place.
+SECTOR_ETFS = residual.SECTOR_ETFS
+
+
+class _SkipAccrual(Exception):
+    """Not an error — the stale-seed watch only accrues on the screen day."""
 
 
 def stamp_earnings(theses, lookup) -> int:
@@ -146,29 +155,14 @@ def stamp_earnings(theses, lookup) -> int:
 
 
 def residual_kwargs(cfg, closes, spy):
-    """Build the BOOK-compute residual kwargs from [signal] config.
+    """The BOOK-compute residual kwargs. Delegates to residual.kwargs_from_config.
 
-    residual_tilt<=0 or residual_factors="none" -> {} (plain momentum, unchanged).
-    "sector" -> {residual_tilt, factors=<11 SPDR ETF closes present in cache>}.
-    "market" -> {residual_tilt, market=spy}. Missing sector data or an unknown
-    mode falls back to {} (plain rank) with a printed note — never crashes the loop.
-    Pure: reads config + panels, no I/O.
+    ⛔ THE IMPLEMENTATION MOVED (2026-08-20) and must not come back here. This
+    loop was its only caller, which is precisely why the agent-facing screen
+    (`candidates()` / `universe()`) ranked the same names WITHOUT the tilt while
+    the book was built WITH it. One implementation, both callers.
     """
-    sig = cfg.get("signal", {})
-    tilt = float(sig.get("residual_tilt", 0.0) or 0.0)
-    mode = str(sig.get("residual_factors", "none")).lower()
-    if tilt <= 0.0 or mode == "none":
-        return {}
-    if mode == "market":
-        return {"residual_tilt": tilt, "market": spy}
-    if mode == "sector":
-        have = [s for s in SECTOR_ETFS if s in closes.columns]
-        if not have:
-            print("  residual: no sector ETFs in price cache -> plain rank this run")
-            return {}
-        return {"residual_tilt": tilt, "factors": closes[have]}
-    print(f"  residual: unknown residual_factors={mode!r} -> plain rank this run")
-    return {}
+    return residual.kwargs_from_config(cfg, closes, spy)
 
 
 def rotation_due(cfg: dict, today=None) -> bool:
@@ -248,17 +242,34 @@ def protective_theses(owned: set, covered: set, scored, closes, asof, tm,
             g = geometry(price, row["sigma"], tm["stop_atr_mult"], tm["target_r_mults"])
         except Exception:                  # noqa: BLE001 — one name, never the run
             continue
+        # ⚠️ rank is NaN for a name that FAILS THE ABSOLUTE GATE (R <= 0), and
+        # `int(NaN)` raises ValueError. That is exactly the case this function
+        # exists for -- a held name whose momentum died -- and it sits OUTSIDE
+        # the try above, so it would have taken down the whole slow loop on a
+        # rotation night (non-rotation nights hide it, because hold_selection
+        # keeps ineligible held names covered). Latent since 2026-08-14; found
+        # 2026-08-20 while making the universe churn weekly, which makes a held
+        # name dropping out of the ranked set materially more likely.
+        rk = row["rank"]
+        eligible = rk == rk                                   # NaN == NaN is False
+        rank_txt = (f"rank {int(rk)}" if eligible
+                    else "no longer passes the absolute gate (12-month return <= 0)")
         out.append(Thesis(
             symbol=sym, rank=rank, verdict="hold",
-            thesis=f"HELD, not in the ranked selection (rank {int(row['rank'])}). "
+            thesis=f"HELD, not in the ranked selection ({rank_txt}). "
                    f"Geometry supplied so the monitor has a base stop; the loop "
-                   f"is not prescribing this position.",
+                   f"is not prescribing this position. Whether to close it, add "
+                   f"to it, or leave it is YOUR call -- this is a fact about the "
+                   f"ranking, not an instruction.",
             entry_zone=g["entry_zone"], stop=g["stop"], targets=g["targets"],
             target_weight=0.0,
             confidence=round(float(row["score"]), 3),
             signals={"score": round(float(row["score"]), 4),
                      "sigma": round(float(row["sigma"]), 5),
-                     "rank": int(row["rank"]), "source": "protective"},
+                     # None, not a number: an ineligible name HAS no rank, and
+                     # int(NaN) raises. Same defect as the thesis text above.
+                     "rank": int(rk) if eligible else None,
+                     "eligible": bool(eligible), "source": "protective"},
             as_of=str(asof.date()),
             review_by=f"{(asof + pd.Timedelta(days=7)).date()} (weekly rebalance)"))
         rank += 1
@@ -502,6 +513,28 @@ def _selftest() -> None:
     # held but no price/signal -> skipped, never a thesis with a fabricated stop
     assert protective_theses({"NOPRICE"}, set(), sc, cl, idx[0], TMx, 200) == []
     assert protective_theses({"UNKNOWN"}, set(), sc, cl, idx[0], TMx, 200) == []
+    # ---- a HELD name that FAILS THE ABSOLUTE GATE still gets a stop --------
+    # rank is NaN once R <= 0, and `int(NaN)` raises ValueError OUTSIDE the
+    # per-name try -- so this took the whole slow loop down on a rotation night
+    # (non-rotation nights hide it: hold_selection keeps ineligible held names
+    # covered). Latent since 2026-08-14, found 2026-08-20.
+    #
+    # The REQUIREMENT, not just the absence of a crash: it must still produce a
+    # protective stop, must still be weight 0, and must NOT be a sell. Whether
+    # to close a name whose momentum died is the agent's decision, not this
+    # loop's -- the loop's only job here is that the position stays watched.
+    import numpy as _np
+    dead = pd.DataFrame({"score": [0.1], "rank": [_np.nan], "sigma": [0.02]},
+                        index=["DEAD"])
+    dcl = pd.DataFrame({"DEAD": [100.0]}, index=[idx[0]])
+    d = protective_theses({"DEAD"}, set(), dead, dcl, idx[0], TMx, 200)
+    assert len(d) == 1, "an ineligible held name must not vanish -- it would be unprotected"
+    assert d[0].stop and d[0].stop < 100.0, "no stop for a held name that lost the gate"
+    assert d[0].target_weight == 0.0 and d[0].verdict == "hold", d[0]
+    assert d[0].signals["rank"] is None and d[0].signals["eligible"] is False, d[0].signals
+    assert "absolute gate" in d[0].thesis and "YOUR call" in d[0].thesis, d[0].thesis
+    assert "sell" not in d[0].thesis.lower(), "the loop must not instruct an exit"
+
     # an unreadable snapshot is "unknown", never "holds nothing"
     assert held_positions(Path("/nonexistent/positions.json")) is None
 
@@ -587,6 +620,46 @@ def main() -> None:
               else f"  signal: residual tilt={rk['residual_tilt']} factors=market(SPY)")
     book_scored = mom.compute(closes[names], asof, **rk)
     etf_scored = mom.compute(closes[etfs], asof)
+
+    # ---- RECORD THE RE-RANK ------------------------------------------------
+    # This runs every night. Until 2026-08-20 the result was DISCARDED on six
+    # nights out of seven: rotation is weekly, so Mon-Fri hold_selection() threw
+    # the fresh ranks away and nothing downstream ever saw them. The work was
+    # being done and deleted -- a nightly job whose output nothing reads is
+    # indistinguishable from one that never runs.
+    #
+    # It is persisted BEFORE selection deliberately: this is the raw ranking,
+    # not the book. brief() diffs the two most recent snapshots and shows the
+    # agent what moved. It still does not rotate anything -- what the movement
+    # means is the agent's call.
+    #
+    # ⚠️ NOT on --dry. "--dry: print, don't write the store" has to mean it, or
+    # a look-at-it run silently becomes tonight's recorded observation and the
+    # next real diff is measured against a rehearsal.
+    try:
+        if args.dry:
+            raise _SkipAccrual("--dry: nothing recorded")
+        snap = rank_history.build(str(asof.date()), book_scored)
+        rank_history.save(snap)
+        rank_history.prune()
+        d = rank_history.latest_diff()
+        if d.get("status") == "ok":
+            b = d["book"]
+            print(f"  re-rank recorded ({d['prev_as_of']} -> {d['as_of']}): "
+                  f"{b['moved_count']} moved, +{len(b['entered_top'])}/"
+                  f"-{len(b['exited_top'])} top-{d['top_n']}, "
+                  f"{len(b['became_ineligible'])} lost the absolute gate"
+                  + (f", universe +{len(b['joined_universe'])}/"
+                     f"-{len(b['left_universe'])}"
+                     if b["joined_universe"] or b["left_universe"] else ""))
+        else:
+            print(f"  re-rank recorded ({d.get('status')})")
+    except _SkipAccrual as e:
+        print(f"  re-rank not recorded ({e})")
+    except Exception as e:                                   # noqa: BLE001
+        # Recording is observability, never a precondition for the book. A
+        # failure here must not stop the loop writing tonight's product.
+        print(f"  ⚠️ re-rank NOT recorded: {type(e).__name__}: {e}")
 
     # Banded holds need to know what the book ALREADY owns: a held name is kept
     # until it falls below rank book_band, so nightly re-ranks don't churn a
@@ -735,10 +808,19 @@ def main() -> None:
                 pass
 
     # --- weekly stale-seed watch accrual (universe maintenance, Piece 1) ---
+    # ⚠️ GATED ON THE SCREEN DAY since 2026-08-20. This block ran on EVERY slow
+    # loop -- nightly -- while its own comment and `stale_seed_weeks` both said
+    # "weeks", so 8 "weeks" was ~1.6 real weeks. A flagged seed forces the
+    # universe screen to HOLD, so an over-fast accrual would have made the new
+    # weekly screen refuse to auto-apply on spurious staleness. One reading per
+    # week now, taken on the same day the screen runs.
     try:
         import json as _json
         import universe_maint as _um
         cfg_um = cfg["universe_maintenance"]
+        if not _um.screen_due(cfg, date.today()):
+            raise _SkipAccrual(
+                f"not the screen day ({cfg_um.get('screen_day', 'friday')})")
         uni_rows = _um.read_universe(str(REPO / "config" / "universe.csv"))
         seeds = {r["ticker"] for r in uni_rows if r["source"] == "seed"}
 
@@ -753,6 +835,8 @@ def main() -> None:
         watch = _um.update_seed_watch(watch, seed_ranks, cfg_um["seed_watch_history"])
         watch_path.write_text(_json.dumps(watch, indent=2))
         print(f"seed-watch: recorded ranks for {len(seed_ranks)} seeds -> {watch_path}")
+    except _SkipAccrual as e:                 # not an error: the wrong weekday
+        print(f"seed-watch: not accrued today ({e})")
     except Exception as e:  # never let the watch break the slow loop
         print(f"seed-watch accrual skipped: {e}")
 
