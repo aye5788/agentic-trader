@@ -32,6 +32,10 @@ it returns `['RTX']`; with the fill recorded it returns nothing. The fill itself
 was journalled through `scripts/record_fills.py` from the broker's order record
 (0.026963 @ 216.0601, $5.83), not hand-appended to the ledger.
 
+A consolidated account of everything that changed on 2026-08-20 — the six
+commits, the two Codex audits, and what was deliberately left undone — is in
+[`docs/2026-08-20-changes.md`](2026-08-20-changes.md).
+
 ## 2026-08-20 — RTX: the stop worked, and the permission to RECORD it did not
 
 **The trade was correct. The bookkeeping was structurally impossible.** Second
