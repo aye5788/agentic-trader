@@ -31,6 +31,18 @@ WAKES_FILE = "wakes.json"
 MAX_ACTIVE = 20
 DEFAULT_TTL_DAYS = 5
 DEFAULT_BUDGET = 3
+# ⛔ MINUTES A WAKE MUST WAIT BEFORE IT CAN FIRE AGAIN.
+# `last_fired_at` was written by mark_fired() from the start and read by
+# NOTHING, so a wake could fire on consecutive 15-second polls while the
+# condition persisted -- and EVERY firing spawns a full model session. On
+# 2026-08-20 an RTX wake spent its entire budget of 2 in fifteen seconds
+# (17:53:56 and 17:54:11) on a position that had already been sold, which is two
+# sessions of the operator's usage for one event.
+#
+# A wake answers "call me back when X happens". X happening twice in a quarter
+# of a minute is one event, not two. 30 minutes is well inside a swing horizon
+# and still lets a genuinely re-crossing level wake a later session.
+REARM_MINUTES = 30
 DIRECTIONS = ("above", "below")
 
 
@@ -142,6 +154,8 @@ def due(path: Path, prices: dict, now=None) -> list:
     for key, w in _load(path).items():
         if _expired(w, n) or w.get("fired", 0) >= w.get("budget", DEFAULT_BUDGET):
             continue
+        if _too_soon(w, n):          # already woke a session for this, recently
+            continue
         px = prices.get(w["symbol"])
         if px is None:
             continue
@@ -149,6 +163,25 @@ def due(path: Path, prices: dict, now=None) -> list:
         if hit:
             out.append({"key": key, **w, "price": px})
     return out
+
+
+def _too_soon(w: dict, now) -> bool:
+    """Has this wake fired within REARM_MINUTES? Pure; unparseable stamp -> no.
+
+    Fails toward FIRING on a malformed timestamp: a wake that never wakes anyone
+    is the failure this module was built to remove (`due()` had no caller at
+    all), so the tie goes to waking, not to silence.
+    """
+    ts = w.get("last_fired_at")
+    if not ts:
+        return False
+    try:
+        last = datetime.fromisoformat(str(ts))
+    except (TypeError, ValueError):
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (now - last) < timedelta(minutes=REARM_MINUTES)
 
 
 def mark_fired(path: Path, key: str, now=None) -> dict:
@@ -225,6 +258,34 @@ def _selftest() -> None:
         p3.write_text("{ not json")
         assert status(p3, now=t0)["active"] == {}
         assert due(p3, {"MU": 1.0}, now=t0) == []
+
+    # ⛔ ONE EVENT, ONE SESSION. Every firing spawns a full model session, and
+    # `last_fired_at` was written from the start and read by NOTHING — so a wake
+    # could fire on consecutive 15s polls while the condition persisted. On
+    # 2026-08-20 an RTX wake spent a budget of 2 in FIFTEEN SECONDS on a
+    # position that had already been sold: two sessions of usage for one event.
+    with tempfile.TemporaryDirectory() as d:
+        p2 = Path(d) / "w.json"
+        t0 = datetime(2026, 8, 20, 17, 53, 56, tzinfo=timezone.utc)
+        register(p2, "RTX", "below", 214.5, "structural break", budget=2, now=t0)
+        k = "RTX:below:214.5"
+        assert due(p2, {"RTX": 214.5}, now=t0), "a fresh wake must fire"
+        mark_fired(p2, k, now=t0)
+        # 15 seconds later — the exact real interval — it must NOT fire again
+        assert due(p2, {"RTX": 214.5},
+                   now=t0 + timedelta(seconds=15)) == [], "re-fired within 15s"
+        # ...nor at 29 minutes
+        assert due(p2, {"RTX": 214.5}, now=t0 + timedelta(minutes=29)) == []
+        # ...and IS re-armed past the interval, so a real re-cross still wakes
+        assert due(p2, {"RTX": 214.5},
+                   now=t0 + timedelta(minutes=REARM_MINUTES, seconds=1)), "never re-arms"
+        # a malformed stamp fails toward FIRING — silence is the worse failure
+        raw = json.loads(p2.read_text()); raw[k]["last_fired_at"] = "not-a-date"
+        p2.write_text(json.dumps(raw))
+        assert due(p2, {"RTX": 214.5}, now=t0 + timedelta(seconds=15)), \
+            "an unparseable stamp must not silence the wake"
+    print("wakes: OK — one event costs one session (re-arm interval honoured, "
+          "unparseable stamp fails toward firing)")
 
     print("wakes: OK — bounded by budget, ttl and cap; a spent wake cannot re-fire")
 

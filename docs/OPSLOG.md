@@ -36,6 +36,78 @@ A consolidated account of everything that changed on 2026-08-20 — the six
 commits, the two Codex audits, and what was deliberately left undone — is in
 [`docs/2026-08-20-changes.md`](2026-08-20-changes.md).
 
+## 2026-08-20 — the unenforced stop was costing MODEL SESSIONS, not just protection
+
+Aaron, getting repeated phone pushes about JNJ: *"I keep getting ntfy
+notifications about JNJ"* and then *"so WTF it was wasting usage like last
+time?!"* Both were symptoms of the same defect fixed earlier the same day, and
+the second is the expensive one.
+
+### The agent had been paying for the bug in model sessions
+
+A wake fired at 13:54 ET, spawned a full session, and its main product was an
+announcement that **JNJ had no enforced stop — which was false**: the monitor had
+been watching it on its agent-set stop since 11:57. Reading the registered wakes
+explains the whole pattern. Their own stated reasons:
+
+- BAC — *"stop 61.40 written but NOT enforced (no thesis — the monitor is not
+  watching it)"*
+- RTX — *"stop 212.00 written but NOT enforced (no thesis…)"*
+- JNJ — *"the monitor will not enforce its stop until a thesis exists"*
+
+**The agent had been working around the unenforced-stop defect by registering
+wakes**, because a wake was the only mechanism it had to get a session in front
+of an unprotected position. Every firing spends a model session. So the cost of
+that bug was never only "positions unprotected overnight" — it was a session per
+near-miss, funded by the operator.
+
+### Three separate leaks, all fixed
+
+**1. The agent was told a protected position was unprotected.** The monitor was
+taught about agent-set stops; `state.holdings()`'s `watched` flag,
+`decide.evaluate_enforcement()` and `levels.resolve()` were not. So
+`positions()` showed `watched: false, stop: null` for JNJ while the monitor
+enforced 261.00, and `set_levels` still returned "the monitor is not watching it
+at all". The charter tells the agent that flag is its evidence the monitor will
+act — so a false negative does not merely under-report, it *invites* the
+workaround. All three now mirror `arm_standalone()` exactly, including its
+refusals: not held, no live price, and stop-at-or-above-spot each read false with
+their own distinct reason, because the operator action differs.
+
+**2. A wake could fire twice in fifteen seconds.** `last_fired_at` had been
+written by `mark_fired()` from the start and read by **nothing**, so a wake
+re-fired on consecutive 15-second polls while the condition persisted. The RTX
+wake spent its entire budget of 2 between 17:53:56 and 17:54:11 — two sessions
+for one event. `REARM_MINUTES = 30` now gates it; an unparseable stamp fails
+toward firing, because a wake that never wakes anyone is the worse failure and is
+the one this module was built to remove.
+
+**3. A wake outlived the position it guarded.** RTX was sold at 11:53 and its
+wake fired at 13:54 on a position that no longer existed; the session it spawned
+concluded the level was orphaned and cleared it by hand. A FULL exit now retires
+that symbol's wakes (`drop_wakes_for`). A partial trim does not — the position
+and the reason to watch it both survive. Wakes on names the book does not hold
+stay untouched: "tell me if NVDA reaches X so I can re-enter" is the feature
+working.
+
+Also fixed: the monitor computed its `unprotected` alert BEFORE arming standalone
+watches, so every snapshot rewrite pushed a spurious "position unprotected" for a
+name the next line protected. The pending set is now subtracted from the alert
+(never from the file), and a genuine arming failure still alarms through
+`arm_standalone`'s own refusal path.
+
+### Retired by hand
+
+The BAC and JNJ wakes were removed once `positions()` showed both `watched: true`
+with their stops in force — which is the removal condition the JNJ wake's own
+text specified. Backup at `/tmp/wakes.bak`. These were artifacts of the defect,
+not judgements about the market.
+
+**The general lesson, and it is not a new one here:** a control that reads as
+absent when it is present costs as much as one that reads as present when it is
+absent. This repo has repeatedly found the second. This was the first, and the
+agent rationally spent real money working around it.
+
 ## 2026-08-20 — RTX: the stop worked, and the permission to RECORD it did not
 
 **The trade was correct. The bookkeeping was structurally impossible.** Second

@@ -213,9 +213,24 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
             # executable. What to do about it is judgement; see the charter.
             "half_trim_at_target1_usd": _half_trim,
             "partial_trim_placeable": _trim_ok,
-            "watched": bool(t is not None and getattr(t, "stop", None)
-                            and (getattr(t, "target_weight", 0) > 0
-                                 or getattr(t, "verdict", "") == "hold")),
+            # ⛔ A THESIS IS NO LONGER REQUIRED (2026-08-20).
+            # market_monitor.arm_standalone() watches an OWNED position on the
+            # stop the AGENT set, with no thesis, whenever a live price proves
+            # the stop is below spot. Reporting `watched: False` for one of
+            # those is not a harmless under-report: the charter tells the agent
+            # this flag is its evidence the monitor will act, so a false
+            # negative makes it work around a stop that is actually in force.
+            # It did exactly that -- BAC, RTX and JNJ each got a WAKE registered
+            # with the stated reason "stop written but NOT enforced (no thesis
+            # - the monitor is not watching it)", and each wake spends a whole
+            # model session when it fires. One of them fired twice on a
+            # position that had already been sold.
+            "watched": bool(
+                (t is not None and getattr(t, "stop", None)
+                 and (getattr(t, "target_weight", 0) > 0
+                      or getattr(t, "verdict", "") == "hold"))
+                or (agent_stop is not None and _mp.get(sym) is not None
+                    and float(_mp[sym]) > float(agent_stop))),
         }
         if agent_stop is not None or agent_targets:
             rec["set_by_agent"] = True
@@ -436,6 +451,27 @@ def _selftest() -> None:
 
     # FIX 1: `watched` must match the monitor's own condition exactly —
     # target_weight > 0 AND stop — not just "stop is not None". Cover every
+    # ⛔ AN AGENT-SET STOP THE MONITOR ARMS READS watched:True (2026-08-20).
+    # The charter tells the agent this flag is its evidence the monitor will
+    # act, so a false negative makes it work around a stop that is in force.
+    # It did: BAC, RTX and JNJ each got a WAKE registered with the stated
+    # reason "stop written but NOT enforced (no thesis)", and a wake spends a
+    # whole model session when it fires -- one of them fired twice on a
+    # position that had already been sold.
+    v_solo = {"account_value": 100.0, "cash": 0.0, "invested": 100.0,
+              "positions": {"JNJ": {"qty": 1.0, "avg_cost": 270.0,
+                                    "mark": 270.02, "value": 270.02}}}
+    ov_solo = {"JNJ": {"stop": 261.0, "targets": [279.5]}}
+    hs = holdings(v_solo, [], ov_solo, {"JNJ": 270.02})
+    assert hs["JNJ"]["watched"] is True, hs["JNJ"]
+    # ...and the monitor's own refusals must read False, not a bare True:
+    # a stop at/above spot is REFUSED there (it would fire an instant sell)
+    hs_hi = holdings(v_solo, [], {"JNJ": {"stop": 271.0}}, {"JNJ": 270.02})
+    assert hs_hi["JNJ"]["watched"] is False, hs_hi["JNJ"]
+    # ...and with no live price the monitor cannot verify, so neither do we
+    hs_np = holdings(v_solo, [], ov_solo, {})
+    assert hs_np["JNJ"]["watched"] is False, hs_np["JNJ"]
+
     # divergent combination against a single held position.
     valued2 = {"account_value": 100.0,
                "positions": {"CCC": {"qty": 1.0, "avg_cost": 10.0, "mark": 10.0,

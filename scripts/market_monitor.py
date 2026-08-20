@@ -524,6 +524,36 @@ def _selftest() -> None:
             globals()["WAKES"] = _real_wakes
             globals()["notify"] = _real_notify
             store.append_journal = _real_append
+    # ---- a wake must not outlive the position it guards --------------------
+    # RTX was sold at 11:53 on 2026-08-20 and its wake fired at 13:54, twice,
+    # fifteen seconds apart -- two model sessions spent waking an agent about a
+    # position that no longer existed.
+    import tempfile as _tfw
+    with _tfw.TemporaryDirectory() as _dw:
+        _orig_wakes = WAKES
+        try:
+            globals()["WAKES"] = Path(_dw) / "wakes.json"
+            _save(WAKES, {
+                "RTX:below:214.5": {"symbol": "RTX", "level": 214.5,
+                                    "direction": "below", "budget": 2, "fired": 0},
+                "rtx:above:230": {"symbol": "rtx", "level": 230.0,
+                                  "direction": "above", "budget": 1, "fired": 0},
+                "NVDA:above:900": {"symbol": "NVDA", "level": 900.0,
+                                   "direction": "above", "budget": 1, "fired": 0}})
+            gone = drop_wakes_for("RTX")
+            assert len(gone) == 2, gone          # case-insensitive on the symbol
+            left = _load(WAKES, {})
+            assert set(left) == {"NVDA:above:900"}, left
+            # a re-entry wake on a name we do NOT hold is legitimate and stays
+            assert drop_wakes_for("RTX") == [], "second call must be a no-op"
+            # an unreadable path must not take down the tick that just sold
+            globals()["WAKES"] = Path(_dw) / "nope" / "wakes.json"
+            assert drop_wakes_for("RTX") == []
+        finally:
+            globals()["WAKES"] = _orig_wakes
+    print("monitor selftest OK: a full exit retires that symbol's wakes (a wake "
+          "must not spend a model session on a position that is gone)")
+
     print("monitor selftest OK: wakes fire on unheld symbols, respect budget, "
           "and alert-only when not armed")
 
@@ -969,6 +999,39 @@ def add_cooldown(symbol: str, days: int):
     _save(COOLDOWN, cd)
 
 
+def drop_wakes_for(symbol: str) -> list:
+    """Retire every wake registered on `symbol`. -> the keys removed.
+
+    ⛔ A WAKE MUST NOT OUTLIVE THE POSITION IT GUARDS. Every firing spawns a
+    full model session. On 2026-08-20 RTX was stopped out and sold at 11:53,
+    and a wake registered on it fired at 13:54 -- twice, fifteen seconds apart
+    -- spending two sessions of the operator's usage to wake an agent about a
+    position that no longer existed. The session's own conclusion was that the
+    level was orphaned and it cleared it by hand.
+
+    Wakes on names the book does NOT hold are legitimate and stay ("tell me if
+    NVDA reaches X so I can re-enter"); this retires only the ones attached to a
+    position we just closed, which is where the wake's premise has expired.
+
+    Never raises: a torn or absent wakes file leaves the wakes alone rather than
+    taking down the tick that just sold something.
+    """
+    try:
+        data = _load(WAKES, {})
+        gone = [k for k, w in data.items()
+                if str(w.get("symbol", "")).upper() == str(symbol).upper()]
+        if not gone:
+            return []
+        for k in gone:
+            data.pop(k, None)
+        _save(WAKES, data)
+        print(f"  retired {len(gone)} wake(s) on {symbol} — position closed")
+        return gone
+    except Exception as e:                                    # noqa: BLE001
+        print(f"  could not retire wakes on {symbol}: {type(e).__name__}: {e}")
+        return []
+
+
 def add_reentry_review(symbol: str, tier: str, exit_price: float, days: int):
     """A take-profit fired and sold — flag the name so the fast loop routes its
     otherwise-automatic rebuy through the agent's re-entry judgment ([reentry])."""
@@ -1287,6 +1350,16 @@ def check_once(cfg, client) -> int:
     # a CHANGE (see _LAST_UNPROTECTED/_LAST_SUSPECT_EMPTY above), matching the
     # _LAST_DROPPED/_LAST_HALTED fire-on-transition pattern rather than
     # re-pushing every 15s poll while the condition persists.
+    try:
+        _ov_early = json.loads((MON / "overrides.json").read_text())
+    except Exception:                                        # noqa: BLE001
+        _ov_early = {}
+    # Candidates about to be armed on their own agent-set stop. Subtracted from
+    # the ALERT below (not from the file) so a snapshot rewrite does not push a
+    # spurious "unprotected" for a position the very next line protects. If
+    # arming then fails, arm_standalone's own refusal alert fires -- nothing is
+    # dropped silently, it is just not announced twice per snapshot write.
+    _pending_early = standalone_candidates(owned, _ov_early, set(held))
     unprot = unprotected_positions(prod.theses, owned)
     _save(MON / "unprotected.json", {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1295,7 +1368,7 @@ def check_once(cfg, client) -> int:
         "suspect_empty_snapshot": unprot["suspect_empty_snapshot"],
     })
     global _LAST_UNPROTECTED, _LAST_SUSPECT_EMPTY
-    cur_unprot = frozenset(unprot["unprotected"])
+    cur_unprot = frozenset(unprot["unprotected"]) - set(_pending_early)
     if cur_unprot != _LAST_UNPROTECTED:
         if cur_unprot:
             names = ", ".join(sorted(cur_unprot))
@@ -1336,11 +1409,8 @@ def check_once(cfg, client) -> int:
                    tags="warning")
         _LAST_SUSPECT_EMPTY = unprot["suspect_empty_snapshot"]
 
-    try:
-        _ov = json.loads((MON / "overrides.json").read_text())   # json already imported at module top
-    except Exception:
-        _ov = {}   # absent OR a torn read → ignore ALL overrides this tick (self-heals next tick;
-                   # risk_review.py writes atomically via os.replace, so torn reads are rare)
+    _ov = _ov_early   # read once per tick, above (absent OR torn -> {} , which
+                      # ignores ALL overrides this tick and self-heals next tick)
     # apply_overrides is called BEFORE this tick's own quotes are fetched
     # (below), so it has no live price yet -- read the monitor's OWN last
     # write of quotes.json (its own poll, ~15s old) instead. A missing or
@@ -1368,7 +1438,7 @@ def check_once(cfg, client) -> int:
     # anyway (JNJ, 2026-08-20; BAC/FTNT the day before). An agent-set stop is a
     # stop. These are quoted with everything else below and ARMED only once a
     # live price proves the stop sits under spot.
-    _pending = standalone_candidates(owned, _ov, set(held))
+    _pending = _pending_early
 
     # ⚠️ NOT a bare `return 0`. An all-cash book still has wakes to watch, and
     # that is exactly when a wake matters most: "tell me if NVDA reaches X so I
@@ -1665,6 +1735,12 @@ def check_once(cfg, client) -> int:
     for t in act:
         if t["symbol"] in sold:
             st["fired"].setdefault(t["symbol"], []).append(fired_key[t["reason"]])
+            # A full exit ends the position, so any wake guarding it is spent —
+            # leaving it armed spends a model session on a name we no longer
+            # hold (RTX, 2026-08-20). A partial (target-1 trim) keeps its wakes:
+            # the position, and the reason to watch it, both survive.
+            if float(t.get("fraction", 1.0) or 1.0) >= 1.0:
+                drop_wakes_for(t["symbol"])
             if t["reason"] == "stop" and armed:
                 add_cooldown(t["symbol"], m.get("cooldown_days", 5))
             elif t["reason"].startswith("target") and armed and reentry.get("enabled"):

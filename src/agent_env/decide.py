@@ -182,7 +182,45 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
         the new stop sits below it.
     """
     if not has_thesis:
-        note = "no thesis for this symbol -- the monitor is not watching it at all"
+        # ⛔ NO THESIS NO LONGER MEANS UNWATCHED (2026-08-20). This returned a
+        # flat "the monitor is not watching it at all", and it was true: the
+        # watch set was theses ∩ owned, and theses come from the NIGHTLY slow
+        # loop, so anything opened intraday was unenforced until the evening.
+        # market_monitor.standalone_candidates()/arm_standalone() now watch an
+        # OWNED symbol on its agent-set stop, so this branch must mirror them or
+        # the agent is told a protected position is unprotected -- which is not
+        # a harmless under-report: on 2026-08-20 a wake session read exactly
+        # this note about JNJ, announced "NO enforced stop", and pushed a false
+        # alarm to the operator's phone about a position the monitor was
+        # already watching.
+        #
+        # The conditions are arm_standalone()'s, exactly: OWNED, a known live
+        # price, and the stop strictly below it. A stop at or above spot is
+        # refused there (it would fire an immediate market sell), so it must
+        # read `enforced: false` here too.
+        if owned is False:
+            note = ("not held at the broker -- the monitor only watches "
+                    "positions you own")
+        elif price is None:
+            note = ("no thesis and no live price yet -- the monitor cannot "
+                    "verify the stop is below spot, so it will not arm it. "
+                    "It arms on the next poll that has a quote.")
+        elif price is _PRICE_UNSET:
+            note = ("no thesis; enforcement depends on the live price, which "
+                    "was not supplied to this check")
+        elif not (float(price) > float(stop)):
+            note = (f"no thesis, and the stop {stop:g} is at or above the live "
+                    f"price {float(price):g} -- the monitor REFUSES to arm it, "
+                    f"because doing so would fire an immediate market sell")
+        else:
+            note = ("no thesis, watched on your own stop: the monitor arms an "
+                    "agent-set stop on an owned position when the stop is below "
+                    "spot. Tonight's rebuild will supply a full thesis.")
+            return {
+                "stop": {"enforced": True, "note": note},
+                "target": ({"enforced": True, "note": note} if target is not None
+                           else {"enforced": False, "note": "no target was set"}),
+            }
         return {
             "stop": {"enforced": False, "note": note},
             "target": {"enforced": False, "note": note} if target is not None else
@@ -549,6 +587,41 @@ def _selftest() -> None:
         raise AssertionError("a target below the stop must be refused")
     except ValueError as e:
         assert "at or below stop" in str(e), e
+    # ---- NO THESIS != UNWATCHED, since 2026-08-20 --------------------------
+    # The monitor watches an OWNED position on its agent-set stop when a live
+    # price proves the stop is below spot (market_monitor.arm_standalone). This
+    # branch must mirror that, or the agent is told a protected position is
+    # unprotected -- which is not a harmless under-report: a wake session read
+    # the old flat note about JNJ, announced "NO enforced stop", and pushed a
+    # false alarm to the operator's phone about a position already being watched.
+    e = evaluate_enforcement(261.0, 279.5, has_thesis=False, target_weight=None,
+                             owned=True, current_stop=None, current_targets=None,
+                             price=270.02)
+    assert e["stop"]["enforced"] is True, e
+    assert e["target"]["enforced"] is True, e
+    assert "watched on your own stop" in e["stop"]["note"], e
+    # ...and every refusal the monitor makes is mirrored, with a DISTINCT reason
+    # so the operator action differs (set a lower stop / wait for a quote / it is
+    # not held) rather than one opaque "not watching it".
+    hi = evaluate_enforcement(271.0, None, has_thesis=False, target_weight=None,
+                              owned=True, current_stop=None, current_targets=None,
+                              price=270.02)
+    assert hi["stop"]["enforced"] is False and "immediate market sell" in hi["stop"]["note"], hi
+    eq = evaluate_enforcement(270.02, None, has_thesis=False, target_weight=None,
+                              owned=True, current_stop=None, current_targets=None,
+                              price=270.02)
+    assert eq["stop"]["enforced"] is False, "stop EQUAL to spot must not enforce"
+    npx = evaluate_enforcement(261.0, None, has_thesis=False, target_weight=None,
+                               owned=True, current_stop=None, current_targets=None,
+                               price=None)
+    assert npx["stop"]["enforced"] is False and "no live price" in npx["stop"]["note"], npx
+    nh = evaluate_enforcement(261.0, None, has_thesis=False, target_weight=None,
+                              owned=False, current_stop=None, current_targets=None,
+                              price=270.02)
+    assert nh["stop"]["enforced"] is False and "not held" in nh["stop"]["note"], nh
+    print("selftest OK: an agent-set stop with NO thesis reports enforced when the "
+          "monitor will actually arm it, and names the specific refusal otherwise")
+
     print("selftest OK: merge_levels expresses a two-target thesis (the levels-mechanism blocker)")
 
     # `widen`: scripts/market_monitor.py:apply_overrides() honours a stop

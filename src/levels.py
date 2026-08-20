@@ -108,7 +108,21 @@ def resolve(thesis_stop, thesis_targets, override, price=None,
         elif _usable and s >= float(price):
             out["effective_stop_status"] = "override REJECTED: at or above the live price"
         elif thesis_stop is None:
-            out["effective_stop_status"] = "override ignored: no thesis stop to apply it over"
+            # ⛔ NO THESIS STOP IS NO LONGER "IGNORED" (2026-08-20).
+            # market_monitor.arm_standalone() watches an OWNED position on the
+            # agent's own stop when a live price proves it below spot, so the
+            # agent-set stop IS what the monitor enforces here. Reporting it
+            # ignored showed `stop: null` for a position that was genuinely
+            # being watched, which is the display/enforcer divergence this
+            # module exists to remove -- and it is the reading that made the
+            # agent register model-session-spending WAKES to cover stops that
+            # were already in force.
+            # The price checks above have already run: this branch is only
+            # reached with a usable price strictly above the stop, which is
+            # exactly arm_standalone()'s condition.
+            out.update(effective_stop=s, effective_stop_source="override",
+                       effective_stop_status=("override applied: no thesis, watched "
+                                              "on your own stop"))
         elif s > float(thesis_stop):
             out.update(effective_stop=s, effective_stop_source="override",
                        effective_stop_status="override applied: tighter than the thesis stop")
@@ -124,12 +138,27 @@ def resolve(thesis_stop, thesis_targets, override, price=None,
 
     # ---- targets ----------------------------------------------------------
     th_t = list(thesis_targets or [])
+    # With no thesis targets AND an enforced standalone stop, the agent's own
+    # targets are what the monitor carries (arm_standalone copies them straight
+    # through). Handled in the branch below via `_standalone`.
+    _standalone = thesis_stop is None and out["effective_stop_source"] == "override"
     # An EMPTY list is not an override. set_levels accepts "no target" as a
     # legal state, and reporting that as a rejected override would tell the
     # agent something was refused when nothing was asked.
     if isinstance(ov_targets, list) and ov_targets:
         if not th_t:
-            out["effective_targets_status"] = "override ignored: the thesis carries no targets"
+            if _standalone and all(_finite(o) for o in ov_targets):
+                # Standalone watch: arm_standalone carries the agent's targets
+                # through verbatim, so they ARE in force. Reporting them ignored
+                # showed `targets: []` on a position the monitor was watching
+                # with those exact take-profits.
+                out.update(effective_targets=[float(o) for o in ov_targets],
+                           effective_targets_source="override",
+                           effective_targets_status=("override applied: no thesis, "
+                                                     "watched on your own targets"))
+            else:
+                out["effective_targets_status"] = (
+                    "override ignored: the thesis carries no targets")
         elif len(ov_targets) != len(th_t):
             out["effective_targets_status"] = (
                 f"override REJECTED: {len(ov_targets)} target(s) supplied but the "
