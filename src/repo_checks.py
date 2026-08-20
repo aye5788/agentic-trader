@@ -1405,6 +1405,10 @@ EXIT_MUST_WRITE = (
     "research_store/rh/positions.json",
     "research_store/rh/realized.json",
     "research_store/rh/orders_dump.json",
+    # prompts/exit.md requires this one too; omitting it meant a partial
+    # take-profit close could be un-recordable for the same reason RTX was
+    # (reviewer, 2026-08-20).
+    "research_store/rh/partial_closes.json",
 )
 # Writable by the exit executor would be a live-risk defect: overrides.json IS
 # the enforced stops, state.json holds the fired flags, exit_request.json is the
@@ -1414,6 +1418,15 @@ EXIT_MUST_NOT_WRITE = (
     "research_store/monitor/state.json",
     "research_store/monitor/exit_request.json",
     "research_store/monitor/cooldown.json",
+    # Added 2026-08-20 (reviewer): these were denied in the settings but NOT
+    # asserted here, so a future edit could remove the deny and still pass.
+    # quotes.json is the price source the stop arithmetic reads; wakes.json
+    # spends model sessions; enforcement.json and unprotected.json are the
+    # files an operator consults to decide whether stops are working.
+    "research_store/monitor/quotes.json",
+    "research_store/monitor/unprotected.json",
+    "research_store/monitor/enforcement.json",
+    "research_store/monitor/wakes.json",
     "research_store/current.json",
     "research_store/journal.jsonl",
 )
@@ -1490,6 +1503,25 @@ def check_exit_path_can_record(root: pathlib.Path) -> list[str]:
                 f"deploy/loop_settings.json: {f} is WRITABLE by the loops — it "
                 f"must not be; this file is enforced state (a live stop, a fired "
                 f"flag, or the monitor's own instruction to the executor)")
+    # ⛔ EVERY FILE PRESENT IN research_store/monitor/ MUST BE ACCOUNTED FOR.
+    # The broad `research_store/**` allow means any file added to that directory
+    # in future is writable unless somebody remembers to add two deny rules --
+    # the same "remembering is not a mechanism" failure that produced the
+    # original incident. exit_result.json is the one deliberate exception.
+    mon = root / "research_store" / "monitor"
+    if mon.is_dir():
+        for f in sorted(mon.iterdir()):
+            if not f.is_file() or f.name.startswith("."):
+                continue
+            rel = f"research_store/monitor/{f.name}"
+            if rel in EXIT_MUST_WRITE:
+                continue
+            if _perm_verdict(rules, rel) != "deny":
+                out.append(
+                    f"deploy/loop_settings.json: {rel} exists but is NOT denied "
+                    f"to the loops — the broad research_store/** allow makes "
+                    f"every new file in this directory writable by default; add "
+                    f"an Edit() and a Write() deny, or list it as an exception")
     if rules.get("ask"):
         out.append(
             f"deploy/loop_settings.json: {len(rules['ask'])} `ask` rule(s) — the "
@@ -2533,7 +2565,8 @@ jobs:
             "deny": list(_REQUIRED_DENIES)
                     + [f"Edit(./research_store/monitor/{f})" for f in
                        ("overrides.json", "state.json", "cooldown.json",
-                        "exit_request.json")]}}))
+                        "exit_request.json", "quotes.json", "unprotected.json",
+                        "enforcement.json", "wakes.json")]}}))
         # ...and the timer-armed jobs, for the same reason: since 2026-08-14 a
         # clean tree defines its schedules in deploy/*.timer, so a fixture
         # asserting "no findings" must supply them or it asserts that a repo
@@ -2560,7 +2593,9 @@ jobs:
     good = {"allow": ["Edit(./research_store/**)", "Write(./research_store/**)"],
             "deny": [f"Edit(./research_store/monitor/{f})"
                      for f in ("overrides.json", "state.json", "cooldown.json",
-                               "exit_request.json")]
+                               "exit_request.json", "quotes.json",
+                               "unprotected.json", "enforcement.json",
+                               "wakes.json")]
                     + ["Edit(./research_store/current.json)",
                        "Edit(./research_store/journal.jsonl)"]}
     with tempfile.TemporaryDirectory() as td:
@@ -2594,6 +2629,20 @@ jobs:
     # a missing settings file is itself the finding, not a crash
     with tempfile.TemporaryDirectory() as td:
         assert check_exit_path_can_record(pathlib.Path(td)), "missing file must report"
+
+    # ⛔ BOTH TOOLS ARE ASSERTED, NOT JUST Edit. The incident rule was an
+    # `Edit(...)` deny that also bound Write; narrowing one without the other
+    # would silently widen the second tool, and these tests only checked Edit
+    # (reviewer, 2026-08-20).
+    for _f in ("overrides.json", "state.json", "quotes.json", "wakes.json"):
+        _rel = f"research_store/monitor/{_f}"
+        for _tool in ("Edit", "Write"):
+            assert _perm_verdict({"deny": [f"{_tool}(./{_rel})"]}, _rel) == "deny", (_tool, _rel)
+    # a file denied for Edit but ALLOWED for Write is a real gap and must show
+    _mixed = {"allow": ["Write(./research_store/**)"],
+              "deny": ["Edit(./research_store/monitor/overrides.json)"]}
+    assert _perm_verdict(_mixed, "research_store/monitor/overrides.json") == "deny", \
+        "deny on either tool must win — they are not independent grants here"
 
     # deny beats allow, which is the precedence that caused the incident
     assert _perm_verdict({"allow": ["Edit(./a/b.json)"],

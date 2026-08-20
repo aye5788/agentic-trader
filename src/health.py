@@ -237,6 +237,16 @@ def unrecorded_fills(journal: list, day: str) -> list:
         if e.get("event") == "exit_signal":
             if not e.get("armed") or e.get("halted"):
                 continue          # nothing was meant to be placed
+            # ⛔ AND ONLY IF THE EXECUTOR ACTUALLY LAUNCHED. The signal is
+            # journalled BEFORE the launch ceiling is applied, so a
+            # ceiling-blocked breach placed no order and must not read as a
+            # missing fill; likewise a breach the executor found already flat.
+            # `launched` is written by market_monitor; a signal predating that
+            # field is treated as launched, which preserves the old behaviour
+            # for history rather than silently forgiving it (reviewer,
+            # 2026-08-20).
+            if e.get("launched") is False or e.get("sold_nothing"):
+                continue
             for t in (e.get("triggers") or []):
                 sym = str(t.get("symbol") or "").strip().upper()
                 if sym:
@@ -252,6 +262,25 @@ def unrecorded_fills(journal: list, day: str) -> list:
             for f in (e.get("fills") or []):
                 if f.get("symbol"):
                     got.add(str(f["symbol"]).upper())
+    # ⛔ THE DAY BOUNDARY IS NOT A WALL. A signal at 23:59:59Z and its fill at
+    # 00:00:01Z land on different calendar days and produced a false positive.
+    # Executions from the FOLLOWING day's first hours also count, because a fill
+    # cannot precede the order it settles (reviewer, 2026-08-20).
+    if want - got:
+        try:
+            nxt = (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat()
+        except ValueError:
+            nxt = None
+        if nxt:
+            for e in journal:
+                ts = str(e.get("ts", ""))
+                if e.get("event") != "execution" or ts[:10] != nxt:
+                    continue
+                if ts[11:13].isdigit() and int(ts[11:13]) >= 6:
+                    continue          # only the small hours can be a spillover
+                for f in (e.get("fills") or []):
+                    if f.get("symbol"):
+                        got.add(str(f["symbol"]).upper())
     return sorted(want - got)
 
 
@@ -324,6 +353,29 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
         else:
             out.append(Check("unrecorded_fills", "Unrecorded fills", None, "ok",
                              f"every decided trade on {fday} has an execution recorded"))
+
+    # ⛔ AN UNVERIFIED SNAPSHOT IDENTITY IS A FINDING, NOT JUST A FIELD.
+    # refresh_broker_snapshot() records `identity_verified: false` when the
+    # broker payload carried no account number, so the account guard compared
+    # the snapshot against itself. That state was written and unit-tested and
+    # NO operational consumer ever rejected or surfaced it (reviewer,
+    # 2026-08-20) — which makes it a fact nobody acts on, the exact shape this
+    # module exists to remove. It is reported, not enforced: refusing to read a
+    # snapshot would strip stop coverage, which is the worse failure.
+    ident = probes.get("snapshot_identity")
+    if ident is not None and ident.get("present"):
+        if ident.get("verified"):
+            out.append(Check("snapshot_identity", "Snapshot account identity",
+                             None, "ok",
+                             f"account {ident.get('account') or '?'} confirmed "
+                             f"by the broker payload"))
+        else:
+            out.append(Check("snapshot_identity", "Snapshot account identity",
+                             None, "unverified",
+                             "positions.json was published WITHOUT a broker-"
+                             "supplied account number, so the account guard is "
+                             "comparing the snapshot against itself; re-publish "
+                             "from a broker read that includes the account"))
 
     snapshot = probes.get("positions_snapshot")
     if snapshot is not None:
@@ -522,7 +574,12 @@ def _unrecorded_fills_probe(root: pathlib.Path, today: str | None = None):
             except ValueError:
                 continue
             rows.append(d)
-            if d.get("event") == "agent_decision":
+            # ⛔ A MONITOR-ONLY DAY MUST BE SELECTED TOO. This considered only
+            # `agent_decision`, so a day whose only trade was a stop-triggered
+            # exit was never chosen for checking -- the pure function had been
+            # taught about exit_signal while the probe that invokes it still
+            # could not reach that day (reviewer, 2026-08-20).
+            if d.get("event") in ("agent_decision", "exit_signal"):
                 day = str(d.get("ts", ""))[:10]
                 if day and day < today:
                     days.add(day)
@@ -532,6 +589,23 @@ def _unrecorded_fills_probe(root: pathlib.Path, today: str | None = None):
         return None
     newest = max(days)
     return (newest, unrecorded_fills(rows, newest))
+
+
+def _snapshot_identity_probe(root: pathlib.Path):
+    """-> {present, verified, account} for the live positions snapshot, or None.
+
+    Thin I/O only. `present: False` when the file predates the field, which must
+    not read as a failure — it reads as nothing to say."""
+    p = root / "research_store" / "rh" / "positions.json"
+    try:
+        d = json.loads(p.read_text())
+    except Exception:                                # noqa: BLE001
+        return None
+    if "identity_verified" not in d:
+        return {"present": False, "verified": None,
+                "account": d.get("account_number")}
+    return {"present": True, "verified": bool(d.get("identity_verified")),
+            "account": d.get("account_number")}
 
 
 def _unprotected_probe(root: pathlib.Path):
@@ -584,6 +658,7 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "adaptive_tune": _last_actions_run() if use_network else SKIPPED,
         "unprotected_positions": _unprotected_probe(root),
         "unrecorded_fills": _unrecorded_fills_probe(root),
+        "snapshot_identity": _snapshot_identity_probe(root),
         "positions_snapshot": snapshot_freshness.status(
             root / "research_store" / "rh" / "positions.json",
             root / "research_store" / "journal.jsonl"),
@@ -665,6 +740,36 @@ def _selftest() -> None:
     assert unrecorded_fills(
         [{"event": "exit_signal", "ts": "2026-08-20T15:52:12Z", "armed": True,
           "triggers": [{"reason": "stop"}]}], "2026-08-20") == []
+
+    # ⛔ A SIGNAL THAT PLACED NOTHING MUST NOT READ AS A MISSING FILL.
+    # The signal is journalled BEFORE the launch ceiling is applied, so a
+    # ceiling-blocked breach (and a breach the executor found already flat)
+    # would otherwise be reported as an unrecorded trade — and a check that
+    # cries wolf gets muted, which is how a REAL missing fill gets ignored
+    # (reviewer, 2026-08-20).
+    blocked = [{"event": "exit_signal", "ts": "2026-08-20T15:52:12Z", "armed": True,
+                "launched": False,
+                "triggers": [{"symbol": "RTX", "reason": "stop"}]}]
+    assert unrecorded_fills(blocked, "2026-08-20") == [], unrecorded_fills(blocked, "2026-08-20")
+    flat = [dict(blocked[0], launched=True, sold_nothing=True)]
+    assert unrecorded_fills(flat, "2026-08-20") == [], unrecorded_fills(flat, "2026-08-20")
+    # ...and a signal from BEFORE the field existed is still checked, so history
+    # is not silently forgiven
+    legacy = [{"event": "exit_signal", "ts": "2026-08-20T15:52:12Z", "armed": True,
+               "triggers": [{"symbol": "RTX"}]}]
+    assert unrecorded_fills(legacy, "2026-08-20") == ["RTX"], unrecorded_fills(legacy, "2026-08-20")
+
+    # ⛔ THE UTC DAY BOUNDARY IS NOT A WALL. A signal at 23:59:59Z whose fill
+    # lands at 00:00:01Z is one trade, not a missing one.
+    midnight = [{"event": "exit_signal", "ts": "2026-08-20T23:59:59Z", "armed": True,
+                 "launched": True, "triggers": [{"symbol": "RTX"}]},
+                {"event": "execution", "ts": "2026-08-21T00:00:01Z",
+                 "fills": [{"symbol": "RTX"}]}]
+    assert unrecorded_fills(midnight, "2026-08-20") == [], unrecorded_fills(midnight, "2026-08-20")
+    # ...but an execution LATE the next day is a different trade, not a spillover
+    late = [midnight[0], {"event": "execution", "ts": "2026-08-21T14:30:00Z",
+                          "fills": [{"symbol": "RTX"}]}]
+    assert unrecorded_fills(late, "2026-08-20") == ["RTX"], unrecorded_fills(late, "2026-08-20")
 
     # ⚠️ A MULTI-SYMBOL DECISION IS ONE RECORD, NOT ONE SYMBOL. The real
     # 2026-08-17 ETF liquidation journalled symbol="IWM,XLK,XLE,XLV" for a

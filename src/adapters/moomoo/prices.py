@@ -22,6 +22,7 @@ TWO paths, and picking the wrong one hits a wall:
 `/usr/bin/python3` — which has pandas/pyarrow/numpy available.
 """
 import datetime as dt
+import math
 import time
 
 from moomoo import RET_OK, AuType, KLType, TradeDateMarket
@@ -322,7 +323,15 @@ def live_quotes(tickers, ctx=None):
                 raise RuntimeError(f"get_market_snapshot failed: {str(data)[:200]}")
             for rec in data.to_dict("records"):
                 last = rec.get("last_price")
-                if not isinstance(last, (int, float)) or last <= 0:
+                # ⛔ FINITE ONLY. `last <= 0` does not reject inf/NaN: inf would
+                # be served as a live price, comparing above every stop (so it
+                # arms any watch and satisfies any target) and NaN makes every
+                # comparison false. Found by the independent reviewer,
+                # 2026-08-20; scripts/market_monitor.py:_last_price had the
+                # identical hole.
+                if (isinstance(last, bool)
+                        or not isinstance(last, (int, float))
+                        or not math.isfinite(last) or last <= 0):
                     continue
                 out[_bare(rec.get("code", ""))] = {
                     "last": float(last),

@@ -101,11 +101,19 @@ def register(path: Path, symbol: str, direction: str, level: float,
         return {"error": f"{len(live)} wakes already active (cap {MAX_ACTIVE}). "
                          f"Deregister something before adding more."}
     n = _now(now)
+    # ⛔ RE-REGISTERING THE SAME KEY MUST NOT RESET THE RE-ARM CLOCK. This
+    # replaced the record wholesale, dropping `last_fired_at` -- so a session
+    # that re-registered an identical wake bypassed REARM_MINUTES entirely and
+    # could spend another model session immediately (reviewer, 2026-08-20).
+    # The firing HISTORY is a property of the level, not of the registration.
+    _prev = live.get(key) or {}
     live[key] = {"symbol": symbol, "direction": direction, "level": level,
                  "reason": reason, "budget": budget, "fired": 0,
                  "registered_at": n.isoformat(timespec="seconds"),
                  "expires_at": (n + timedelta(days=ttl_days)).isoformat(
                      timespec="seconds")}
+    if _prev.get("last_fired_at"):
+        live[key]["last_fired_at"] = _prev["last_fired_at"]
     _save(path, live)
     return {"registered": live[key], "key": key, "active": len(live)}
 
@@ -181,7 +189,21 @@ def _too_soon(w: dict, now) -> bool:
         return False
     if last.tzinfo is None:
         last = last.replace(tzinfo=timezone.utc)
-    return (now - last) < timedelta(minutes=REARM_MINUTES)
+    # ⛔ BOTH SIDES NORMALISED. A naive `now` against an aware stamp raises
+    # TypeError, which the monitor catches and turns into "no hits" -- so a
+    # clock-handling slip would SILENCE every wake rather than fire one
+    # (reviewer, 2026-08-20).
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    delta = now - last
+    # ⛔ A FUTURE STAMP MUST NOT SUPPRESS. If `last_fired_at` is ahead of the
+    # clock -- skew, a corrected system time, a hand-edited file -- then
+    # `now - last` is negative and "< 30 minutes" is trivially true, muting the
+    # wake until the clock catches up, potentially for ever. A stamp we cannot
+    # trust fails toward FIRING, like the unparseable case above.
+    if delta < timedelta(0):
+        return False
+    return delta < timedelta(minutes=REARM_MINUTES)
 
 
 def mark_fired(path: Path, key: str, now=None) -> dict:
@@ -197,6 +219,29 @@ def mark_fired(path: Path, key: str, now=None) -> dict:
         data.pop(key)
     _save(path, data)
     return {"key": key, "fired": w["fired"], "retired": spent}
+
+
+def refund_firing(path: Path, key: str) -> dict:
+    """Undo one `mark_fired` when the session it was meant to start never began.
+
+    ⛔ THE BUDGET IS MARKED BEFORE THE SPAWN ON PURPOSE -- a crash between the
+    two must not leave a wake able to re-fire in a loop. But that also meant a
+    FAILED spawn silently consumed a firing and the session never happened
+    (reviewer, 2026-08-20). Marking first and refunding on a known failure keeps
+    the anti-loop property and stops the silent loss.
+
+    A wake already retired by that firing cannot be refunded -- it is gone from
+    the file -- and that is reported rather than recreated: resurrecting a
+    retired wake from a failure path is how a budget stops meaning anything.
+    """
+    data = _load(path)
+    w = data.get(key)
+    if not w:
+        return {"error": f"no live wake under {key!r} to refund (already retired)"}
+    w["fired"] = max(0, int(w.get("fired", 0)) - 1)
+    w.pop("last_fired_at", None)
+    _save(path, data)
+    return {"key": key, "fired": w["fired"], "refunded": True}
 
 
 def _selftest() -> None:

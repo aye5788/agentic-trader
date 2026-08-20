@@ -23,6 +23,28 @@ def _fin(x) -> bool:
         return False
 
 
+def _armed_solo(agent_stop, live_price) -> bool:
+    """Would market_monitor.arm_standalone() watch this agent-set stop?
+
+    ⛔ ONE RULE, TWO READERS. This mirrors market_monitor._finite_pos() plus the
+    strict `price > stop` test. It is a separate function so the mirroring is
+    visible and testable rather than inlined into a boolean expression, which is
+    how the previous version came to accept a stop of 0 and to RAISE on a
+    non-numeric one.
+    """
+    def _fp(v):
+        if isinstance(v, bool):
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if math.isfinite(f) and f > 0 else None
+
+    s, p = _fp(agent_stop), _fp(live_price)
+    return s is not None and p is not None and p > s
+
+
 def holdings(valued: dict, theses: list, overrides: dict | None = None,
              monitor_prices: dict | None = None,
              min_fractional_order_usd: float = 1.0) -> dict:
@@ -229,8 +251,12 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
                 (t is not None and getattr(t, "stop", None)
                  and (getattr(t, "target_weight", 0) > 0
                       or getattr(t, "verdict", "") == "hold"))
-                or (agent_stop is not None and _mp.get(sym) is not None
-                    and float(_mp[sym]) > float(agent_stop))),
+                # ⛔ MIRRORS market_monitor._finite_pos() EXACTLY. A bare
+                # float() raised ValueError on a non-numeric override stop and
+                # took positions() down, and `float(x) > float(y)` reported
+                # watched:True for a stop of 0 or a negative stop that the
+                # monitor REFUSES. Both found by the reviewer, 2026-08-20.
+                or _armed_solo(agent_stop, _mp.get(sym))),
         }
         if agent_stop is not None or agent_targets:
             rec["set_by_agent"] = True
@@ -471,6 +497,21 @@ def _selftest() -> None:
     # ...and with no live price the monitor cannot verify, so neither do we
     hs_np = holdings(v_solo, [], ov_solo, {})
     assert hs_np["JNJ"]["watched"] is False, hs_np["JNJ"]
+
+    # ⛔ THE DISPLAY MUST REFUSE EVERYTHING THE MONITOR REFUSES. Each of these
+    # was a concrete monitor-versus-display disagreement found by the
+    # independent reviewer on 2026-08-20: a stop of 0 or a negative stop read
+    # `watched: True` while standalone_candidates required `stop > 0`, and a
+    # non-numeric stop RAISED ValueError and took positions() down entirely.
+    for _bad in (0, -1, "bad", float("inf"), float("nan"), True, None):
+        _h = holdings(v_solo, [], {"JNJ": {"stop": _bad}}, {"JNJ": 270.02})
+        assert _h["JNJ"]["watched"] is False, (_bad, _h["JNJ"])
+        assert _h["JNJ"]["stop"] is None, (_bad, _h["JNJ"]["stop"])
+    # ...and a non-finite PRICE must not arm anything either (inf compares
+    # above every stop, so it would arm every watch).
+    for _px in (float("inf"), float("nan"), 0, -5, "x", True):
+        _h = holdings(v_solo, [], ov_solo, {"JNJ": _px})
+        assert _h["JNJ"]["watched"] is False, (_px, _h["JNJ"])
 
     # divergent combination against a single held position.
     valued2 = {"account_value": 100.0,

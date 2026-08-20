@@ -411,7 +411,22 @@ def _selftest() -> None:
     cands = standalone_candidates({"JNJ", "NOSTOP", "JUNK", "NEG", "HASTH"},
                                   ov_solo, {"HASTH"})
     assert set(cands) == {"JNJ"}, cands          # only a real, positive stop counts
-    assert standalone_candidates(None, ov_solo, set()) == {}, "no ownership -> nothing"
+    # ⛔ UNKNOWN OWNERSHIP FAILS OPEN, like the thesis watch set. Returning {}
+    # here left an override-only position neither armed NOR reported
+    # unprotected -- invisible on both sides exactly when ownership is
+    # uncertain. Watching a name we may not own costs nothing: the exit
+    # executor re-reads the broker and skips a zero position.
+    assert set(standalone_candidates(None, ov_solo, set())) == {"JNJ"}, \
+        "stale/unreadable ownership must fail OPEN, not drop the watch"
+    assert standalone_candidates(None, ov_solo, {"JNJ"}) == {}, \
+        "...but a name that already has a thesis is still not duplicated"
+    assert standalone_candidates(set(), ov_solo, set()) == {}, \
+        "a KNOWN-empty book holds nothing to watch"
+    # inf/NaN/bool/numeric-string handling on the stop
+    assert standalone_candidates({"A"}, {"A": {"stop": float("inf")}}, set()) == {}
+    assert standalone_candidates({"A"}, {"A": {"stop": float("nan")}}, set()) == {}
+    assert standalone_candidates({"A"}, {"A": {"stop": True}}, set()) == {}
+    assert set(standalone_candidates({"A"}, {"A": {"stop": "250"}}, set())) == {"A"}
     assert standalone_candidates({"JNJ"}, "garbage", set()) == {}, "torn file -> nothing"
     # a symbol that ALREADY has a thesis is never duplicated here
     assert standalone_candidates({"HASTH"}, {"HASTH": {"stop": 1.0}}, {"HASTH"}) == {}
@@ -566,11 +581,19 @@ def _last_price(block: dict):
     written before the feed switch still reads back. Only a POSITIVE number counts —
     a 0.0 must never become a price, because it would read as a total loss and fire
     a market sell.
+
+    ⛔ AND ONLY A FINITE NUMBER. `v > 0` is true for `inf`, so a corrupt quote
+    could return infinity as a price -- which compares above EVERY stop and
+    would therefore arm any standalone watch and satisfy any take-profit.
+    Found by the independent reviewer, 2026-08-20. `bool` is excluded too:
+    it is a subclass of int, so `True` would otherwise read as a price of 1.0.
     """
     q = (block or {}).get("quote", {}) or block or {}
     for k in ("last", "lastPrice", "mark", "closePrice", "bidPrice"):
         v = q.get(k)
-        if isinstance(v, (int, float)) and v > 0:
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)) and math.isfinite(v) and v > 0:
             return float(v)
     return None
 
@@ -820,6 +843,23 @@ def unprotected_positions(theses, owned, extra_watched=None,
             "suspect_empty_snapshot": False}
 
 
+def _finite_pos(v):
+    """-> float if `v` is a finite number strictly above zero, else None.
+
+    ⛔ `v > 0` IS NOT ENOUGH. `float("inf") > 0` is True, so infinity passed the
+    old stop validation; as a stop it sits above every price (nothing can breach
+    it) and as a price it sits above every stop (everything arms). `bool` is
+    excluded because it is an int subclass and `True` would read as 1.0.
+    """
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and f > 0 else None
+
+
 def standalone_candidates(owned, overrides, thesis_syms) -> dict:
     """Owned positions carrying an AGENT-SET stop but no thesis. -> {sym: ov}.
 
@@ -835,21 +875,33 @@ def standalone_candidates(owned, overrides, thesis_syms) -> dict:
     base thesis to be stricter THAN, but that is an argument about how to merge
     two stops, not a reason to enforce neither.
 
+    ⛔ FAILS OPEN ON UNKNOWN OWNERSHIP, like the thesis path. `owned is None`
+    means the positions snapshot was stale or unreadable, and the thesis watch
+    set deliberately fails OPEN there ("an old ownership set must never exclude
+    a newly bought real position from software stop coverage"). This returned
+    {} in that case, so an override-only position was neither armed NOR
+    reported unprotected -- invisible on both sides at exactly the moment
+    ownership is uncertain. Found by the independent reviewer, 2026-08-20.
+    Watching a name we may not own costs nothing: the exit executor re-reads
+    the broker and skips a position that is already zero.
+
     Pure: no clock, no I/O. Expiry is handled by the caller's override reader.
     """
-    if not isinstance(overrides, dict) or not owned:
+    if not isinstance(overrides, dict):
         return {}
+    if owned is None:                    # ownership unknown -> fail OPEN
+        cands = sorted(set(overrides) - set(thesis_syms))
+    elif not owned:
+        return {}
+    else:
+        cands = sorted(set(owned) - set(thesis_syms))
     out = {}
-    for sym in sorted(set(owned) - set(thesis_syms)):
+    for sym in cands:
         ov = overrides.get(sym)
         if not isinstance(ov, dict):
             continue
-        try:
-            stop = float(ov.get("stop"))
-        except (TypeError, ValueError):
-            continue
-        if not (stop > 0) or stop != stop:            # NaN/inf/<=0 -> not a stop
-            continue
+        if _finite_pos(ov.get("stop")) is None:
+            continue                     # NaN, inf, <=0, non-numeric: not a stop
         out[sym] = ov
     return out
 
@@ -873,27 +925,39 @@ def arm_standalone(candidates: dict, prices: dict, start_rank: int = 900):
     armed, refused = {}, {}
     rank = start_rank
     for sym, ov in sorted(candidates.items()):
-        stop = float(ov["stop"])
-        px = prices.get(sym)
-        if px is None:
+        stop = _finite_pos(ov["stop"])
+        if stop is None:                        # re-checked here, not assumed
+            refused[sym] = "stop is not a finite positive number"
+            continue
+        raw_px = prices.get(sym)
+        if raw_px is None:
             refused[sym] = "no live price yet — cannot verify the stop is below spot"
             continue
-        try:
-            px = float(px)
-        except (TypeError, ValueError):
-            refused[sym] = "unreadable price"
+        px = _finite_pos(raw_px)
+        if px is None:
+            # inf/NaN/<=0 must never arm: inf compares above every stop, so a
+            # corrupt quote would arm everything (reviewer, 2026-08-20).
+            refused[sym] = "price is not a finite positive number"
             continue
         if not (px > stop):
             refused[sym] = (f"stop {stop:g} is at or above spot {px:g} — arming it "
                             f"would fire an immediate market sell")
             continue
+        # ⛔ TARGETS ARE VALIDATED, NOT JUST CAST. A negative or zero target
+        # reaches corporate_action_suspected() and the target scan: a negative
+        # last target can make the corporate-action guard suppress ALL action
+        # including the stop, and a zero target is satisfied by any price. An
+        # unusable target is dropped; the stop still stands on its own, which
+        # is the level that bounds the loss. Found by the reviewer, 2026-08-20.
         tg = ov.get("targets")
         if not isinstance(tg, list):
             tg = [ov["target"]] if ov.get("target") is not None else []
-        try:
-            targets = [float(x) for x in tg]
-        except (TypeError, ValueError):
-            targets = []
+        targets = [t for t in (_finite_pos(x) for x in tg) if t is not None]
+        if len(targets) != len(tg):
+            refused.setdefault(sym, "")   # noted below, never silent
+            print(f"  ⚠ {sym}: dropped {len(tg) - len(targets)} unusable "
+                  f"target(s); the stop is unaffected")
+            refused.pop(sym, None)
         armed[sym] = Thesis(
             symbol=sym, rank=rank, verdict="hold",
             thesis=("HELD with an agent-set stop and no thesis (opened intraday). "
@@ -1009,17 +1073,35 @@ def drop_wakes_for(symbol: str) -> list:
     position that no longer existed. The session's own conclusion was that the
     level was orphaned and it cleared it by hand.
 
-    Wakes on names the book does NOT hold are legitimate and stay ("tell me if
-    NVDA reaches X so I can re-enter"); this retires only the ones attached to a
-    position we just closed, which is where the wake's premise has expired.
+    ⛔ ONLY WAKES THAT PREDATE THE EXIT. This deleted EVERY wake on the symbol,
+    including a legitimate re-entry wake ("tell me if RTX gets back to X"),
+    which is the opposite of the intent and destroys a judgement the agent made
+    (reviewer, 2026-08-20). A wake registered BEFORE the exit was guarding the
+    position that just closed; one registered AFTER is about re-entering, and is
+    left alone. `registered_at` already carries what is needed, so no new field
+    and no reclassification of existing wakes is required.
 
     Never raises: a torn or absent wakes file leaves the wakes alone rather than
     taking down the tick that just sold something.
     """
     try:
         data = _load(WAKES, {})
-        gone = [k for k, w in data.items()
-                if str(w.get("symbol", "")).upper() == str(symbol).upper()]
+        cutoff = datetime.now(timezone.utc)
+        gone = []
+        for k, w in data.items():
+            if str(w.get("symbol", "")).upper() != str(symbol).upper():
+                continue
+            reg = w.get("registered_at")
+            if reg:
+                try:
+                    t = datetime.fromisoformat(str(reg))
+                    if t.tzinfo is None:
+                        t = t.replace(tzinfo=timezone.utc)
+                    if t > cutoff:            # registered AFTER this exit
+                        continue              # a re-entry wake — leave it
+                except (TypeError, ValueError):
+                    pass                      # undatable -> treat as pre-existing
+            gone.append(k)
         if not gone:
             return []
         for k in gone:
@@ -1277,9 +1359,24 @@ def _fire_wakes(prices: dict, armed: bool) -> list:
                    f"{'Waking a session.' if armed else 'ALERT ONLY - not armed.'}",
                    tags="alarm_clock")
             if armed:
-                _sp.Popen([str(REPO / "deploy" / "run_session.sh"), "wake"],
-                          cwd=str(REPO), start_new_session=True,
-                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                try:
+                    _sp.Popen([str(REPO / "deploy" / "run_session.sh"), "wake"],
+                              cwd=str(REPO), start_new_session=True,
+                              stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                except Exception as e:                # noqa: BLE001
+                    # ⛔ THE FIRING IS REFUNDED. The budget is marked BEFORE the
+                    # spawn so a crash cannot leave the wake re-firing in a
+                    # loop -- but that also meant a failed spawn silently spent
+                    # a firing and no session ever ran (reviewer, 2026-08-20).
+                    print(f"  wake {w.get('key')}: session spawn FAILED "
+                          f"({type(e).__name__}) — refunding the firing")
+                    _wk.refund_firing(WAKES, w["key"])
+                    fired.pop() if fired and fired[-1] is w else None
+                    notify("⚠️ Wake fired but its session did not start",
+                           f"{w.get('symbol')} {w.get('direction')} "
+                           f"{w.get('level')}: the wake condition was met and "
+                           f"the session could not be launched. The firing has "
+                           f"been refunded so it can retry.", tags="warning")
         except Exception as e:                        # noqa: BLE001
             print(f"  wake {w.get('key')} failed: {e}")
     return fired
@@ -1502,6 +1599,12 @@ def check_once(cfg, client) -> int:
                        f"{names}. The position stays UNPROTECTED — set a stop "
                        f"below the live price, or exit by hand.", tags="warning")
             _LAST_SOLO_REFUSED = cur_ref
+        # ⛔ RE-PUBLISH ENFORCEMENT TOO. _publish_enforcement() runs before
+        # arming, so an active standalone watch was absent from
+        # enforcement.json -- the file a reader consults to see what the
+        # monitor is actually holding in force (reviewer, 2026-08-20).
+        if _armed_solo:
+            _publish_enforcement(held, _pre, prices, prod.as_of)
         # Re-publish the invariant now that the armed set is known, so a
         # genuinely protected position is not reported unprotected.
         if _armed_solo:
@@ -1615,8 +1718,19 @@ def check_once(cfg, client) -> int:
     for t in act:
         print(f"  ⚠ {t['reason'].upper()} {t['symbol']} @ {t['price']} "
               f"(level {t['level']}) — {mode}")
+    # ⛔ `launched` IS PART OF THE RECORD. The signal is journalled here, BEFORE
+    # the launch ceiling below and before the executor runs, so a breach that
+    # placed nothing looked identical to one that did -- and
+    # health.unrecorded_fills then expected a fill that was never meant to
+    # exist (reviewer, 2026-08-20). Computed here rather than inferred later:
+    # the monitor is the only party that knows.
+    _will_launch = bool(armed) and launch_gate(
+        st.get("executor_launches", []), datetime.now(timezone.utc),
+        int(m.get("executor_max_per_window", 6)),
+        int(m.get("executor_window_secs", 3600)))[0]
     store.append_journal({"event": "exit_signal", "ts": ts, "armed": armed,
-                          "halted": halted, "triggers": act})
+                          "halted": halted, "launched": _will_launch,
+                          "triggers": act})
     if fresh:                                        # routine alert: fresh breaches only
         notify(f"{'Executing' if armed else 'MANUAL EXIT NEEDED' if halted else 'Alert'}: "
                + ", ".join(f"{t['reason'].upper()} {t['symbol']}" for t in fresh),

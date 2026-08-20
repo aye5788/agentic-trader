@@ -32,7 +32,15 @@ import math
 
 
 def _finite(x) -> bool:
-    return isinstance(x, (int, float)) and math.isfinite(float(x))
+    """A real, finite number — and NOT a bool.
+
+    ⛔ `isinstance(True, int)` is True, so a stop of `True` was accepted and
+    displayed as a stop of 1.00 while market_monitor refused it (its
+    `_finite_pos` excludes bool). One rule for display and enforcement means
+    the exclusions have to match too. Reviewer, 2026-08-20.
+    """
+    return (not isinstance(x, bool)
+            and isinstance(x, (int, float)) and math.isfinite(float(x)))
 
 
 def resolve(thesis_stop, thesis_targets, override, price=None,
@@ -107,6 +115,16 @@ def resolve(thesis_stop, thesis_targets, override, price=None,
                                   "check it against — the guard fails closed")
         elif _usable and s >= float(price):
             out["effective_stop_status"] = "override REJECTED: at or above the live price"
+        elif thesis_stop is None and not (_finite(s) and s > 0):
+            # ⛔ MIRRORS market_monitor._finite_pos(). A stop of 0 or a negative
+            # stop is REFUSED by standalone_candidates (`stop > 0`), but this
+            # branch applied any finite number -- so the display said a stop of
+            # 0 was in force while the monitor watched nothing. Exactly the
+            # display/enforcer divergence this module exists to prevent
+            # (reviewer, 2026-08-20).
+            out["effective_stop_status"] = (
+                "override REJECTED: with no thesis stop the agent stop must be "
+                "a positive number — the monitor will not watch this")
         elif thesis_stop is None:
             # ⛔ NO THESIS STOP IS NO LONGER "IGNORED" (2026-08-20).
             # market_monitor.arm_standalone() watches an OWNED position on the

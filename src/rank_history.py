@@ -170,9 +170,15 @@ def _diff_section(prev: dict, cur: dict, top_n: int, max_movers: int) -> dict:
         [{"symbol": s, "rank": _rank(cur, s), "was": _rank(prev, s)}
          for s in c_names if _in_top(cur, s) and not _in_top(prev, s)],
         key=lambda x: x["rank"])
+    # ⛔ INCLUDES NAMES THAT VANISHED. This iterated `c_names` only, so a name
+    # that was in the top and is ABSENT from the current snapshot -- dropped by
+    # the Friday screen, or missing because the data was incomplete -- showed up
+    # only under `left_universe`, where a reader cannot tell a deliberate
+    # removal from a data gap (reviewer, 2026-08-20). It is an exit either way.
     exited = sorted(
-        [{"symbol": s, "rank": _rank(cur, s), "was": _rank(prev, s)}
-         for s in c_names if _in_top(prev, s) and not _in_top(cur, s)],
+        [{"symbol": s, "rank": _rank(cur, s), "was": _rank(prev, s),
+          "gone": s not in c_names}
+         for s in (c_names | p_names) if _in_top(prev, s) and not _in_top(cur, s)],
         key=lambda x: x["was"])
 
     # Absolute-gate flips. This is the off-switch crossing (12-month return
@@ -322,7 +328,14 @@ def _selftest() -> None:
     b = d["book"]
     assert d["status"] == "ok" and d["prev_as_of"] == "2026-08-18", d
     assert [x["symbol"] for x in b["entered_top"]] == ["CCC", "NEW", "DDD"], b["entered_top"]
-    assert [x["symbol"] for x in b["exited_top"]] == ["BBB"], b["exited_top"]
+    # ⛔ A NAME THAT VANISHED FROM THE SNAPSHOT IS ALSO AN EXIT. GONE was rank 5
+    # and is absent from `cur`; reporting it only under `left_universe` left a
+    # reader unable to tell a deliberate screen removal from a data gap
+    # (reviewer, 2026-08-20). `gone` says which it was.
+    assert [x["symbol"] for x in b["exited_top"]] == ["BBB", "GONE"], b["exited_top"]
+    _bym = {x["symbol"]: x for x in b["exited_top"]}
+    assert _bym["BBB"]["gone"] is False and _bym["BBB"]["rank"] == 30, _bym["BBB"]
+    assert _bym["GONE"]["gone"] is True and _bym["GONE"]["rank"] is None, _bym["GONE"]
     assert b["became_eligible"] == ["DDD"], b
     assert b["became_ineligible"] == [], b
     assert b["joined_universe"] == ["NEW"], b
@@ -352,7 +365,7 @@ def _selftest() -> None:
         assert [s["as_of"] for s in recent] == ["2026-08-19", "2026-08-18"], recent
         ld = latest_diff(p)
         assert ld["status"] == "ok" and ld["as_of"] == "2026-08-19", ld
-        assert [x["symbol"] for x in ld["book"]["exited_top"]] == ["BBB"], ld
+        assert [x["symbol"] for x in ld["book"]["exited_top"]] == ["BBB", "GONE"], ld
 
         # a torn file must be skipped, not raise, and must not become the diff
         (p / "2026-08-20.json").write_text("{not json")

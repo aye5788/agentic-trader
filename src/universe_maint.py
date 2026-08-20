@@ -80,6 +80,15 @@ def propose_membership(ranked, turnovers, current_rows, seed_flags, params,
     seeds = [r["ticker"] for r in current_rows if r["source"] == "seed"]
     fills = [r["ticker"] for r in current_rows if r["source"] != "seed"]
 
+    # ⛔ SEEDS ARE PROTECTED FROM THE RANK, NOT FROM THE EQUITY TEST.
+    # `is_equity` was applied only to ADDS, so a fund already sitting in
+    # config/universe.csv as a seed stayed there for ever -- and that file IS
+    # the order-gate whitelist, so it stayed buyable. Seed protection exists so
+    # a conviction name is not dropped for a bad dollar-volume week; it was
+    # never meant to exempt an instrument from being an equity at all
+    # (reviewer, 2026-08-20). Retained-but-non-equity names are SURFACED, never
+    # silently dropped: removing a human-chosen seed is the operator's call.
+    non_equity_kept = [t for t in seeds if not is_equity(t)]
     kept = list(seeds)  # 1. seeds always kept
     kept_fills = [t for t in fills if rank_of.get(t, big) <= keep_max]
     dropped_fills = [t for t in fills if rank_of.get(t, big) > keep_max]
@@ -110,6 +119,9 @@ def propose_membership(ranked, turnovers, current_rows, seed_flags, params,
         "drop_fills": sorted(dropped_fills),
         "add": adds,
         "rejected_non_equity": rejected,
+        # Existing members that would not pass the add-time equity test. Not
+        # dropped automatically — surfaced so a human decides.
+        "non_equity_kept": sorted(non_equity_kept),
         "flagged_seeds": sorted(set(seeds) & set(seed_flags)),
         "result": result[:target],
     }
@@ -158,6 +170,12 @@ def classify(proposal, pond_count, params) -> dict:
     bad = [t for t in proposal["add"] if not _looks_like_common_stock(t)]
     if bad:
         reasons.append("add(s) failed sanity: " + ", ".join(bad))
+    # A fund already IN the universe is a live whitelist entry, so it is a
+    # decision for a human, not something to auto-apply around.
+    stuck = proposal.get("non_equity_kept") or []
+    if stuck:
+        reasons.append("existing member(s) are not common stock and remain in "
+                       "the whitelist: " + ", ".join(stuck))
     return {"decision": "HOLD" if reasons else "AUTO_APPLY", "reasons": reasons}
 
 

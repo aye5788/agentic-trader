@@ -36,6 +36,105 @@ A consolidated account of everything that changed on 2026-08-20 — the six
 commits, the two Codex audits, and what was deliberately left undone — is in
 [`docs/2026-08-20-changes.md`](2026-08-20-changes.md).
 
+## 2026-08-20 — third Codex audit: SPLIT, and every finding implemented
+
+Aaron asked for the full report before any action, having objected — fairly —
+that the previous round was triaged by the author rather than by him: *"I didn't
+appreciate how last time you arbitrarily decided what was worth doing."* The
+report was handed over verbatim. He then directed that all of it be implemented.
+No finding was judged out of scope.
+
+⚠️ The reviewer could not run the test suite (its sandbox had no writable temp
+dir), so its analysis was source-reading only. Every finding below was verified
+against the code before being fixed; none turned out to be wrong.
+
+### CRITICAL
+
+**Stale ownership silently suppressed standalone watches.** A stale or unreadable
+positions snapshot sets `owned = None`, which the thesis watch set treats as
+FAIL-OPEN ("an old ownership set must never exclude a newly bought real position
+from software stop coverage"). `standalone_candidates()` returned `{}` there — so
+an override-only position was neither armed NOR reported unprotected. Invisible
+on both sides at exactly the moment ownership is uncertain. Now fails open like
+the thesis path; watching a name we may not own costs nothing, because the exit
+executor re-reads the broker and skips a zero position.
+
+**A corrupt infinite quote could arm anything.** `_last_price()` tested `v > 0`,
+which `inf` satisfies — and `inf` compares above every stop, so it would arm every
+standalone watch and satisfy every take-profit. The moomoo adapter had the
+identical hole. Both now require `math.isfinite`, and `bool` is excluded (it is an
+int subclass, so `True` read as a price of 1.0). The same gap existed in the stop
+validation: `stop > 0` accepted `inf`. One helper, `_finite_pos`, now expresses
+the rule everywhere.
+
+**Health could both cry wolf and miss monitor-only days.** The `exit_signal` is
+journalled BEFORE the launch ceiling is applied, so a ceiling-blocked breach —
+which places nothing — read as a missing fill. The monitor now records
+`launched` on the signal itself, because it is the only party that knows. A
+signal at 23:59:59Z whose fill lands at 00:00:01Z was a false positive; the
+next day's small hours now count. And the daily PROBE selected candidate days
+from `agent_decision` events only, so a day whose only trade was a stop-triggered
+exit was never chosen — the pure function had been taught about monitor exits
+while the thing that invokes it could not reach that day.
+
+### The display disagreed with the enforcer again
+
+The module that exists to stop display/enforcement divergence had four new ones:
+a stop of `0` or a negative stop read `watched: true` while the monitor refused
+it; a non-numeric stop RAISED `ValueError` and took `positions()` down; a stop of
+`True` displayed as 1.00. `levels._finite` now excludes bool, and
+`state.holdings` mirrors `_finite_pos` through a named `_armed_solo()` helper
+rather than an inline boolean — the inline version is how it came to accept a
+stop of zero.
+
+### Wakes
+
+- A FUTURE `last_fired_at` (clock skew, a corrected system time, a hand edit)
+  made `now - last < 30min` trivially true and muted the wake until the clock
+  caught up. A stamp we cannot trust now fails toward FIRING, like the
+  unparseable case.
+- A naive `now` against an aware stamp raised `TypeError`, which the monitor
+  catches as "no hits" — a clock slip would have silenced every wake. Both sides
+  are normalised.
+- Re-registering the same key wiped `last_fired_at`, bypassing the re-arm
+  interval entirely. The firing history is a property of the level, not of the
+  registration, and now survives.
+- `drop_wakes_for()` deleted EVERY wake on the symbol, including a legitimate
+  re-entry wake — the opposite of the intent, destroying a judgement the agent
+  made. It now retires only wakes registered BEFORE the exit; `registered_at`
+  already carried what was needed.
+- The budget is marked before the spawn deliberately (a crash must not re-fire in
+  a loop), but a FAILED spawn then silently consumed a firing and no session ran.
+  `refund_firing()` gives it back, with a push, keeping the anti-loop property.
+
+### Permissions and the rest
+
+`EXIT_MUST_NOT_WRITE` omitted `quotes.json`, `unprotected.json`,
+`enforcement.json` and `wakes.json` — denied in the settings but unasserted, so a
+future edit could remove the deny and still pass. `EXIT_MUST_WRITE` omitted
+`partial_closes.json`, which `prompts/exit.md` requires. The selftests checked
+only Edit denies, not the Write mirror. And the broad `research_store/**` allow
+meant any NEW file in the monitor directory would be writable unless someone
+remembered two rules — so the check now enumerates the live directory and
+requires every file to be accounted for.
+
+Also: a SEED was never equity-tested, so a fund already in `config/universe.csv`
+stayed in the order-gate whitelist for ever — seed protection exists so a
+conviction name survives a bad dollar-volume week, not to exempt an instrument
+from being an equity. Surfaced as `non_equity_kept` and forced to HOLD rather
+than auto-dropped: removing a human-chosen seed is the operator's call. The rank
+diff reported a vanished top-20 name only under `left_universe`, where a reader
+cannot distinguish a deliberate screen removal from a data gap; it is an exit
+either way now, carrying `gone`. And `identity_verified: false` was written and
+unit-tested with NO operational consumer — it is a daily health finding now,
+reported rather than enforced, because refusing to read a snapshot would strip
+stop coverage.
+
+**The author's error, in one line:** treating "strictly below the one price read"
+as equivalent to "safe", and "the pure function understands monitor exits" as
+equivalent to "health audits monitor exits". Both were the happy path mistaken
+for the domain.
+
 ## 2026-08-20 — the unenforced stop was costing MODEL SESSIONS, not just protection
 
 Aaron, getting repeated phone pushes about JNJ: *"I keep getting ntfy
