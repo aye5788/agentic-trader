@@ -8,7 +8,7 @@ collapse (or acquisition) instead of pretending they never existed.
 
   pool = S&P-500 point-in-time members (2015-2026)     <- the dead-name backbone
        ∪ config/universe.csv  (our 150 survivors, incl. non-index liquid names)
-       ∪ config/etf_universe.csv (18 ETFs)
+       (equities only — funds were removed 2026-08-20; see main())
        ∪ HAND_DELISTED (liquid non-index blow-ups the S&P set misses)
 
 S&P PIT membership comes from the fja05680/sp500 reconstruction (Wikipedia
@@ -68,7 +68,6 @@ def main() -> None:
         sys.exit(f"failed to fetch S&P PIT list: {e}")
 
     seed = read_col(REPO / "config" / "universe.csv")
-    etfs = read_col(REPO / "config" / "etf_universe.csv")
 
     # merge with provenance; a ticker's first-seen source wins the label, but we
     # record in_sp500_ever separately so the dead-name backbone is auditable.
@@ -77,8 +76,12 @@ def main() -> None:
         source.setdefault(t, "sp500")
     for t in seed:
         source.setdefault(t, "seed")
-    for t in etfs:
-        source.setdefault(t, "etf")
+    # ⛔ NO FUNDS IN THE POOL (2026-08-20). This used to fold in all 18 of
+    # config/etf_universe.csv. The pool is not just a backtest input: it is the
+    # FALLBACK CANDIDATE POND for the weekly universe screen
+    # (moomoo.research.candidate_pond), so every fund in it was a name the
+    # screen could propose ADDING to config/universe.csv — which is the
+    # order-gate whitelist. The sleeve is deleted; the pool is equities.
     for t in HAND_DELISTED:
         source.setdefault(t, "hand")
 

@@ -24,7 +24,6 @@ AEP,sp500,yes
 AES,sp500,yes
 AET,sp500,yes
 AFL,sp500,yes
-AGG,etf,no
 AGN,sp500,yes
 AIG,sp500,yes
 AIV,sp500,yes
@@ -242,8 +241,6 @@ EA,sp500,yes
 EBAY,sp500,yes
 ECL,sp500,yes
 ED,sp500,yes
-EEM,etf,no
-EFA,etf,no
 EFX,sp500,yes
 EG,sp500,yes
 EIX,sp500,yes
@@ -324,7 +321,6 @@ GGP,sp500,yes
 GILD,sp500,yes
 GIS,sp500,yes
 GL,sp500,yes
-GLD,etf,no
 GLW,sp500,yes
 GM,sp500,yes
 GMCR,sp500,yes
@@ -397,7 +393,6 @@ ISRG,sp500,yes
 IT,sp500,yes
 ITW,sp500,yes
 IVZ,sp500,yes
-IWM,etf,no
 J,sp500,yes
 JBHT,sp500,yes
 JBL,sp500,yes
@@ -667,7 +662,6 @@ SPG,sp500,yes
 SPGI,sp500,yes
 SPLS,sp500,yes
 SPOT,seed,no
-SPY,etf,no
 SRCL,sp500,yes
 SRE,sp500,yes
 STE,sp500,yes
@@ -703,7 +697,6 @@ THC,sp500,yes
 TIF,sp500,yes
 TJX,sp500,yes
 TKO,sp500,yes
-TLT,etf,no
 TMK,sp500,yes
 TMO,sp500,yes
 TMUS,sp500,yes
@@ -793,18 +786,7 @@ WYNN,sp500,yes
 XEC,sp500,yes
 XEL,sp500,yes
 XL,sp500,yes
-XLB,etf,no
-XLC,etf,no
-XLE,etf,no
-XLF,etf,no
-XLI,etf,no
-XLK,etf,no
 XLNX,sp500,yes
-XLP,etf,no
-XLRE,etf,no
-XLU,etf,no
-XLV,etf,no
-XLY,etf,no
 XOM,sp500,yes
 XRAY,sp500,yes
 XRX,sp500,yes

@@ -33,7 +33,8 @@ LAYER 4  EXECUTION       Robinhood MCP: review -> place  (thin, dumb, reliable)
 > (options OFF), swing horizon. All design axes are closed: 12-month lookback
 > (12-0, no skip); relative rank = equal-weight rank-average of risk-adjusted
 > return + trend (close/SMA200); absolute gate = 12mo return > 0; hold top-10
-> (banded to 15) + top-4 ETF sleeve; weekly rebalance, nightly risk exits;
+> (banded); ⛔ the top-4 ETF sleeve was DELETED 2026-08-20 — equities only;
+> weekly rebalance, nightly risk exits;
 > off-switch = cash; **70/30 book/sleeve** capital split. The operational spec —
 > written for the deployed agent — is [`docs/STRATEGY.md`](STRATEGY.md); params
 > are in `config/strategy.toml`. Earnings-calendar use demotes from *primary
@@ -60,7 +61,7 @@ uptrend** (absolute-trend filter). The signal stack, each source with one job:
 | ------ | ---- | ------ |
 | **Relative-rank momentum** (risk-adj 12mo return + trend) | **primary edge** — winners keep winning over 6–12mo | Schwab price history |
 | **Absolute-trend filter** (close/SMA200; 12mo return > 0) | the **off-switch** — long-only rotates to cash when the trend breaks | Schwab price history |
-| ETF rotation sleeve (same signal) | parallel engine; defensive assets rank in as the risk-off destination | Schwab price history |
+| ~~ETF rotation sleeve~~ | ⛔ **DELETED 2026-08-20** (retired 08-16, sold 08-17). Equities only; a buy naming a fund is refused by the whitelist. The 11 sector price series survive as residual-tilt FACTORS, not holdings | price panel |
 | Fundamental quality | light universe hygiene (the 150 are already liquid large-caps) | Schwab + Finnhub metrics |
 | Earnings calendar | **defensive** event-awareness — don't hold a swing into a print | Finnhub + RH |
 | News / catalysts | context + risk flag | Alpaca news |
@@ -337,13 +338,15 @@ on a timer, with nobody watching**. Three things make that work:
    layer. *(still open)*
 7. ~~**Same-day catalyst entries**~~ — RESOLVED: **nightly-only for v1** (momentum
    trends persist for weeks; same-day reaction is a later add).
-8. ~~**Universe**~~ — RESOLVED (revised for momentum): **fixed 150 single names**
-   (`config/universe.csv`, human-seed reconciled with dollar-volume fill) **+ an
-   18-ETF dual-momentum sleeve** (`config/etf_universe.csv`), run as two parallel
-   engines at a **70/30** split. Replaces the PEAD earnings-dynamic screen.
-9. ~~**ETF role**~~ — RESOLVED: not ballast — a **parallel dual-momentum rotation
-   sleeve** (11 SPDR sectors + broad + intl + defensive); defensive assets rank
-   in-sleeve as the built-in off-switch destination.
+8. ~~**Universe**~~ — RESOLVED, then NARROWED: **fixed 150 single names**
+   (`config/universe.csv`), rescreened WEEKLY (Fridays) since 2026-08-20.
+   ⛔ The 18-ETF sleeve that ran beside it at a 70/30 split was **deleted
+   2026-08-20**; there is one engine.
+9. ~~**ETF role**~~ — ⛔ **REVERSED AND DELETED 2026-08-20.** The parallel
+   rotation sleeve was retired 2026-08-16, its four positions sold 08-17, and
+   the machinery removed 08-20. Funds are not buyable. The 11 sector series
+   remain as residual-tilt regression FACTORS only. Going defensive is now a
+   judgement the session makes and records, not an automatic rotation.
 
 > **Strategy is codified** in [`config/strategy.toml`](../config/strategy.toml) —
 > the single source of truth for risk gates, universe, momentum signal params,
@@ -372,8 +375,8 @@ on a timer, with nobody watching**. Three things make that work:
       spread, retry + cache-last-good; verified live
 - [x] **Momentum strategy designed + put to paper** — all axes closed; written
       for the deployed agent in `docs/STRATEGY.md`; params in `config/strategy.toml`
-- [x] **Universe built** — fixed 150 (`config/universe.csv`) + 18-ETF sleeve
-      (`config/etf_universe.csv`), 70/30 split
+- [x] **Universe built** — fixed 150 (`config/universe.csv`), rescreened weekly
+      since 2026-08-20. The 18-ETF sleeve was deleted the same day.
 - [x] **Backtest the momentum signal** vs history — walk-forward harness built
       (`src/momentum.py` signal SSOT, `scripts/fetch_prices.py`, `scripts/backtest.py`)
       and a sensitivity sweep (`scripts/sweep.py`). First pass (2017–2026, 469 wks,

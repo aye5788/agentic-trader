@@ -50,7 +50,46 @@ def _selftest() -> None:
     assert "NEW" in p["add"], p                      # rank 2, above floor, open slot
     assert "SEED1" in p["keep"], p                   # seed always kept despite rank 3 / low $vol
     assert len(p["result"]) == 3, p                  # target size respected
-    print("universe_maint selftest OK: rank_pond + propose_membership")
+    # ---- ADDS ARE EQUITIES ONLY -------------------------------------------
+    # config/universe.csv IS the order-gate whitelist, so anything that reaches
+    # `add` becomes buyable. Before 2026-08-20 the only check was a name-shape
+    # regex that "SPY", "GLD" and "XLK" all pass, and the pond legitimately
+    # contains funds (moomoo's screen is unfiltered; pit_pool.csv carried all 18
+    # by construction). The Friday screen could therefore have re-added a fund
+    # and undone the sleeve deletion by another route.
+    fp = {"target_size": 3, "keep_rank_max": 3, "add_rank_max": 4,
+          "add_dvol_floor_usd": 10.0}
+    cur1 = [{"ticker": "SEED1", "source": "seed", "sector": "", "exchange": "",
+             "flag": "", "as_of": ""}]
+    ranked_f = ["SPY", "GOOD", "XLK", "SEED1"]
+    turn_f = {"SPY": 999.0, "GOOD": 900.0, "XLK": 800.0, "SEED1": 50.0}
+
+    # denylist backstop alone already refuses them...
+    pf = um.propose_membership(ranked_f, turn_f, cur1, set(), fp)
+    assert "SPY" not in pf["add"] and "XLK" not in pf["add"], pf["add"]
+    assert "GOOD" in pf["add"], pf["add"]
+    assert set(pf["rejected_non_equity"]) == {"SPY", "XLK"}, pf["rejected_non_equity"]
+
+    # ...and the REAL test is market cap, which catches a fund nobody listed.
+    # "NEWFD" passes every name check; only the absent market cap rejects it.
+    mcap = {"GOOD": {"total_market_val": 5e10}, "NEWFD": {"total_market_val": None}}
+    def _is_eq(t):
+        if not um._looks_like_common_stock(t):
+            return False
+        row = mcap.get(t)
+        return True if row is None else bool(row.get("total_market_val"))
+    assert um._looks_like_common_stock("NEWFD"), "fixture must pass the name check"
+    pf2 = um.propose_membership(["NEWFD", "GOOD"], {"NEWFD": 999.0, "GOOD": 900.0},
+                                cur1, set(), fp, is_equity=_is_eq)
+    assert pf2["add"] == ["GOOD"], pf2["add"]
+    assert pf2["rejected_non_equity"] == ["NEWFD"], pf2["rejected_non_equity"]
+
+    # a rejected candidate must not silently consume the open slot either
+    assert "GOOD" in pf2["result"][-1]["ticker"] or any(
+        r["ticker"] == "GOOD" for r in pf2["result"]), pf2["result"]
+
+    print("universe_maint selftest OK: rank_pond + propose_membership + "
+          "equities-only adds (denylist AND market-cap test)")
 
     cp = {"target_size": 150, "auto_apply_max_changes": 5}
     # routine → AUTO_APPLY
@@ -115,6 +154,9 @@ def _render_md(proposal, decision, asof) -> str:
          f"**Decision:** {decision['decision']}"]
     if decision["reasons"]:
         L += ["", "**Held because:**"] + [f"- {r}" for r in decision["reasons"]]
+    rej = proposal.get("rejected_non_equity") or []
+    if rej:
+        L += ["", "**Rejected (not common stock):** " + ", ".join(rej)]
     L += ["", f"**Adds ({len(proposal['add'])}):** " + (", ".join(proposal["add"]) or "none"),
           f"**Drops — fills ({len(proposal['drop_fills'])}):** " + (", ".join(proposal["drop_fills"]) or "none"),
           f"**Flagged seeds (your decision):** " + (", ".join(proposal["flagged_seeds"]) or "none")]
@@ -164,7 +206,51 @@ def run(asof: str, dry: bool) -> dict:
     pond = mm.candidate_pond(incumbents, str(POOL), params)
     turnovers = mm.snapshot_turnover(pond)
     ranked = um.rank_pond(turnovers)
-    proposal = um.propose_membership(ranked, turnovers, current, seed_flags, params)
+
+    # ⛔ EQUITIES ONLY. The pond is moomoo's market-cap screen (documented as
+    # UNFILTERED — funds, preferred shares and SPAC units all rank) or, on
+    # failure, config/pit_pool.csv. An ADD lands in config/universe.csv, which
+    # IS the order-gate whitelist, so a fund reaching `add` would quietly make
+    # itself buyable and undo the sleeve deletion by another route.
+    #
+    # The positive test: moomoo serves NO `total_market_val` for a fund — the
+    # documented cause of the capital-flow ETF null (OPSLOG 2026-07-28). Only
+    # candidates actually up for addition are probed, so this costs one batched
+    # snapshot, not a second pass over the pond.
+    #
+    # FAILS CLOSED, deliberately: if the probe returns nothing (OpenD down, a
+    # rejected batch), every candidate is unverifiable and the name-shape
+    # backstop decides. An unverifiable candidate is never added on trust.
+    def _equity_probe(tickers):
+        mcap = {}
+        try:
+            ctx = mm.quote_ctx()
+            try:
+                for i in range(0, len(tickers), 200):
+                    mcap.update(mm.snapshot_fields(ctx, tickers[i:i + 200]))
+            finally:
+                ctx.close()
+        except Exception as e:                                # noqa: BLE001
+            print(f"  equity probe unavailable ({type(e).__name__}) — "
+                  f"name-shape backstop only")
+        return mcap
+
+    cand = [t for t in ranked if t not in set(incumbents)][:params["add_rank_max"]]
+    mcaps = _equity_probe(cand) if cand else {}
+
+    def is_equity(t: str) -> bool:
+        if not um._looks_like_common_stock(t):        # denylist + name shape
+            return False
+        row = mcaps.get(t)
+        if row is None:
+            return True                                # unprobed -> backstop only
+        mv = row.get("total_market_val")
+        return bool(mv) and float(mv) > 0              # a fund carries none
+
+    proposal = um.propose_membership(ranked, turnovers, current, seed_flags,
+                                     params, is_equity=is_equity)
+    if proposal.get("rejected_non_equity"):
+        print(f"  rejected as non-equity: {', '.join(proposal['rejected_non_equity'])}")
     decision = um.classify(proposal, len(ranked), params)
 
     # ⛔ A DRY RUN WRITES TO A SEPARATE DIRECTORY. It used to write the proposal

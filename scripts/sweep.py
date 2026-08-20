@@ -24,16 +24,17 @@ sys.path.insert(0, str(REPO / "src"))
 import backtest as bt  # noqa: E402  (simulate + load_panel live here)
 
 # Production config = the baseline every axis is perturbed around.
-BASE = dict(lookback=252, book_hold=10, book_band=15, sleeve_hold=4,
-            book_w=0.70, sleeve_w=0.30, use_regime=True, use_sleeve=True)
+# ⛔ SINGLE-ENGINE since 2026-08-20 (the ETF sleeve was deleted). The
+# BOOK/SLEEVE SPLIT axis went with it — there is no split to sweep.
+BASE = dict(lookback=252, book_hold=14, book_band=20, book_w=1.0, use_regime=True)
 
 
-def sweep_axis(label, panel, names, etfs, spy, variants):
+def sweep_axis(label, panel, names, spy, variants):
     """variants: list of (name, override_dict). Prints one block."""
     rows = []
     for vname, override in variants:
         params = {**BASE, **override}
-        m, _ = bt.simulate(panel, names, etfs, spy, **params)
+        m, _ = bt.simulate(panel, names, spy, **params)
         rows.append((vname, m))
     print(f"\n{label}")
     print(f"  {'variant':<16}{'CAGR':>8}{'vol':>8}{'Sharpe':>8}"
@@ -55,7 +56,6 @@ def _is_base(vname):
 def main():
     panel = bt.load_panel().sort_index()
     names = [t for t in pd.read_csv(REPO / "config" / "universe.csv")["ticker"] if t in panel]
-    etfs = [t for t in pd.read_csv(REPO / "config" / "etf_universe.csv")["ticker"] if t in panel]
     spy = panel["SPY"]
 
     print("=" * 62)
@@ -63,33 +63,26 @@ def main():
     print("  (* = baseline value.  SPY B&H over this span: CAGR 13.1% / Sharpe 0.78)")
     print("=" * 62)
 
-    sweep_axis("LOOKBACK (formation window)", panel, names, etfs, spy, [
+    sweep_axis("LOOKBACK (formation window)", panel, names, spy, [
         ("126d", {"lookback": 126}),
         ("189d", {"lookback": 189}),
         ("252d", {"lookback": 252}),
         ("315d", {"lookback": 315}),
     ])
 
-    sweep_axis("BOOK/SLEEVE SPLIT", panel, names, etfs, spy, [
-        ("100/0", {"use_sleeve": False}),
-        ("70/30", {"book_w": 0.70, "sleeve_w": 0.30}),
-        ("50/50", {"book_w": 0.50, "sleeve_w": 0.50}),
-        ("30/70", {"book_w": 0.30, "sleeve_w": 0.70}),
-    ])
-
-    sweep_axis("BOOK HOLD COUNT (concentration)", panel, names, etfs, spy, [
+    sweep_axis("BOOK HOLD COUNT (concentration)", panel, names, spy, [
         ("top-8", {"book_hold": 8, "book_band": 12}),
         ("top-10", {"book_hold": 10, "book_band": 15}),
         ("top-15", {"book_hold": 15, "book_band": 22}),
     ])
 
-    sweep_axis("BAND WIDTH (vs hard top-N)", panel, names, etfs, spy, [
+    sweep_axis("BAND WIDTH (vs hard top-N)", panel, names, spy, [
         ("band 10", {"book_band": 10}),   # == hold_n: no hysteresis
         ("band 15", {"book_band": 15}),
         ("band 20", {"book_band": 20}),
     ])
 
-    sweep_axis("REGIME FILTER (SPY>50DMA)", panel, names, etfs, spy, [
+    sweep_axis("REGIME FILTER (SPY>50DMA)", panel, names, spy, [
         ("regime ON", {"use_regime": True}),
         ("regime OFF", {"use_regime": False}),
     ])

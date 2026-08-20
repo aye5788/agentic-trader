@@ -22,12 +22,10 @@ decides that, and nothing here executes anything — but it is now **visible**:
 because the candidate universe is rescreened every Friday — names that entered
 or left the universe itself. It takes no clock and does no I/O.
 
-⛔ SINGLE NAMES ONLY. The ETF sleeve was retired 2026-08-16 and its four
-positions sold 2026-08-17. ETFs remain SCORED elsewhere for three narrow
-reasons — the residual tilt regresses on the 11 SPDR sectors, the order-gate
-whitelist must be able to name a held ETF, and a live ETF with no score would
-have no computable stop — and none of those is "rank them as candidates". They
-are factors and, if ever held, stop-protection; they are not in this diff.
+⛔ SINGLE NAMES ONLY. The ETF sleeve was deleted on 2026-08-20 (retired
+2026-08-16, positions sold 08-17). The 11 sector series the residual tilt
+regresses on are read-only factor inputs — not tradeable, not ranked, refused by
+the order gate — so they are not in this diff either.
 """
 from __future__ import annotations
 
@@ -277,8 +275,8 @@ def _selftest() -> None:
     assert snapshot_section(None) == {}, "no frame must not raise"
     assert snapshot_section(pd.DataFrame()) == {}, "empty frame must not raise"
 
-    # build() carries the single-name ranking and NOTHING ELSE. The ETF sleeve
-    # is retired; an "etf" key here would put it back in front of the agent.
+    # build() carries the single-name ranking and NOTHING ELSE. An "etf" key
+    # here would put a deleted allocation back in front of the agent.
     # A NaN score/eligibility must never reach the file. json.dump emits a bare
     # `NaN` token, which is NOT valid JSON, and bool(nan) is True -- an absolute
     # gate that fails OPEN. Both were live until the reviewer caught them.

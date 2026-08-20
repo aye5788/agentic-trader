@@ -72,7 +72,7 @@ def generate_entries(panels, pool_tickers, tm, portfolio, fold_days=252):
     (stop = entry - m*frac_sigma*entry; see build_samples's dollar-sigma stop).
 
     `pool_tickers` should already be restricted to the single-name candidate
-    pool (ETF sleeve + SPY excluded) that exist in the price panel. NOTE: this
+    pool (read-only factor series + SPY excluded) that exist in the price panel. NOTE: this
     is NOT the same universe as scripts/backtest_pit.py, which ranks the
     816-name survivorship-free pool (pool_closes/pool_dvol, no highs/lows);
     this replay is confined to whatever of pit_pool.csv survives into today's
@@ -139,18 +139,22 @@ def _load_panels():
 
 def _pool_candidates(closes):
     """Single-name candidate pool: pit_pool.csv tickers present in the price
-    panel, minus the ETF sleeve and the SPY regime proxy. NOTE on fidelity:
+    panel, minus the read-only factor series and the SPY regime proxy. NOTE on fidelity:
     `closes` here is research_store/prices/closes.parquet, built from today's
     live config/universe.csv (~150 names), NOT the 816-name PIT pool that
     scripts/backtest_pit.py ranks — so despite starting from pit_pool.csv,
     the `t in closes.columns` filter collapses this to (a subset of) today's
-    live universe. Ticker-exclusion logic (ETF sleeve + SPY) is unaffected
+    live universe. Ticker-exclusion logic (factor series + SPY) is unaffected
     and correct; only the "mirrors the PIT backtest's universe" framing was
     wrong and has been removed."""
     import pandas as pd
     pool = pd.read_csv(REPO / "config" / "pit_pool.csv")["ticker"].tolist()
-    etfs = set(pd.read_csv(REPO / "config" / "etf_universe.csv")["ticker"])
-    exclude = etfs | {"SPY"}
+    # Exclude the read-only series: the sector factors the residual tilt
+    # regresses on, plus the SPY regime proxy. These are never traded, so a
+    # stop-loss dial replayed over them would be fitting noise. (Was
+    # config/etf_universe.csv until 2026-08-20, when the sleeve was deleted.)
+    import residual                                        # noqa: PLC0415
+    exclude = set(residual.SECTOR_FACTORS) | {"SPY"}
     return [t for t in pool if t not in exclude and t in closes.columns]
 
 

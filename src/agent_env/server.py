@@ -53,7 +53,6 @@ HIGHS = REPO / "research_store" / "prices" / "highs.parquet"
 LOWS = REPO / "research_store" / "prices" / "lows.parquet"
 OPENS = REPO / "research_store" / "prices" / "opens.parquet"
 UNIVERSE = REPO / "config" / "universe.csv"
-ETF_UNIVERSE = REPO / "config" / "etf_universe.csv"
 
 
 def _outcomes() -> list:
@@ -413,17 +412,6 @@ def _panel():
     return pd.read_parquet(CLOSES)
 
 
-def _all_tickers() -> list:
-    """Every symbol the system knows how to price — single names PLUS ETFs.
-
-    ⛔ NOT the candidate list. `candidates()`/`universe()` rank single names
-    only (the sleeve is retired). This stays ETF-inclusive because a held ETF
-    must still be nameable for the whitelist and must still be scoreable for a
-    stop; it is not a screen.
-    """
-    return screen.read_universe(UNIVERSE) + screen.read_universe(ETF_UNIVERSE)
-
-
 @mcp.tool()
 def candidates(n: int = 10) -> str:
     """The momentum screen's top `n`, strongest first, with their numbers.
@@ -436,8 +424,7 @@ def candidates(n: int = 10) -> str:
     with the adopted residual tilt — the IDENTICAL ranking the slow loop builds
     the book from. Until 2026-08-20 it was not: this list was ranked without the
     tilt and with 18 ETFs pooled in, so it could order the same names
-    differently from the book. The ETF sleeve is retired; ETFs are regression
-    factors for the tilt, not candidates.
+    differently from the book. There is one universe: config/universe.csv.
 
     Columns: R (12-month return), sigma (daily volatility), trend (distance above
     the 200-day mean), score (the rank-average), eligible (12-month return > 0).
@@ -462,8 +449,9 @@ def universe() -> str:
       history to compute momentum (need 252+ trading days for the 12-month
       return, 200 for the trend moving average)
 
-    ETFs are NOT here. The sleeve was retired 2026-08-16 and its positions sold;
-    the 11 SPDR sectors are regression factors for the tilt, not candidates.
+    This is the whole tradeable universe — there is no second list. The 11
+    sector series the residual tilt regresses on are read-only factor inputs:
+    not tradeable, not ranked, and refused by the order gate's whitelist.
     """
     panel = _panel()
     book_t = screen.read_universe(UNIVERSE)
@@ -3138,7 +3126,6 @@ def _selftest() -> None:
         (tdp / "research_store").mkdir(parents=True)
         (tdp / "config").mkdir()
         (tdp / "config" / "universe.csv").write_text("ticker,flag\nAAPL,\n")
-        (tdp / "config" / "etf_universe.csv").write_text("ticker,flag\nXLK,\n")
         (tdp / "research_store" / "HALT_ENTRIES").touch()   # blocks entries
         gov.STATE.parent.mkdir(parents=True, exist_ok=True)
         gov.STATE.write_text(json.dumps({"peak_value": 1000.0}))  # so $100 -> -90% dd
@@ -3149,7 +3136,6 @@ def _selftest() -> None:
                            "require_whitelist": True,
                            "min_dollar_volume_20d": 50_000_000.0},
             "universe": {"source": "config/universe.csv"},
-            "etf_sleeve": {"source": "config/etf_universe.csv"},
         }
         strat.load = lambda: test_cfg
         marks.load = lambda: {"account_value": 100.0}

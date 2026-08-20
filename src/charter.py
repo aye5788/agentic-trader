@@ -187,21 +187,21 @@ def render_tools(tool_names) -> str:
 def render_universe(strat_cfg: dict, repo: Path | None = None) -> str:
     """How many names are in the default hunting ground, counted from the CSVs.
 
-    Derived, not stated: the universe is re-cut quarterly and a literal here
+    Derived, not stated: the universe is re-cut weekly and a literal here
     would be wrong within months. Counting the file is the only figure that
     cannot drift from what candidates()/universe() will actually show.
     """
     repo = repo or REPO
+    # ONE universe. This looped over ("universe", "etf_sleeve") until
+    # 2026-08-20 and told the agent its hunting ground was "150 single names and
+    # 18 ETFs" — four days after the sleeve was retired and three after its
+    # positions were sold. The charter is the agent's whole standing account of
+    # the game, so a retired allocation named here is not cosmetic.
     counts = []
-    for key, label in (("universe", "single names"), ("etf_sleeve", "ETFs")):
-        src = strat_cfg.get(key, {}).get("source")
-        if not src:
-            continue
-        path = repo / src
-        if not path.is_file():
-            continue
-        rows = [ln for ln in path.read_text().splitlines()[1:] if ln.strip()]
-        counts.append(f"{len(rows)} {label}")
+    src = strat_cfg.get("universe", {}).get("source")
+    if src and (repo / src).is_file():
+        rows = [ln for ln in (repo / src).read_text().splitlines()[1:] if ln.strip()]
+        counts.append(f"{len(rows)} single names")
     if not counts:
         return ("A configured universe is your default hunting ground; "
                 "`universe()` shows it in full.")
@@ -223,29 +223,19 @@ def render_baseline(strat_cfg: dict) -> str:
     port = strat_cfg.get("portfolio", {})
     sig = strat_cfg.get("signal", {})
     book_hold = port.get("book_hold")
-    sleeve_hold = port.get("sleeve_hold")
     book_w = port.get("book_weight")
-    sleeve_w = port.get("sleeve_weight")
-    sleeve_cfg = strat_cfg.get("etf_sleeve", {})
-    sleeve_enabled = sleeve_cfg.get("enabled", bool(sleeve_hold))
-    sleeve_active = sleeve_enabled and sleeve_hold is not None and sleeve_hold > 0
     tilt = sig.get("residual_tilt")
     parts = ["The house currently believes: **cross-sectional momentum**, "
              "long-only, rebalanced weekly."]
     if book_hold is not None:
-        if sleeve_active:
-            parts.append(f"Top {book_hold} single names plus a {sleeve_hold}-holding "
-                         f"ETF sleeve.")
-        else:
-            parts.append(f"Top {book_hold} single names; the ETF sleeve is retired.")
-    if book_w is not None and sleeve_active and sleeve_w is not None:
-        parts.append(f"Capital splits {_pct(book_w)} to the book and "
-                     f"{_pct(sleeve_w)} to the sleeve.")
-    elif book_w is not None:
+        parts.append(f"Top {book_hold} single names. Equities only.")
+    if book_w is not None:
         parts.append(f"Capital allocates {_pct(book_w)} to the single-name book.")
     if tilt is not None:
         parts.append(f"The signal is sector-residualised at a tilt of {tilt} — "
-                     f"momentum measured against sector peers rather than raw.")
+                     f"momentum measured against sector peers rather than raw. "
+                     f"The sector series that makes that subtraction possible is "
+                     f"read-only market data, not something you can hold.")
     # ⛔ DEFINE THE SIGNAL, do not just name it. "cross-sectional momentum"
     # appeared once and was never unpacked, so the agent could not tell what it
     # ranks on, what makes a name eligible, or what releases a holding -- and
@@ -320,9 +310,7 @@ def _selftest() -> None:
     SCFG = {"governance": {"max_order_pct": 0.15,
                            "max_drawdown": 0.25,
                            "min_dollar_volume_20d": 50_000_000.0},
-            "portfolio": {"book_hold": 10, "sleeve_hold": 4,
-                          "book_weight": 0.70, "sleeve_weight": 0.30},
-            "etf_sleeve": {"enabled": True},
+            "portfolio": {"book_hold": 14, "book_weight": 1.0},
             "signal": {"residual_tilt": 0.75}}
     TOOLS = ["mcp__agentic-trader__brief", "mcp__agentic-trader__quote",
              "mcp__agentic-trader__check_order", "mcp__agentic-trader__performance",
@@ -330,20 +318,21 @@ def _selftest() -> None:
 
     out = render(MCFG, SCFG, TOOLS)
 
-    # Both portfolio modes must state the book size. A retired zero-sized sleeve
-    # must not make the whole construction clause disappear or be described as a
-    # 0%-allocated live sleeve.
-    baseline_on = render_baseline(SCFG)
-    assert "Top 10 single names plus a 4-holding ETF sleeve" in baseline_on
-    assert "Capital splits 70% to the book and 30% to the sleeve" in baseline_on
-    sleeve_off_cfg = dict(SCFG,
-                          portfolio=dict(SCFG["portfolio"], sleeve_hold=0,
-                                         book_weight=1.0, sleeve_weight=0.0),
-                          etf_sleeve={"enabled": False})
-    baseline_off = render_baseline(sleeve_off_cfg)
-    assert "Top 10 single names; the ETF sleeve is retired" in baseline_off
-    assert "Capital allocates 100% to the single-name book" in baseline_off
-    assert "Capital splits" not in baseline_off
+    # ⛔ THE CHARTER MUST NOT NAME A SLEEVE. It rendered "150 single names and
+    # 18 ETFs" as the agent's hunting ground for four days after the sleeve was
+    # retired and three after its positions were sold. The charter is the whole
+    # standing account of the game the agent is playing, so this is not cosmetic:
+    # a retired allocation named here reads as a live one.
+    baseline = render_baseline(SCFG)
+    assert "Top 14 single names. Equities only." in baseline, baseline
+    assert "Capital allocates 100% to the single-name book" in baseline, baseline
+    assert "sleeve" not in baseline.lower(), baseline
+    assert "ETF" not in baseline, baseline
+    # a stale [etf_sleeve] table left in a local override must change NOTHING
+    stale = render_baseline(dict(SCFG, etf_sleeve={"enabled": True},
+                                 portfolio=dict(SCFG["portfolio"],
+                                                sleeve_hold=4, sleeve_weight=0.3)))
+    assert stale == baseline, "a stale sleeve config resurrected the sleeve"
 
     # every number is INTERPOLATED -- change the config, the charter changes
     assert "20%" in out and "15%" in out, out[:400]
@@ -633,15 +622,14 @@ def _selftest() -> None:
     real_port = strategy.load().get("portfolio", {})
     assert str(real_port["book_hold"]) in real, "book_hold clause vanished"
     assert _pct(real_port["book_weight"]) in real, "book_weight clause vanished"
-    real_sleeve_enabled = strategy.load().get("etf_sleeve", {}).get(
-        "enabled", bool(real_port["sleeve_hold"]))
-    if real_sleeve_enabled and real_port["sleeve_hold"] > 0:
-        assert str(real_port["sleeve_hold"]) in real, "sleeve_hold clause vanished"
-        assert _pct(real_port["sleeve_weight"]) in real, "sleeve_weight clause vanished"
-    else:
-        assert "ETF sleeve is retired" in real, "retired sleeve status vanished"
-        assert "Capital splits" not in render_baseline(strategy.load()), \
-            "retired sleeve rendered as an active capital split"
+    # ⛔ AND THE REAL CHARTER MUST NOT MENTION A SLEEVE OR AN ETF AT ALL.
+    # Deleted 2026-08-20. Previously this branch asserted the retired sleeve was
+    # *named as retired* — which still put "ETF sleeve" in front of the agent
+    # every session. There is no sleeve; the correct rendering is silence.
+    assert "sleeve" not in real.lower(), "the deleted sleeve is still in the charter"
+    assert "Capital splits" not in real, "a two-engine capital split is still rendered"
+    for gone in ("sleeve_hold", "sleeve_weight"):
+        assert gone not in real_port, f"{gone} is still in [portfolio]"
     assert str(strategy.load()["signal"]["residual_tilt"]) in real, "tilt vanished"
 
     print("charter: OK — every number derived, nothing dropped, unknown placeholder raises")

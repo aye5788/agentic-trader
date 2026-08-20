@@ -16,11 +16,20 @@ import numpy as np
 import pandas as pd
 
 
-# The 11 SPDR sector ETFs the "sector" variant regresses on. Lives HERE, not in
-# scripts/slow_loop.py, because two callers now need it and a constant with two
-# copies is a divergence waiting to happen — see kwargs_from_config below.
-SECTOR_ETFS = ["XLE", "XLF", "XLK", "XLV", "XLI", "XLP",
-               "XLY", "XLU", "XLB", "XLRE", "XLC"]
+# The 11 sector return series the "sector" variant regresses on.
+#
+# ⛔ THESE ARE FACTORS, NOT INSTRUMENTS, AND THE NAME SAYS SO (renamed from
+# SECTOR_ETFS on 2026-08-20). They are price series used to measure what each
+# sector did, so that a name's own move can be separated from its sector's. The
+# system cannot buy, sell or hold them: they are not in config/universe.csv, not
+# in the order-gate whitelist, and not in the candidate screen. Calling them
+# "ETFs" made a factor-model input read as a tradeable sleeve — which is exactly
+# the confusion that let a retired allocation look alive for four days.
+#
+# Lives HERE because several callers need it and a constant with two copies is a
+# divergence waiting to happen — see kwargs_from_config below.
+SECTOR_FACTORS = ["XLE", "XLF", "XLK", "XLV", "XLI", "XLP",
+                  "XLY", "XLU", "XLB", "XLRE", "XLC"]
 
 
 def kwargs_from_config(cfg, closes, spy=None, *, log=print) -> dict:
@@ -37,7 +46,7 @@ def kwargs_from_config(cfg, closes, spy=None, *, log=print) -> dict:
     keeps paying for. One function, every caller (2026-08-20).
 
     residual_tilt<=0 or residual_factors="none" -> {} (plain momentum).
-    "sector" -> {residual_tilt, factors=<the SPDR sector closes present>}.
+    "sector" -> {residual_tilt, factors=<the sector series present in the panel>}.
     "market" -> {residual_tilt, market=spy}.
     Missing sector data, an unknown mode, or an absent [signal] table all FAIL
     OPEN to {} (a plain rank) with a logged note — a ranking must never crash
@@ -54,9 +63,9 @@ def kwargs_from_config(cfg, closes, spy=None, *, log=print) -> dict:
             return {}
         return {"residual_tilt": tilt, "market": spy}
     if mode == "sector":
-        have = [s for s in SECTOR_ETFS if s in getattr(closes, "columns", [])]
+        have = [s for s in SECTOR_FACTORS if s in getattr(closes, "columns", [])]
         if not have:
-            log("  residual: no sector ETFs in price cache -> plain rank this run")
+            log("  residual: no sector factor series in price cache -> plain rank this run")
             return {}
         return {"residual_tilt": tilt, "factors": closes[have]}
     log(f"  residual: unknown residual_factors={mode!r} -> plain rank this run")
@@ -126,7 +135,7 @@ def residual_mom_multifactor(rets, factor_rets):
 
 def residual_momentum_sector(panel, asof, factor_panel, lookback: int = 252):
     """Multi-factor residual momentum per ticker as of `asof`, from a close-price
-    panel and a factor close-price panel (the sector ETFs). Empty if window short."""
+    panel and a factor close-price panel (the sector series). Empty if window short."""
     hist = panel.loc[:asof]
     if len(hist) < lookback + 1:
         return pd.Series(dtype=float)

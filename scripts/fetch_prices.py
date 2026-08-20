@@ -55,11 +55,27 @@ META = OUT_DIR / "fetch_meta.csv"
 
 
 def universe_tickers() -> list[str]:
+    """Every series the panel must carry: the tradeable universe + the price
+    series the signal and the regime observation READ but never trade.
+
+    ⛔ CHANGED 2026-08-20. This used to append config/etf_universe.csv — all 18
+    ETFs — because the retired sleeve was ranked from the same panel. The sleeve
+    and that file are gone. What remains is deliberately narrow and is NOT a
+    universe:
+
+      - residual.SECTOR_FACTORS (11 sector series): the residual-momentum tilt
+        regresses every name on these to separate a stock's own move from its
+        sector's. Drop them and the tilt silently degrades to plain momentum.
+      - SPY: the regime observation (price vs its 50-day mean), and the "market"
+        variant of the same tilt.
+
+    None of these is tradeable: they are absent from config/universe.csv and
+    therefore from governance.whitelist(), so a buy naming one is refused.
+    """
+    import residual                                       # noqa: PLC0415
     names = pd.read_csv(REPO / "config" / "universe.csv")["ticker"].tolist()
-    etfs = pd.read_csv(REPO / "config" / "etf_universe.csv")["ticker"].tolist()
-    # SPY = benchmark + regime proxy for $SPX. Dedupe, keep order.
-    tickers = list(dict.fromkeys(names + etfs + ["SPY"]))
-    return tickers
+    factors = list(residual.SECTOR_FACTORS) + ["SPY"]     # read-only series
+    return list(dict.fromkeys(names + factors))
 
 
 _FIELDS = ("open", "high", "low", "close", "turnover")

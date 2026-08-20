@@ -5,12 +5,14 @@ eyeball"). It does NOT trade, and since 2026-08-14 nothing executes its output
 unsupervised: the procedural fast loop was retired. What it writes is a PROPOSAL
 a session reads and judges, not a book that gets filled.
 
-  1. Load recent closes for the 150 names + 18 ETFs + SPY.
+  1. Load recent closes for the 150 single names + the read-only series the
+     signal needs (11 sector factors for the residual tilt, SPY for regime).
   2. Regime floor: SPY (proxy $SPX) > 50DMA  AND  VIX <= [regime].vix_ceiling
      (VIX from a live Schwab $VIX quote, FRED VIXCLS prior close as fallback;
      both unavailable -> gate skipped FAIL-OPEN, the trend floor still rules).
-  3. Rank both engines with the momentum signal (src/momentum.py).
-  4. Select the book (top-10, banded) + sleeve (top-4).
+  3. Rank the universe with the momentum signal (src/momentum.py).
+  4. Select the book (top book_hold, banded). EQUITIES ONLY — the ETF sleeve
+     was deleted 2026-08-20; there is no second engine.
   5. Attach IBD trade geometry per name (entry_zone, vol-adjusted stop, +5/+10%
      targets) and the reward:risk >= 2 gate — a name that can't be given >=2:1
      geometry is NOT held (STRATEGY.md §4); its slot stays cash.
@@ -118,11 +120,6 @@ def build_theses(sel, scored, closes, asof, per_slot, tm, start_rank):
     return held, dropped
 
 
-# ⛔ MOVED to src/residual.py 2026-08-20, along with residual_kwargs() below.
-# Re-exported here only so an existing import keeps working; do not add a second
-# definition. The agent-facing screen needs the same constant, and a constant
-# with two copies is how the two rankings drifted apart in the first place.
-SECTOR_ETFS = residual.SECTOR_ETFS
 
 
 class _SkipAccrual(Exception):
@@ -276,10 +273,15 @@ def protective_theses(owned: set, covered: set, scored, closes, asof, tm,
     return out
 
 
-def select_book(book_scored, etf_scored, held_book: set, held_etf: set,
-                P: dict, *, regime: bool, rotate: bool,
-                sleeve_enabled: bool = True, cooled=frozenset()) -> tuple[list, list]:
-    """Choose the book and sleeve. -> (book_sel, etf_sel).
+def select_book(book_scored, held_book: set, P: dict, *, regime: bool,
+                rotate: bool, cooled=frozenset()) -> list:
+    """Choose the book. -> book_sel (a list of symbols).
+
+    ⛔ THE SLEEVE ARGUMENTS ARE GONE (2026-08-20). This took `etf_scored`,
+    `held_etf` and `sleeve_enabled` and returned a second list. The sleeve was
+    retired 2026-08-16 and its positions sold 08-17, but the engine stayed here
+    behind a flag — so the code still read as a two-engine system to anyone
+    opening it. Deleted rather than disabled: equities only.
 
     ⛔ `regime` IS ACCEPTED AND DELIBERATELY UNUSED. It is a parameter so the
     selftest can call this twice -- regime on, regime off, everything else
@@ -303,31 +305,13 @@ def select_book(book_scored, etf_scored, held_book: set, held_etf: set,
     # Cooled names are dropped HERE, not from the scored frame, so a cooldown
     # cannot move anyone else's percentile score. Selection is byte-identical to
     # the previous behaviour: they were simply never in the frame before.
-    def _drop(frame):
-        if not len(frame) or not cooled:
-            return frame
-        return frame.drop(index=[t for t in cooled if t in frame.index])
-    book_scored, etf_scored = _drop(book_scored), _drop(etf_scored)
+    if len(book_scored) and cooled:
+        book_scored = book_scored.drop(
+            index=[t for t in cooled if t in book_scored.index])
     book_sel = mom.select(book_scored, held_book, P["book_hold"], P["book_band"])
-    # ⛔ SLEEVE RETIRED 2026-08-16 ([etf_sleeve] enabled = false). The ETF sleeve
-    # was a second rotation engine holding 4 ETFs at 30% of capital; judged
-    # redundant with the single-name book and a source of churn.
-    #
-    # ⚠️ ETFs ARE STILL SCORED, and must be. Four are HELD right now (XLE, XLK,
-    # IWM, XLV), and protective_theses() needs their scores to compute a stop for
-    # anything the agent holds. Skipping the SCORING rather than the SELECTION
-    # would leave four live positions with no enforced stop — the exact defect
-    # fixed on 2026-08-14. Selection is what stops; protection does not.
-    #
-    # Held ETFs therefore leave the weighted book, keep their stops, and the
-    # agent decides when to exit them. Nothing force-sells them.
-    etf_sel = (mom.select(etf_scored, held_etf, P["sleeve_hold"], P["sleeve_hold"])
-               if sleeve_enabled and P.get("sleeve_hold", 0) > 0 else [])
     if not rotate:
         book_sel = hold_selection(book_sel, book_scored, held_book)
-        if etf_sel:
-            etf_sel = hold_selection(etf_sel, etf_scored, held_etf)
-    return book_sel, etf_sel
+    return book_sel
 
 
 def hold_selection(sel: list, scored, held: set) -> list:
@@ -393,17 +377,12 @@ def _selftest() -> None:
         {"score": [3.0, 2.0, 1.0, 0.5], "rank": [1, 2, 3, 4],
          "eligible": [True, True, True, True]},
         index=["AAA", "BBB", "CCC", "DDD"])
-    etfs = pd.DataFrame(
-        {"score": [2.0, 1.0], "rank": [1, 2], "eligible": [True, True]},
-        index=["XLK", "XLE"])
-    PP = {"book_hold": 2, "book_band": 3, "sleeve_hold": 1}
+    PP = {"book_hold": 2, "book_band": 3}
 
     for rotate in (True, False):
-        for held_b, held_e in (({"CCC"}, {"XLE"}), (set(), set())):
-            on = select_book(scored, etfs, held_b, held_e, PP,
-                             regime=True, rotate=rotate)
-            off = select_book(scored, etfs, held_b, held_e, PP,
-                              regime=False, rotate=rotate)
+        for held_b in ({"CCC"}, set()):
+            on = select_book(scored, held_b, PP, regime=True, rotate=rotate)
+            off = select_book(scored, held_b, PP, regime=False, rotate=rotate)
             assert on == off, (
                 f"the regime moved the selection (rotate={rotate}, "
                 f"held={held_b}): on={on} off={off}")
@@ -416,24 +395,21 @@ def _selftest() -> None:
             if rotate:
                 assert off[0], "regime-off produced an empty book on a rotation night"
 
-    # ---- the sleeve switch must actually BIND ------------------------------
-    # ⚠️ `[etf_sleeve] enabled` was DECORATIVE until 2026-08-16 — nothing read
-    # it, so setting it false would have changed nothing while looking decisive.
-    # That is the same defect as `rebalance = "weekly"` (read by nothing while
-    # the book rotated nightly) and `no_chase`. So assert the switch changes the
-    # OUTPUT, not that the key exists.
-    PS = {"book_hold": 2, "book_band": 3, "sleeve_hold": 1}
-    on_b, on_e = select_book(scored, etfs, set(), set(), PS,
-                             regime=True, rotate=True, sleeve_enabled=True)
-    off_b, off_e = select_book(scored, etfs, set(), set(), PS,
-                               regime=True, rotate=True, sleeve_enabled=False)
-    assert on_e, "sleeve ON must still select ETFs"
-    assert off_e == [], f"sleeve OFF must select no ETFs, got {off_e}"
-    assert on_b == off_b, "the sleeve switch must not disturb the equity book"
-    # sleeve_hold=0 alone is enough to retire it, even if `enabled` is left true
-    _, zero_e = select_book(scored, etfs, set(), set(), {**PS, "sleeve_hold": 0},
-                            regime=True, rotate=True, sleeve_enabled=True)
-    assert zero_e == [], "sleeve_hold=0 must select nothing"
+    # ---- THERE IS NO SLEEVE, AND IT CANNOT COME BACK -----------------------
+    # `[etf_sleeve] enabled` was decorative until 2026-08-16, then a false flag
+    # guarding live code until 2026-08-20. Both states let a retired allocation
+    # read as part of the system. It is deleted now, so assert the SHAPE: this
+    # function returns one list, takes no sleeve arguments, and a stale
+    # [etf_sleeve] table left in a local override cannot resurrect it.
+    import inspect as _inspect
+    _sig = _inspect.signature(select_book)
+    for gone in ("etf_scored", "held_etf", "sleeve_enabled"):
+        assert gone not in _sig.parameters, f"the sleeve argument {gone!r} came back"
+    _one = select_book(scored, set(), PP, regime=True, rotate=True)
+    assert isinstance(_one, list) and all(isinstance(x, str) for x in _one), _one
+    # (Deliberately NOT a source-text scan for the old universe filename: an
+    # assertion containing the string it searches for is the vacuous selftest
+    # OPSLOG 2026-08-14 records. The signature check above is behavioural.)
 
     # ⛔ ...AND THE REST OF THE PIPELINE CANNOT REINTRODUCE IT. The test above
     # proves select_book() ignores the regime; the reviewer pointed out that
@@ -553,14 +529,11 @@ def _selftest() -> None:
                         "sigma": [0.02, 0.02, 0.02],
                         "eligible": [True, True, True]},
                        index=["AAA", "COOL", "CCC"])
-    ecs = pd.DataFrame(columns=["score", "rank", "sigma", "eligible"])
-    PC = {"book_hold": 2, "book_band": 3, "sleeve_hold": 0}
-    sel_cool, _ = select_book(csc, ecs, set(), set(), PC, regime=True,
-                              rotate=True, sleeve_enabled=False,
-                              cooled={"COOL"})
+    PC = {"book_hold": 2, "book_band": 3}
+    sel_cool = select_book(csc, set(), PC, regime=True, rotate=True,
+                           cooled={"COOL"})
     assert sel_cool == ["AAA", "CCC"], f"cooled name must not be selected: {sel_cool}"
-    sel_free, _ = select_book(csc, ecs, set(), set(), PC, regime=True,
-                              rotate=True, sleeve_enabled=False)
+    sel_free = select_book(csc, set(), PC, regime=True, rotate=True)
     assert sel_free == ["AAA", "COOL"], f"without cooldown the top 2 stand: {sel_free}"
     # ...and select_book must not have MUTATED the caller's scored frame -- the
     # snapshot, the rank diff and protective geometry all read it afterwards.
@@ -636,7 +609,6 @@ def main() -> None:
                  "network); refusing to rebuild the book off empty data. "
                  "Fix the fetch, then run scripts/fetch_prices.py --force.")
     names = [t for t in pd.read_csv(REPO / "config" / "universe.csv")["ticker"] if t in closes]
-    etfs = [t for t in pd.read_csv(REPO / "config" / "etf_universe.csv")["ticker"] if t in closes]
     asof = closes.index[-1]
     spy = closes["SPY"]
 
@@ -670,10 +642,9 @@ def main() -> None:
     if rk:
         print(f"  signal: residual tilt={rk['residual_tilt']} "
               f"factors={cfg['signal'].get('residual_factors')} "
-              f"({len(rk['factors'].columns)} ETFs)" if "factors" in rk
+              f"({len(rk['factors'].columns)} sector series)" if "factors" in rk
               else f"  signal: residual tilt={rk['residual_tilt']} factors=market(SPY)")
     book_scored = mom.compute(closes[names], asof, **rk)
-    etf_scored = mom.compute(closes[etfs], asof)
 
     # ---- RECORD THE RE-RANK ------------------------------------------------
     # This runs every night. Until 2026-08-20 the result was DISCARDED on six
@@ -722,19 +693,12 @@ def main() -> None:
     prev = read_current()
     held_book = {t.symbol for t in prev.theses
                  if t.target_weight > 0 and t.rank < 100} if prev else set()
-    held_etf = {t.symbol for t in prev.theses
-                if t.target_weight > 0 and t.rank >= 100} if prev else set()
 
     # ROTATE ONLY WHEN DUE. Geometry, stops, earnings and marks still refresh
     # below every night -- it is the SELECTION that is weekly. See rotation_due.
     rotate = rotation_due(cfg)
-    sleeve_on = bool(cfg.get("etf_sleeve", {}).get("enabled", True))
-    book_sel, etf_sel = select_book(book_scored, etf_scored, held_book, held_etf,
-                                    P, regime=regime, rotate=rotate,
-                                    sleeve_enabled=sleeve_on, cooled=cooled)
-    if not sleeve_on:
-        print("  sleeve: RETIRED ([etf_sleeve] enabled=false) — equities only. "
-              "Held ETFs keep their stops via protective geometry.")
+    book_sel = select_book(book_scored, held_book, P, regime=regime,
+                           rotate=rotate, cooled=cooled)
     if not rotate:
         print("  rotation: not due (weekly) — holding the book, geometry refreshed")
     # ⛔ THE REGIME DOES NOT FILTER THE SELECTION. It is recorded on the product
@@ -757,11 +721,9 @@ def main() -> None:
     per_book = P["book_weight"] / P["book_hold"]
     # sleeve_hold is 0 once the sleeve is retired — guard the division rather
     # than letting a retired config crash the nightly run.
-    per_etf = (P["sleeve_weight"] / P["sleeve_hold"]) if P.get("sleeve_hold") else 0.0
     book_held, book_drop = build_theses(book_sel, book_scored, closes, asof, per_book, TM, 1)
-    etf_held, etf_drop = build_theses(etf_sel, etf_scored, closes, asof, per_etf, TM, 100)
 
-    theses = book_held + etf_held
+    theses = list(book_held)
 
     # ---- protect what the AGENT holds, not only what this loop picked -------
     # The base stop the monitor enforces comes from a thesis. Until now one
@@ -776,8 +738,6 @@ def main() -> None:
     else:
         covered = {t.symbol for t in theses}
         extra = protective_theses(owned, covered, book_scored, closes, asof, TM, 200)
-        extra += protective_theses(owned, covered | {t.symbol for t in extra},
-                                   etf_scored, closes, asof, TM, 300)
 
         # ⛔ HELD, BUT IN NEITHER RANKED UNIVERSE -> would get NO STOP.
         # Both passes above can only reach a name present in a scored frame, and
@@ -800,7 +760,7 @@ def main() -> None:
                  if s not in covered
                  and s not in {t.symbol for t in extra}
                  and s in closes.columns
-                 and s not in book_scored.index and s not in etf_scored.index}
+                 and s not in book_scored.index}
         if stray:
             print(f"  ⚠️ held but outside both universes: {sorted(stray)} — "
                   f"scoring them anyway so the monitor has a stop")
@@ -850,7 +810,7 @@ def main() -> None:
     # ---- report ----
     print(f"as_of {asof.date()} | regime {'ON' if regime else 'OFF (observation only)'} "
           f"(trend={trend}, vix={f'{vix:.1f}' if vix is not None else 'n/a'}/{ceiling:g}) | "
-          f"book {len(book_held)}/{P['book_hold']} held, sleeve {len(etf_held)}/{P['sleeve_hold']} held")
+          f"book {len(book_held)}/{P['book_hold']} held")
     _soon = [t.symbol for t in theses if t.earnings_date
              and t.earnings_date <= str((asof + pd.Timedelta(days=5)).date())]
     print(f"earnings: {n_stamped}/{len(theses)} dated"
@@ -865,15 +825,6 @@ def main() -> None:
     if book_drop:
         print(f"  -- dropped for geometry (stop too wide for 2:1): "
               + ", ".join(f"{s}(σ={sg:.1%})" for s, _, sg in book_drop))
-    # Printed an empty SLEEVE table every run after the sleeve was retired.
-    _sh = (cfg.get("portfolio") or {}).get("sleeve_hold") or 0
-    if _sh or etf_held:
-        print(f"\n{f'SLEEVE (top-{_sh})':40}{'weight':>8}{'entry':>9}{'stop':>9}{'R:R':>6}")
-    for t in etf_held:
-        print(f"  {t.symbol:<8}{t.thesis[:28]:<30}{t.target_weight:>8.2%}"
-              f"{(t.entry_zone[0]+t.entry_zone[1])/2:>9.2f}{t.stop:>9.2f}{reward_risk(t):>6.2f}")
-    if etf_drop:
-        print("  -- dropped: " + ", ".join(s for s, _, _ in etf_drop))
     total_w = sum(t.target_weight for t in theses)
     print(f"\ntotal invested weight {total_w:.0%} | cash {1-total_w:.0%}")
 

@@ -49,13 +49,11 @@ def rank_book(panel, asof, book_tickers: list, cfg=None):
        `momentum.compute()` bare. Same names, different signal, different sort.
        Now both go through `residual.kwargs_from_config()` — one implementation.
 
-    2. **ETFs were pooled into the ranking.** The sleeve was retired 2026-08-16
-       and the last four ETFs were sold 2026-08-17, but the agent-facing screen
-       still ranked 18 ETFs alongside the 150 single names. That is not a
-       cosmetic surplus: `score` is a PERCENTILE rank, so who is in the pool
-       DEFINES it. ETFs carry structurally lower sigma, so they flattered
-       themselves on R/sigma and shifted every single name's percentile. The
-       ranked list is single names now.
+    2. **Funds were pooled into the ranking.** 18 index products were ranked
+       alongside the 150 single names. That is not a cosmetic surplus: `score`
+       is a PERCENTILE rank, so who is in the pool DEFINES it. A diversified
+       basket carries structurally lower sigma, so it flattered itself on
+       R/sigma and shifted every single name's percentile. Single names only.
 
     ⚠️ ETFs are still *priced*, and that is a different thing from being
     ranked. The residual tilt REGRESSES on the 11 SPDR sector ETFs and the
@@ -129,10 +127,10 @@ def _selftest() -> None:
                            plain["score"].sort_index().values), \
         "tilt changed nothing — the equality above would be vacuous"
 
-    # NO ETF may appear in the ranked list. The sleeve is retired; ETFs are
-    # regression factors, not candidates.
+    # NO factor series may appear in the ranked list — they are regression
+    # inputs, not candidates, and are not tradeable.
     assert not (set(got.index) & set(etf_t)), \
-        f"ETFs leaked into the ranked candidate list: {sorted(set(got.index) & set(etf_t))}"
+        f"factor series leaked into the ranked list: {sorted(set(got.index) & set(etf_t))}"
 
     # ...but their PRICES must still be load-bearing: strip the sector columns
     # and the tilt has nothing to regress on, so the rank changes.

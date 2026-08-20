@@ -7,7 +7,7 @@ dollar-volume and take the top 150 AS OF THAT DATE. A name that was liquid in
 2021 and died in 2023 is therefore eligible in 2021-2022 and the book can hold
 it straight into its collapse — exactly what the biased backtest could never do.
 
-Everything else (the momentum signal, the 70/30 book/sleeve, the band, the
+Everything else (the momentum signal, the single-name book, the band, the
 regime floor) is identical and reuses scripts/backtest.py + src/momentum.py.
 
     python scripts/backtest_pit.py
@@ -60,7 +60,7 @@ def pit_universe(dvol: pd.DataFrame, candidates: list[str], asof, closes: pd.Dat
 
 def _load_pit_data():
     """Load the survivorship-free pool + config once, shared by main() and
-    run_sweep(). Returns (closes, dvol, candidates, etfs, spy, etf_panel, rebals, P)."""
+    run_sweep(). Returns (closes, dvol, candidates, spy, rebals, P)."""
     if not (PRICES / "pool_closes.parquet").exists():
         sys.exit("no pool cache — run scripts/fetch_pool.py first")
     cfg = strat.load()
@@ -69,27 +69,35 @@ def _load_pit_data():
     closes = pd.read_parquet(PRICES / "pool_closes.parquet").sort_index()
     dvol = pd.read_parquet(PRICES / "pool_dvol.parquet").sort_index()
     pool = pd.read_csv(REPO / "config" / "pit_pool.csv")
-    etfs = [t for t in pd.read_csv(REPO / "config" / "etf_universe.csv")["ticker"] if t in closes]
-    # single-name candidates = pool minus the ETF sleeve (and minus SPY proxy)
-    etfset = set(etfs) | {"SPY"}
-    candidates = [t for t in pool["ticker"] if t in closes and t not in etfset]
+    # Candidates = the pool minus the read-only series. config/pit_pool.csv no
+    # longer carries funds (2026-08-20 — it is also the weekly screen's fallback
+    # candidate pond), but SPY and the sector factors may still be columns in the
+    # cached parquet, so exclude them explicitly rather than trusting the file.
+    import residual                                          # noqa: PLC0415
+    not_tradeable = set(residual.SECTOR_FACTORS) | {"SPY"}
+    candidates = [t for t in pool["ticker"] if t in closes and t not in not_tradeable]
     spy = closes["SPY"]
-    etf_panel = closes[etfs]
 
     rebals = bt.weekly_rebalance_dates(closes.index)
     rebals = [d for d in rebals if len(closes.loc[:d]) >= mom.LOOKBACK + 5]
-    return closes, dvol, candidates, etfs, spy, etf_panel, rebals, P
+    return closes, dvol, candidates, spy, rebals, P
 
 
-def run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cap_params=None, residual_tilt: float = 0.0, factors=None):
+def run_backtest(closes, dvol, candidates, spy, rebals, P, cap_params=None,
+                 residual_tilt: float = 0.0, factors=None):
     """One PIT backtest run. cap_params=None -> baseline (equal slots, no cap);
-    a params dict -> concentration.cap_weights applied to each week's weights."""
-    book_w, sleeve_w = P["book_weight"], P["sleeve_weight"]
-    book_hold, book_band, sleeve_hold = P["book_hold"], P["book_band"], P["sleeve_hold"]
-    per_slot_book = book_w / book_hold
-    per_slot_etf = (sleeve_w / sleeve_hold) if sleeve_hold else 0.0
+    a params dict -> concentration.cap_weights applied to each week's weights.
 
-    held_book, held_etf = set(), set()
+    ⛔ SINGLE-ENGINE since 2026-08-20. This modelled a 70/30 single-name/ETF
+    sleeve; the sleeve was retired 2026-08-16, sold 08-17 and deleted 08-20, so
+    the two-engine numbers described a system that no longer runs. Results from
+    before that date are NOT comparable with results after it.
+    """
+    book_w = P["book_weight"]
+    book_hold, book_band = P["book_hold"], P["book_band"]
+    per_slot_book = book_w / book_hold
+
+    held_book = set()
     equity = 1.0
     curve, turnover, univ_sizes, dead_held = [], [], [], []
     for i in range(len(rebals) - 1):
@@ -102,18 +110,11 @@ def run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cap_
         new_book = mom.select(book_scored, held_book, book_hold, book_band)
         if not regime:
             new_book = [t for t in new_book if t in held_book]
-        if sleeve_hold > 0:
-            etf_scored = mom.compute(etf_panel, t0)
-            new_etf = mom.select(etf_scored, held_etf, sleeve_hold, sleeve_hold)
-        else:
-            new_etf = []
-
-        turnover.append(len(set(new_book) ^ held_book) + len(set(new_etf) ^ held_etf))
-        held_book, held_etf = set(new_book), set(new_etf)
+        turnover.append(len(set(new_book) ^ held_book))
+        held_book = set(new_book)
 
         # equal slots -> optional concentration cap -> per-name weights
         weights = {t: per_slot_book for t in new_book}
-        weights.update({t: per_slot_etf for t in new_etf})
         if cap_params is not None:
             weights = conc.cap_weights(weights, closes, t0, cap_params)
 
@@ -131,9 +132,9 @@ def run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cap_
                              if pd.notna(closes.loc[t0, t]) and pd.isna(closes.loc[t1, t])))
         port_ret = sum(wt * name_ret(t) for t, wt in weights.items())
         equity *= (1 + port_ret)
-        curve.append((t1, equity, port_ret, len(new_book), len(new_etf), regime))
+        curve.append((t1, equity, port_ret, len(new_book), regime))
 
-    res = pd.DataFrame(curve, columns=["date", "equity", "ret", "n_book", "n_etf", "regime"]
+    res = pd.DataFrame(curve, columns=["date", "equity", "ret", "n_book", "regime"]
                        ).set_index("date")
     cagr, vol, sharpe = bt.annualized(res["ret"], 52.0)
     return {"res": res, "cagr": cagr, "vol": vol, "sharpe": sharpe,
@@ -145,11 +146,11 @@ def run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cap_
 
 
 def main() -> None:
-    (closes, dvol, candidates, etfs, spy, etf_panel, rebals, P) = _load_pit_data()
-    print(f"pool: {len(candidates)} single-name candidates + {len(etfs)} ETFs | "
+    (closes, dvol, candidates, spy, rebals, P) = _load_pit_data()
+    print(f"pool: {len(candidates)} single-name candidates | "
           f"{len(rebals)} weekly rebalances {rebals[0].date()}..{rebals[-1].date()}")
 
-    r = run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, None)
+    r = run_backtest(closes, dvol, candidates, spy, rebals, P, None)
     res = r["res"]
     bench = spy.loc[res.index[0]:res.index[-1]].reindex(res.index).ffill()
     bench_eq = bench / bench.iloc[0]
@@ -197,8 +198,8 @@ def run_sweep(per_name_cap=None):
     [risk] max_weight_per_name) makes the sweep enforce the SAME ceiling live will —
     so a config's numbers here are the numbers live would produce. None reproduces
     the unbounded Phase-1 table."""
-    (closes, dvol, candidates, etfs, spy, etf_panel, rebals, P) = _load_pit_data()
-    base = run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, None)
+    (closes, dvol, candidates, spy, rebals, P) = _load_pit_data()
+    base = run_backtest(closes, dvol, candidates, spy, rebals, P, None)
     ceil_note = f"  [per-name ceiling {per_name_cap:.0%}]" if per_name_cap is not None else ""
     print(f"\n{'config':28}{'CAGR':>8}{'Sharpe':>8}{'maxDD':>8}{'turn':>7}{ceil_note}")
     print("-" * 59)
@@ -209,7 +210,7 @@ def run_sweep(per_name_cap=None):
         cp = {"lookback": lb, "corr_threshold": th, "cluster_cap": cap}
         if per_name_cap is not None:
             cp["per_name_cap"] = per_name_cap
-        r = run_backtest(closes, dvol, candidates, etfs, spy, etf_panel, rebals, P, cp)
+        r = run_backtest(closes, dvol, candidates, spy, rebals, P, cp)
         tag = f"lb{lb} thr{th} cap{int(cap*100)}"
         print(f"{tag:28}{r['cagr']:>7.1%}{r['sharpe']:>8.2f}"
               f"{r['maxdd']:>8.1%}{r['avg_turnover']:>7.1f}"

@@ -31,8 +31,7 @@ breaks, since long-only has no short leg to hedge you.
 ## 2. Universe — the single-name pool, rescreened weekly
 
 ⚠️ This section described **two parallel engines** until 2026-08-20. There is
-one: the single-name book. The ETF sleeve was retired 2026-08-16 and its four
-positions sold 2026-08-17.
+one: the single-name book. Equities only.
 
 - **Single-name book** — the 150 in [`config/universe.csv`](../config/universe.csv),
   **rescreened every Friday** (17:00 ET) on trailing dollar-volume by
@@ -44,13 +43,13 @@ positions sold 2026-08-17.
   Respect the `flag` column: `fresh-ipo` (e.g. SpaceX) has no 12-month history —
   it is **unrankable until it seasons**; skip it, don't crash on it. `adr` /
   `micro` / `spec` are tradeable but note them.
-- ~~**ETF sleeve**~~ — **RETIRED 2026-08-16** (see §4). ⛔ **The 18 in
-  [`config/etf_universe.csv`](../config/etf_universe.csv) are NOT in your ranked
-  candidate list** — `candidates()` and `universe()` return single names only as
-  of 2026-08-20. They had been pooled into the same percentile rank, which both
-  re-elevated a retired allocation and distorted every stock's score. They are
-  still *scoreable* and still tradeable if you have a reason, but they no longer
-  receive an allocation and are not put in front of you as candidates. The design
+- ~~**ETF sleeve**~~ — **DELETED 2026-08-20** (retired 08-16, positions sold
+  08-17). ⛔ **You cannot buy a fund.** `config/etf_universe.csv` is gone, the
+  order gate's whitelist is the single-name universe alone, and a buy naming a
+  fund is refused like any other off-universe symbol. (A SELL is never refused.)
+  You will still see sector tickers in the price panel: the signal regresses
+  each name on its sector to measure its own strength. That is read-only market
+  data, not an instrument. The design
   intent was that the defensive assets (GLD, TLT, AGG) sat *inside* the rank, so
   that when equities weakened they rose to the top and you rotated into them —
   a built-in off-switch destination. With the sleeve retired there is no
@@ -101,14 +100,11 @@ authoritative — read `[portfolio]` rather than trusting this paragraph.**
   sleeve in config does not sell anything, so that was a separate decision.
   Note `book_hold` moved 10 → 14 at the same time, deliberately: dropping the
   sleeve would otherwise have concentrated per-name size from ~7% to 10%.
-- **ETFs are still SCORED — for three specific reasons, none of which is
-  "rank them as candidates".** `config/etf_universe.csv` stays because the
-  residual-momentum tilt regresses on the 11 SPDR sectors, the order gate's
-  whitelist needs held ETFs to be nameable, and a live ETF position with no
-  computable stop would be unprotected. What was retired is the sleeve as an
-  *allocation*, not ETFs as instruments — and since 2026-08-20 they are also out
-  of the ranked candidate list, which is what "retired as an allocation" should
-  always have meant in practice.
+- **The sleeve is deleted, not disabled.** `[etf_sleeve]`, the sleeve keys in
+  `[portfolio]`, the second ranking engine and `config/etf_universe.csv` are all
+  gone as of 2026-08-20. What survives is the 11 sector **price series** the
+  residual tilt regresses on (`src/residual.py:SECTOR_FACTORS`) and SPY for the
+  regime line — factor inputs, not holdings.
 - **Sizing:** obey the `[risk]` mandate in `strategy.toml` — ≤10% per name,
   ≤`max_holdings` holdings, ≤100% invested, and **reward:risk ≥ 2:1** (the
   Research Store rejects any thesis that violates this on write; if a name can't

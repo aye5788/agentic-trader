@@ -9,6 +9,97 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-20 (later) — the ETF sleeve is DELETED, not disabled
+
+Aaron, on being shown that the independent reviewer kept discussing ETFs:
+*"WTF is this with the sector series?"* and *"I want it gone like it was supposed
+to be two days ago when we retired it."* He was right, and the reviewer was only
+talking about ETFs because the repo was still full of them.
+
+**What "retired" had actually meant.** On 2026-08-16 the sleeve was retired by
+setting `[etf_sleeve] enabled = false`; on 08-17 its four positions were sold.
+Everything else stayed: an `[etf_sleeve]` config table, an 18-name universe
+file, a second ranking engine inside `slow_loop.select_book()`, ETFs in the
+order-gate whitelist, ETFs pooled into the agent's candidate screen, a `sleeve`
+field in the investor letter, a SLEEVE table in the run report, and an "ETF
+sleeve" clause in the CHARTER — the agent's entire standing account of the game
+it is playing. A retirement that leaves the mechanism in place is not a
+retirement. It is a dormant feature that reads as live to every later reader,
+human or model, which is exactly how a second model came to spend an audit
+discussing an allocation that had been dead for four days.
+
+**Deleted:** `config/etf_universe.csv`, the `[etf_sleeve]` table, `sleeve_hold`
+/ `sleeve_weight` from `[portfolio]`, the sleeve arguments and second engine in
+`select_book()`, the ETF branch of `protective_theses`, `_all_tickers()` (which
+had zero callers), the letter's always-false `sleeve` field, the empty SLEEVE
+report table, and the sleeve clauses in `charter.py` + `prompts/charter.md`.
+The backtests (`backtest.py`, `backtest_pit.py`, `sweep.py`) modelled a 70/30
+two-engine book and now model the one that runs — ⚠️ **their numbers are not
+comparable with anything published before today.**
+
+**The whitelist is the part that bites.** `governance.whitelist()` was
+`universe ∪ etf_sleeve`, and the config's stated reason for keeping the ETF half
+was *"four are HELD right now"* — sold on 08-17, which voided the reason and
+left the entry. It is the single-name universe alone now, so **a buy naming a
+fund is refused**. A SELL is refused by nothing but the kill switch, unchanged:
+blocking one would strip a position of its only protection. Pinned by a test
+that forces both sides through `vet_plan` and by one asserting a stale
+`[etf_sleeve]` table in a local override cannot re-open it.
+
+### The hole that would have undone all of it, found by asking
+
+Aaron: *"check the screen the universe is built from to make sure it is
+screening equities only."* It was not.
+
+The weekly screen's ADDs come from a candidate pond that is moomoo's market-cap
+screen — **documented as UNFILTERED**, so funds, preferred shares and SPAC units
+all rank (`docs/DATA_SOURCES.md` §5e) — falling back to `config/pit_pool.csv`,
+which `build_pool.py` had been stuffing with all 18 ETFs by construction. The
+only guard was `_looks_like_common_stock()`, a regex that **`SPY`, `GLD` and
+`XLK` all pass**. An ADD is written into `config/universe.csv`, which IS the
+order-gate whitelist. So the Friday screen could have put a fund straight back
+into the tradeable universe and silently undone the deletion by another route.
+
+Fixed in layers, the real one first:
+
+1. **A positive test, not a denylist.** moomoo serves NO `total_market_val` for
+   a fund — the documented cause of the capital-flow ETF null (OPSLOG
+   2026-07-28). `universe_refresh` probes the actual add candidates and rejects
+   anything without a market cap. Injected as a predicate so it is testable
+   without OpenD, and it **fails closed**: an unverifiable candidate falls back
+   to the name-shape check rather than being added on trust.
+2. **A `NON_EQUITY` denylist backstop**, because a denylist can only exclude the
+   funds someone remembered to list.
+3. **The filter moved into the ADD PATH**, not merely a HOLD reason in
+   `classify()` — a screen that only flagged a fund would still have made it
+   buyable the moment a human approved an otherwise routine weekly proposal.
+   Rejections are reported (`rejected_non_equity`), never silent.
+4. **The pond source cleaned:** `build_pool.py` no longer folds funds in, and
+   the 18 were removed from the committed `config/pit_pool.csv` (816 -> 798).
+
+### What was NOT deleted, and why the name changed
+
+The residual-momentum tilt (`[signal] residual_tilt = 0.75`, adopted 2026-07-24
+on the PIT backtest) regresses every name on 11 sector return series to separate
+a stock's own move from its sector's. Those are **factor inputs**: nothing can
+buy, sell or hold them, they are not in the universe, not in the whitelist and
+not in the screen. Aaron: *"fine then leave it but it shouldn't be using 'ETF',
+that muddies things."* Correct — calling a factor-model input an ETF is what let
+a deleted allocation look alive. `SECTOR_ETFS` is now **`SECTOR_FACTORS`**, and
+`fetch_prices` builds its list from that constant plus SPY (the regime series)
+rather than from a universe file.
+
+Deleting those columns would not remove an allocation — it would silently drop
+the signal to plain momentum with only a printed note. That remains a one-line
+choice (`residual_tilt = 0.0`) and it is the principal's, not a side effect of
+tidying.
+
+**Verified, not assumed:** whitelist = 150 names, 0 funds; `candidates()` returns
+single names only; the slow loop runs equities-only with the tilt alive
+(`11 sector series`); a fund BUY is refused and a fund SELL is not; no live code
+reads the deleted file. ALL SELFTESTS PASSED, repo_checks PASS.
+
+
 ## 2026-08-20 — the candidate pipeline was doing work nobody could see
 
 Aaron, on being walked through how the ranking is maintained: *"this whole

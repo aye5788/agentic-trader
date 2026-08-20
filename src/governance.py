@@ -211,10 +211,26 @@ def cooldown_until(symbol: str, today: str | None = None,
 
 
 def whitelist(cfg) -> set[str]:
+    """Symbols a BUY may name. Buy-only: a sell is never refused by this.
+
+    ⛔ ETFs ARE NOT IN IT (2026-08-20). This used to be
+    `universe ∪ etf_sleeve`, and the config's stated reason for keeping the ETF
+    half was "four are HELD right now" — they were sold on 2026-08-17, which
+    voided the reason and left the entry. The sleeve is deleted, so an ETF is no
+    longer a thing this system buys.
+
+    The 11 SPDR sector series survive as residual-tilt FACTORS
+    (src/residual.py:SECTOR_FACTORS) and SPY as the regime observation. Being a
+    factor is not being tradeable: they are deliberately absent here, so naming
+    one in a buy is refused like any other off-universe symbol.
+
+    A stale `[etf_sleeve]` table in a local override is IGNORED rather than
+    honoured — re-adding it must not silently re-open the whitelist.
+    """
     def col(path):
         return {ln.split(",")[0].strip()
                 for ln in (REPO / path).read_text().splitlines()[1:] if ln.strip()}
-    return col(cfg["universe"]["source"]) | col(cfg["etf_sleeve"]["source"])
+    return col(cfg["universe"]["source"])
 
 
 def assert_agentic_account(accounts, snapshot_account: str | None = None) -> str:
@@ -560,7 +576,27 @@ def _selftest() -> None:
             assert apply_entry_halts([buy, sell], []) == ([buy, sell], [])
 
             # 7. whitelist + order cap; the cap applies to buys only
-            assert whitelist(cfg) == {"AAPL", "MSFT", "XLK"}
+            #
+            # ⛔ ETFs ARE NOT WHITELISTED (2026-08-20). This asserted
+            # {"AAPL","MSFT","XLK"} while the whitelist was universe ∪
+            # etf_sleeve. The sleeve is deleted, so XLK must NOT appear even
+            # though config/etf_universe.csv is still present in this fixture
+            # and even though the fixture cfg still carries an [etf_sleeve]
+            # table — a stale local override must not silently re-open it.
+            assert whitelist(cfg) == {"AAPL", "MSFT"}, whitelist(cfg)
+            assert "XLK" not in whitelist(cfg), "a retired sleeve must not be buyable"
+
+            # ...and that has to BITE at the gate, buys only: naming an ETF in a
+            # BUY is refused like any other off-universe symbol, while a SELL is
+            # untouched. Blocking a sell would strip a position of its only
+            # protection (the stop here is software).
+            etf_appr, etf_blkd = vet_plan(
+                [{"symbol": "XLK", "side": "buy", "amount": 1.0},
+                 {"symbol": "XLK", "side": "sell", "amount": 1.0}], 100.0, cfg)
+            assert [o["symbol"] for o in etf_appr] == ["XLK"], etf_appr
+            assert etf_appr[0]["side"] == "sell", "an ETF SELL must never be refused"
+            assert len(etf_blkd) == 1 and etf_blkd[0]["side"] == "buy", etf_blkd
+            assert "not in whitelist" in etf_blkd[0]["blocked"], etf_blkd
             appr, blkd = vet_plan(
                 [{"symbol": "NVDA", "side": "buy", "amount": 1.0},      # off-universe
                  {"symbol": "AAPL", "side": "buy", "amount": 20.0},     # > 15% of 100

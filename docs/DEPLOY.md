@@ -132,7 +132,9 @@ before this touches money:
      tracked peak (`[governance] max_drawdown`). Blocks entries only — it can
      never block an exit.
    - **Order cap:** rejects any single order >15% of account value.
-   - **Whitelist:** only names in `config/universe.csv` + `etf_universe.csv`.
+   - **Whitelist:** only names in `config/universe.csv` (single names). The ETF
+     sleeve and its universe file were deleted 2026-08-20, so a buy naming a
+     fund is refused; a SELL is never refused by the whitelist.
 
 ## Dashboard (Cloudflare Tunnel + in-app auth)
 

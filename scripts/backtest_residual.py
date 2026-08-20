@@ -37,7 +37,7 @@ def _row(r, base_cagr):
 
 
 def main() -> None:
-    data = pit._load_pit_data()   # (closes, dvol, candidates, etfs, spy, etf_panel, rebals, P)
+    data = pit._load_pit_data()   # (closes, dvol, candidates, spy, rebals, P)
     closes = data[0]
     sect = [s for s in SECTORS if s in closes.columns]
     factor_panel = closes[sect]

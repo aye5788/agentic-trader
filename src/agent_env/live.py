@@ -663,12 +663,14 @@ def sectors(symbols) -> dict:
             if ret == mo.RET_OK:
                 rows = df.to_dict("records")
             else:
-                # ⚠️ ETFs are NOT supported by this endpoint, and ONE ETF fails
-                # the whole batch -- the error names no symbol, unlike the
-                # snapshot's "Unknown stock. X", so there is nothing to drop and
-                # retry. Fall back to per-symbol calls and record which are
-                # unsupported, rather than returning nothing for a book that is
-                # part single names and part sleeve ETFs (ours always is).
+                # ⚠️ Funds/index products are NOT supported by this endpoint,
+                # and ONE unsupported symbol fails the whole batch -- the error
+                # names no symbol, unlike the snapshot's "Unknown stock. X", so
+                # there is nothing to drop and retry. Fall back to per-symbol
+                # calls and record which are unsupported. The book is single
+                # names only since 2026-08-20, so this should now be rare -- but
+                # a manually-bought fund would still land here, and returning
+                # nothing for the whole book would be the wrong failure.
                 for c in codes[:_MAX_PLATE_FALLBACK]:
                     _pace("plate")
                     r1, d1 = q.get_owner_plate([c])
@@ -695,8 +697,8 @@ def sectors(symbols) -> dict:
            "no_industry_plate": missing}
     if unsupported:
         res["unsupported"] = unsupported
-        res["note"] = ("ETFs have no industry plate — an empty result for a "
-                       "sleeve ETF is expected, not a failure.")
+        res["note"] = ("Funds and index products have no industry plate — an "
+                       "empty result for one is expected, not a failure.")
     return res
 
 

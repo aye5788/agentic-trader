@@ -168,23 +168,17 @@ def main() -> None:
     prod = read_current()
     theses = {t.symbol: t for t in prod.theses} if prod else {}
 
-    # ⛔ WHAT "SLEEVE" MEANS. This used to be `rank >= 100`, which was true only
-    # while the ETF sleeve occupied a rank band above 100. It stopped being true
-    # twice over: slow_loop.protective_theses() now assigns rank 200 to a name
-    # the AGENT bought that the ranking did not select (full geometry,
-    # target_weight 0.0, purely so the monitor can watch it), and the sleeve
-    # itself was retired 2026-08-16. On 2026-08-18 that made MRK -- a pharma
-    # stock bought the previous session -- read as an ETF sleeve position in
-    # facts.json. Membership is a property of the SYMBOL, so read it from the
-    # ETF universe rather than inferring it from a rank sentinel.
-    etf_symbols = set()
-    try:
-        for i, line in enumerate((REPO / "config" / "etf_universe.csv")
-                                 .read_text().splitlines()):
-            if i and line.strip():
-                etf_symbols.add(line.split(",")[0].strip().upper())
-    except Exception:                                            # noqa: BLE001
-        etf_symbols = set()
+    # ⛔ THE `sleeve` FIELD IS GONE (2026-08-20). It classified a position as
+    # ETF-sleeve or not. The sleeve was retired 2026-08-16, its positions sold
+    # 08-17, and the whole mechanism deleted 08-20 -- so every value it could
+    # report is now False, and a field that is always False in an investor
+    # letter is worse than absent: it implies the distinction still exists.
+    #
+    # (Kept as a note because the bug it fixed is instructive: the field was
+    # once inferred from `rank >= 100`, which had been the sleeve's rank band.
+    # protective_theses() later started assigning rank 200 to agent-bought
+    # names, so on 2026-08-18 MRK -- a pharma stock -- was reported as an ETF
+    # sleeve position. A sentinel that encodes two meanings encodes neither.)
 
     # --- D4: how far each position RAN, and how much of it is protected ------
     # The single most important risk fact in the book, and the letter could not
@@ -263,7 +257,6 @@ def main() -> None:
                 p.get("avg_cost"), p.get("mark"), _eff_stop.get(symbol)),
             "symbol": symbol,
             "rank": t.rank if t else None,
-            "sleeve": (symbol.upper() in etf_symbols) if etf_symbols else None,
             # A thesis carrying rank>=100 AND zero target weight is not a
             # recommendation: the loop did not select this name, the AGENT
             # bought it, and the geometry exists only so the monitor can watch

@@ -118,7 +118,9 @@ def build_data() -> dict:
             mv = p.get("value", 0.0)
             rr = reward_risk(t)
             holdings.append({
-                "ticker": t.symbol, "type": "etf" if t.rank >= 100 else "stock",
+                # rank >= 100 was the ETF sleeve's band; the sleeve is deleted
+                # (2026-08-20) and ranks >= 200 are now protective-only theses.
+                "ticker": t.symbol, "type": "stock",
                 "weight": round(t.target_weight, 4), "value": round(mv, 2),
                 "qty": p.get("qty"), "avg_cost": p.get("avg_cost"),
                 "last": p.get("mark"), "pnl": p.get("pnl"),

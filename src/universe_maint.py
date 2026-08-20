@@ -50,10 +50,25 @@ def rank_pond(turnovers: dict) -> list:
     return sorted(valid, key=lambda t: valid[t], reverse=True)
 
 
-def propose_membership(ranked, turnovers, current_rows, seed_flags, params) -> dict:
+def propose_membership(ranked, turnovers, current_rows, seed_flags, params,
+                       is_equity=None) -> dict:
     """Seeds always kept; fills kept while $-vol rank <= keep_rank_max; open slots
     filled from best non-incumbents ranked <= add_rank_max and >= the $-vol floor.
-    flagged_seeds = seeds the weekly watch marked stale (surfaced, NOT dropped)."""
+    flagged_seeds = seeds the weekly watch marked stale (surfaced, NOT dropped).
+
+    ⛔ ADDS ARE EQUITIES ONLY (2026-08-20). `is_equity(ticker) -> bool` is
+    injected so this stays pure and testable; `scripts/universe_refresh.py`
+    passes a moomoo-backed one (a fund has no `total_market_val`). Default is
+    the name-shape + denylist backstop.
+
+    This is a FILTER on the add path, not merely a HOLD reason in classify().
+    A fund reaching `add` would be written into config/universe.csv, which is
+    also the order-gate whitelist — so a screen that merely flagged it would
+    still have made it buyable the moment a human approved an otherwise routine
+    proposal. Rejected candidates are reported in `rejected_non_equity` rather
+    than dropped silently: the screen must be able to say what it refused.
+    """
+    is_equity = is_equity or _looks_like_common_stock
     target = params["target_size"]
     keep_max = params["keep_rank_max"]
     add_max = params["add_rank_max"]
@@ -72,7 +87,7 @@ def propose_membership(ranked, turnovers, current_rows, seed_flags, params) -> d
 
     have = set(kept)  # 3. fill open slots
     open_slots = max(0, target - len(kept))
-    adds = []
+    adds, rejected = [], []
     for t in ranked:
         if len(adds) >= open_slots:
             break
@@ -81,6 +96,9 @@ def propose_membership(ranked, turnovers, current_rows, seed_flags, params) -> d
                 break
             continue
         if turnovers.get(t, 0) < floor:
+            continue
+        if not is_equity(t):            # funds/leveraged/odd instruments
+            rejected.append(t)
             continue
         adds.append(t)
 
@@ -91,6 +109,7 @@ def propose_membership(ranked, turnovers, current_rows, seed_flags, params) -> d
         "keep": sorted(kept),
         "drop_fills": sorted(dropped_fills),
         "add": adds,
+        "rejected_non_equity": rejected,
         "flagged_seeds": sorted(set(seeds) & set(seed_flags)),
         "result": result[:target],
     }
@@ -99,10 +118,31 @@ def propose_membership(ranked, turnovers, current_rows, seed_flags, params) -> d
 _LEVERAGED = {"SOXL", "SOXS", "TQQQ", "SQQQ", "SPXL", "SPXU", "TNA", "TZA",
               "UVXY", "SVXY", "UPRO", "SDOW", "UDOW", "LABU", "LABD"}
 
+# ⛔ FUNDS ARE NOT CANDIDATES (2026-08-20). The weekly screen builds ADDs from a
+# pond that is either moomoo's market-cap screen — documented as UNFILTERED, so
+# preferred shares, SPAC units and funds all rank (docs/DATA_SOURCES.md §5e) —
+# or, on failure, config/pit_pool.csv. The regex below passes "SPY", "GLD" and
+# "XLK" happily, so before this the Friday screen could ADD a fund straight back
+# into config/universe.csv, which is also the order-gate whitelist. That would
+# have silently undone the sleeve deletion by a different route.
+#
+# This denylist is a BACKSTOP, not the mechanism. The real filter is a positive
+# test: moomoo serves NO `total_market_val` for a fund (the documented cause of
+# the capital-flow ETF null, OPSLOG 2026-07-28), so an add with no market cap is
+# rejected in propose_membership via the injected `is_equity` predicate. A
+# denylist alone can only ever exclude the funds someone remembered to list.
+_FUNDS = {"SPY", "IWM", "EFA", "EEM", "GLD", "TLT", "AGG",
+          "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB",
+          "XLRE", "XLC", "QQQ", "DIA", "VTI", "VOO", "IVV", "SLV", "HYG",
+          "LQD", "IEF", "SHY", "TIP", "VXX", "USO", "UNG"}
+
+NON_EQUITY = _LEVERAGED | _FUNDS
+
 
 def _looks_like_common_stock(ticker: str) -> bool:
-    """v1 sanity: 1-5 uppercase letters, not a known leveraged/inverse ETF."""
-    return bool(re.fullmatch(r"[A-Z]{1,5}", ticker)) and ticker not in _LEVERAGED
+    """Name-shape sanity: 1-5 uppercase letters, and not a known fund/leveraged
+    product. NOT sufficient on its own — see NON_EQUITY above."""
+    return bool(re.fullmatch(r"[A-Z]{1,5}", ticker)) and ticker not in NON_EQUITY
 
 
 def classify(proposal, pond_count, params) -> dict:

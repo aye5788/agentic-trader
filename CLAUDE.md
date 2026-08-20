@@ -217,24 +217,35 @@ config/universe.csv     Fixed 150-name momentum universe (human-seed reconciled
                         with dollar-volume liquidity fill). `flag` col marks
                         adr/micro/spec/fresh-ipo model-caveats. Referenced by
                         [universe] in strategy.toml.
-config/etf_universe.csv 18 ETFs (11 SPDR sectors + broad + intl + defensive).
-                        ⛔ NOT CANDIDATES. Since 2026-08-20 `candidates()` /
-                        `universe()` / `brief()` rank SINGLE NAMES ONLY. They
-                        used to pool all 18 ETFs into the ranked list, which
-                        both re-elevated a retired allocation and shifted every
-                        stock's percentile (score IS a percentile rank, so the
-                        pool defines it). ETFs remain scored strictly for the
-                        three reasons below — factors, whitelist, stop — none of
-                        which is "show them to the agent as things to buy".
-                        ⚠️ THE SLEEVE IS RETIRED (2026-08-16: [etf_sleeve]
-                        enabled=false, sleeve_weight 0.0, book_weight 1.0,
-                        book_hold 10→14 so per-name size did not jump to 10%);
-                        the four held ETFs were sold 2026-08-17. The FILE stays
-                        and ETFs are still SCORED — the residual-momentum tilt
-                        regresses on the 11 SPDR sectors, the order-gate
-                        whitelist needs held ETFs nameable, and an unscored live
-                        ETF would have no computable stop. Retired as an
-                        ALLOCATION, not as instruments.
+⛔ config/etf_universe.csv  DELETED 2026-08-20 — along with the whole ETF sleeve.
+                        Retired 2026-08-16 (enabled=false), positions sold
+                        2026-08-17, and the MACHINERY deleted 08-20: the file,
+                        the [etf_sleeve] table, the second ranking engine in
+                        slow_loop, ETFs in the order-gate whitelist, and ETFs in
+                        the agent's candidate screen. A retirement that leaves
+                        the mechanism in place is not a retirement — it reads as
+                        live to every later reader. THE STRATEGY IS EQUITIES
+                        ONLY and the code says so by absence, not by a flag.
+                        ⛔ Do NOT reintroduce it. A buy naming a fund is refused
+                        by governance.whitelist() (single-name universe only);
+                        a SELL is never refused.
+                        ⚠️ WHAT SURVIVES, AND IS NOT AN ETF SLEEVE: the 11
+                        sector PRICE SERIES in src/residual.py:SECTOR_FACTORS
+                        (renamed from SECTOR_ETFS) plus SPY. The residual tilt
+                        regresses every name on them to separate its own move
+                        from its sector's; SPY is the regime observation.
+                        fetch_prices keeps those columns. They are FACTOR INPUTS
+                        — not in the universe, not in the whitelist, not in the
+                        screen, not buyable. Deleting them would silently drop
+                        the signal to plain momentum.
+                        ⛔ The weekly universe screen is EQUITIES-ONLY too: its
+                        candidate pond (moomoo's market-cap screen, documented
+                        UNFILTERED, falling back to config/pit_pool.csv) could
+                        otherwise ADD a fund straight back into universe.csv =
+                        the whitelist. Two layers now: a positive market-cap
+                        test (moomoo serves no total_market_val for a fund) and
+                        a NON_EQUITY denylist backstop; pit_pool.csv had its 18
+                        funds removed.
 src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
 src/governance.py       Layer-5 guardrails: kill-switch file, drawdown halt,
                         per-order cap, universe whitelist, live_approved master

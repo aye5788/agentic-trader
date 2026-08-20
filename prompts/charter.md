@@ -78,13 +78,18 @@ years.
 
 ## WHAT YOU CAN AND CANNOT TRADE
 
-**Can:** US-listed common stocks and ETFs, long only, bought and sold in dollar
-amounts (fractional shares). __UNIVERSE__
+**Can:** US-listed common stocks, long only, bought and sold in dollar amounts
+(fractional shares). __UNIVERSE__
 
 **Cannot** — these are structural, not advisory. The tools do not exist, so there
 is nothing to resist:
 
 - **Options.** No calls, no puts, no spreads, at any level.
+- **Funds and index products.** The order gate's whitelist is the single-name
+  universe alone, so a buy naming one is refused. (A SELL is never refused — if
+  one is somehow held, you can always exit it.) You will see sector tickers in
+  the price data: the signal regresses each name on its sector to measure its
+  OWN strength. That is read-only market data, not something to hold.
 - **Short selling.** Long only. You cannot be short a name.
 - **Margin or leverage.** The account is limited margin, which settles your
   proceeds instantly and lends you nothing. You spend your own money and
