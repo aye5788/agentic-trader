@@ -68,13 +68,20 @@ def snapshot_section(scored) -> dict:
             rank = None
         score = row.get("score")
         try:
-            score = round(float(score), 6)
+            score = float(score)
+            # NaN/inf serialise as bare `NaN`/`Infinity`, which json.dump emits
+            # happily and which is NOT valid JSON -- any non-Python reader of
+            # this file breaks on it. None is the honest encoding of "no score".
+            score = round(score, 6) if score == score and abs(score) != float("inf") else None
         except (TypeError, ValueError):
             score = None
+        # bool(float("nan")) is True -- a NaN eligibility flag would silently
+        # read as ELIGIBLE, which is the wrong direction for an absolute gate.
+        el = row.get("eligible")
         out[str(sym).upper()] = {
             "rank": rank,
             "score": score,
-            "eligible": bool(row.get("eligible")),
+            "eligible": False if el is None or el != el else bool(el),
         }
     return out
 
@@ -272,6 +279,24 @@ def _selftest() -> None:
 
     # build() carries the single-name ranking and NOTHING ELSE. The ETF sleeve
     # is retired; an "etf" key here would put it back in front of the agent.
+    # A NaN score/eligibility must never reach the file. json.dump emits a bare
+    # `NaN` token, which is NOT valid JSON, and bool(nan) is True -- an absolute
+    # gate that fails OPEN. Both were live until the reviewer caught them.
+    import json as _json
+    nanf = pd.DataFrame({"score": [float("nan")], "rank": [np.nan],
+                         "eligible": [float("nan")]}, index=["NAN"])
+    nsec = snapshot_section(nanf)
+    assert nsec["NAN"]["score"] is None, nsec
+    assert nsec["NAN"]["rank"] is None, nsec
+    assert nsec["NAN"]["eligible"] is False, "NaN eligibility must not read as eligible"
+    txt = _json.dumps(build("2026-08-20", nanf))
+    assert "NaN" not in txt and "Infinity" not in txt, txt
+    _json.loads(txt, parse_constant=lambda c: (_ for _ in ()).throw(
+        AssertionError(f"invalid JSON token {c}")))
+    inff = pd.DataFrame({"score": [float("inf")], "rank": [1.0], "eligible": [True]},
+                        index=["INF"])
+    assert snapshot_section(inff)["INF"]["score"] is None, "inf must not serialise"
+
     built = build("2026-08-20", scored)
     assert set(built) == {"as_of", "book"}, built
     assert "etf" not in built, "the retired ETF sleeve must not reappear in the diff"

@@ -278,7 +278,7 @@ def protective_theses(owned: set, covered: set, scored, closes, asof, tm,
 
 def select_book(book_scored, etf_scored, held_book: set, held_etf: set,
                 P: dict, *, regime: bool, rotate: bool,
-                sleeve_enabled: bool = True) -> tuple[list, list]:
+                sleeve_enabled: bool = True, cooled=frozenset()) -> tuple[list, list]:
     """Choose the book and sleeve. -> (book_sel, etf_sel).
 
     ⛔ `regime` IS ACCEPTED AND DELIBERATELY UNUSED. It is a parameter so the
@@ -300,6 +300,14 @@ def select_book(book_scored, etf_scored, held_book: set, held_etf: set,
     the product and reported by brief(); what it MEANS is the agent's call.
     """
     del regime                      # noqa: F841 — see docstring; never a filter
+    # Cooled names are dropped HERE, not from the scored frame, so a cooldown
+    # cannot move anyone else's percentile score. Selection is byte-identical to
+    # the previous behaviour: they were simply never in the frame before.
+    def _drop(frame):
+        if not len(frame) or not cooled:
+            return frame
+        return frame.drop(index=[t for t in cooled if t in frame.index])
+    book_scored, etf_scored = _drop(book_scored), _drop(etf_scored)
     book_sel = mom.select(book_scored, held_book, P["book_hold"], P["book_band"])
     # ⛔ SLEEVE RETIRED 2026-08-16 ([etf_sleeve] enabled = false). The ETF sleeve
     # was a second rotation engine holding 4 ETFs at 30% of capital; judged
@@ -535,6 +543,43 @@ def _selftest() -> None:
     assert "absolute gate" in d[0].thesis and "YOUR call" in d[0].thesis, d[0].thesis
     assert "sell" not in d[0].thesis.lower(), "the loop must not instruct an exit"
 
+    # ---- COOLDOWN MUST NOT MOVE ANOTHER NAME'S SCORE ----------------------
+    # It used to be applied by stripping names from the SCORING universe, and
+    # `score` is a percentile rank -- so an unrelated cooled name shifted every
+    # other name's score, and the agent-facing screen (no cooldown notion at all)
+    # then ranked differently from the book. Cooldown is now a SELECTION rule.
+    # Requirement: identical selection to the old behaviour, unchanged scores.
+    csc = pd.DataFrame({"score": [0.9, 0.8, 0.7], "rank": [1, 2, 3],
+                        "sigma": [0.02, 0.02, 0.02],
+                        "eligible": [True, True, True]},
+                       index=["AAA", "COOL", "CCC"])
+    ecs = pd.DataFrame(columns=["score", "rank", "sigma", "eligible"])
+    PC = {"book_hold": 2, "book_band": 3, "sleeve_hold": 0}
+    sel_cool, _ = select_book(csc, ecs, set(), set(), PC, regime=True,
+                              rotate=True, sleeve_enabled=False,
+                              cooled={"COOL"})
+    assert sel_cool == ["AAA", "CCC"], f"cooled name must not be selected: {sel_cool}"
+    sel_free, _ = select_book(csc, ecs, set(), set(), PC, regime=True,
+                              rotate=True, sleeve_enabled=False)
+    assert sel_free == ["AAA", "COOL"], f"without cooldown the top 2 stand: {sel_free}"
+    # ...and select_book must not have MUTATED the caller's scored frame -- the
+    # snapshot, the rank diff and protective geometry all read it afterwards.
+    assert list(csc.index) == ["AAA", "COOL", "CCC"], "scored frame was mutated"
+
+    # ---- a HELD name in NEITHER universe must still be reachable ------------
+    # protective_theses can only reach a name present in the scored frame it is
+    # given. main() now scores such names separately; this pins the contract the
+    # fix depends on -- given a frame that DOES contain it, a stop is produced.
+    scl = pd.DataFrame({"score": [0.4], "rank": [88.0], "sigma": [0.03]},
+                       index=["STRAY"])
+    ccl = pd.DataFrame({"STRAY": [40.0]}, index=[idx[0]])
+    sp = protective_theses({"STRAY"}, set(), scl, ccl, idx[0], TMx, 400)
+    assert len(sp) == 1 and sp[0].stop and sp[0].stop < 40.0, sp
+    assert sp[0].target_weight == 0.0, "a stray holding is protected, never prescribed"
+    # and absent from the frame it is correctly skipped -- which is exactly why
+    # main() must supply a frame that contains it.
+    assert protective_theses({"STRAY"}, set(), pd.DataFrame(), ccl, idx[0], TMx, 400) == []
+
     # an unreadable snapshot is "unknown", never "holds nothing"
     assert held_positions(Path("/nonexistent/positions.json")) is None
 
@@ -603,9 +648,18 @@ def main() -> None:
         cd = _json.loads(cd_path.read_text())
         cooled = {s for s, until in cd.items() if until >= str(asof.date())}
         if cooled:
-            names = [t for t in names if t not in cooled]
-            etfs = [t for t in etfs if t not in cooled]
-            print(f"cooldown: excluding {sorted(cooled)} until their date")
+            # ⛔ DO NOT strip these from `names`. Until 2026-08-20 this filtered
+            # the SCORING universe, and `score` is a PERCENTILE rank -- so a
+            # cooled name silently shifted every other name's score, and the
+            # agent-facing screen (which has no cooldown notion) then computed a
+            # DIFFERENT ranking from the book's for as long as any cooldown was
+            # active. Found by the independent reviewer, 2026-08-20.
+            #
+            # Cooldown is a rule about what may be RE-ENTERED, not about how
+            # strong a name is. It is applied at selection instead; see
+            # select_book(cooled=...). Selection behaviour is unchanged.
+            print(f"cooldown: {sorted(cooled)} excluded from SELECTION "
+                  f"(still scored — a cooldown must not move other names' ranks)")
 
     trend = mom.regime_on(spy, asof, cfg["regime"]["trend_ma_days"])
     vix, vix_src = fetch_vix()
@@ -677,7 +731,7 @@ def main() -> None:
     sleeve_on = bool(cfg.get("etf_sleeve", {}).get("enabled", True))
     book_sel, etf_sel = select_book(book_scored, etf_scored, held_book, held_etf,
                                     P, regime=regime, rotate=rotate,
-                                    sleeve_enabled=sleeve_on)
+                                    sleeve_enabled=sleeve_on, cooled=cooled)
     if not sleeve_on:
         print("  sleeve: RETIRED ([etf_sleeve] enabled=false) — equities only. "
               "Held ETFs keep their stops via protective geometry.")
@@ -724,6 +778,42 @@ def main() -> None:
         extra = protective_theses(owned, covered, book_scored, closes, asof, TM, 200)
         extra += protective_theses(owned, covered | {t.symbol for t in extra},
                                    etf_scored, closes, asof, TM, 300)
+
+        # ⛔ HELD, BUT IN NEITHER RANKED UNIVERSE -> would get NO STOP.
+        # Both passes above can only reach a name present in a scored frame, and
+        # those frames are built from config/universe.csv + etf_universe.csv. A
+        # HELD name that is not in either file therefore produced no thesis, so
+        # market_monitor had no base stop for it and could only report it
+        # unprotected.
+        #
+        # This was latent while the universe never changed. It stopped being
+        # latent on 2026-08-20, when the screen became WEEKLY: a held "fill" name
+        # whose dollar-volume rank slips past keep_rank_max is now dropped from
+        # universe.csv on a Friday, and would have been silently unprotected from
+        # that evening on. Found by the independent reviewer, who demonstrated it
+        # rather than asserting it.
+        #
+        # These names are scored against the REAL universe (so the rank means
+        # something) but only to obtain sigma for the geometry. They are never
+        # selected and never weighted -- protection, not a recommendation.
+        stray = {s for s in owned
+                 if s not in covered
+                 and s not in {t.symbol for t in extra}
+                 and s in closes.columns
+                 and s not in book_scored.index and s not in etf_scored.index}
+        if stray:
+            print(f"  ⚠️ held but outside both universes: {sorted(stray)} — "
+                  f"scoring them anyway so the monitor has a stop")
+            stray_scored = mom.compute(closes[sorted(set(names) | stray)], asof, **rk)
+            extra += protective_theses(
+                owned, covered | {t.symbol for t in extra},
+                stray_scored, closes, asof, TM, 400)
+            still = sorted(s for s in stray
+                           if s not in {t.symbol for t in extra})
+            if still:
+                # Not silent: no price history at all means no computable stop,
+                # and the operator must hear that rather than read a clean log.
+                print(f"  ⛔ STILL UNPROTECTED (no computable stop): {still}")
         if extra:
             print(f"  protective geometry (held, unselected, weight 0): "
                   f"{', '.join(t.symbol for t in extra)}")

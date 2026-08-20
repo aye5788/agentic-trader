@@ -167,16 +167,27 @@ def run(asof: str, dry: bool) -> dict:
     proposal = um.propose_membership(ranked, turnovers, current, seed_flags, params)
     decision = um.classify(proposal, len(ranked), params)
 
-    PROP_DIR.mkdir(parents=True, exist_ok=True)
+    # ⛔ A DRY RUN WRITES TO A SEPARATE DIRECTORY. It used to write the proposal
+    # into PROP_DIR before the `if dry` check below, which had two consequences:
+    # the dashboard's "pending review" banner surfaced an off-cycle rehearsal as
+    # a real HOLD (OPSLOG 2026-07-28 tells the operator to go delete the files by
+    # hand), and -- since 2026-08-20 -- health.SPECS["universe_refresh"] watches
+    # exactly this directory's mtime, so any dry run would have made a screen
+    # that never fired report GREEN. A liveness check a rehearsal can satisfy is
+    # not a liveness check. Found by the independent reviewer, 2026-08-20.
+    out_dir = (PROP_DIR / "dry") if dry else PROP_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
     slim = {k: proposal[k] for k in ("keep", "drop_fills", "add", "flagged_seeds")}
-    (PROP_DIR / f"{asof}.json").write_text(json.dumps(
-        {"asof": asof, "decision": decision, **slim}, indent=2))
+    (out_dir / f"{asof}.json").write_text(json.dumps(
+        {"asof": asof, "decision": decision, "dry_run": bool(dry), **slim}, indent=2))
     md = _render_md(proposal, decision, asof)
-    (PROP_DIR / f"{asof}.md").write_text(md)
+    (out_dir / f"{asof}.md").write_text(md)
     print(md)
 
     if dry:
-        print("\n[dry-run] no changes written, no notification sent")
+        print(f"\n[dry-run] proposal written to {out_dir} (NOT the live proposals "
+              f"dir — it must not satisfy the health check or raise the "
+              f"dashboard's review banner); no notification sent")
         return {"proposal": proposal, "decision": decision}
 
     if decision["decision"] == "AUTO_APPLY":
