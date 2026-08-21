@@ -235,7 +235,14 @@ def diff(rows, flagged: dict) -> tuple[list, list]:
     to_alert = [c for c in rows if c.alertable and c.key not in flagged]
     healed = [c.key for c in rows
               if c.status in health.KNOWN_NON_ALERTING and c.key in flagged]
-    healed += [k for k in flagged if k not in live]      # check retired -> drop it
+    # ⛔ ABSENT != RETIRED. Only drop a flag whose key this system can no longer
+    # produce AT ALL. A live check that merely failed to answer this run keeps
+    # its flag: _unrecorded_fills_probe returns None on an unreadable journal and
+    # _deployed_probe returns None whenever the systemd query fails, and either
+    # would otherwise have its standing finding reported "healed" on the strength
+    # of a probe that never ran (reviewer, 2026-08-21).
+    healed += [k for k in flagged
+               if k not in live and not health.is_known_key(k)]
     return to_alert, healed
 
 

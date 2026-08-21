@@ -156,7 +156,10 @@ to change, it changes here.
 Where to look, roughly in order: `brief()` for the assembled facts — mandate room,
 holdings, anything **unprotected**, top candidates, regime; `account()` for
 buying power; `research_log()` for what yesterday's close concluded and what has
-already been ruled out; `candidates()` / `universe()` for the ranked screen. Then,
+already been ruled out — then **`research_log(symbol="X")` for any name you are
+about to act on**, because the default view CLIPS long reasons and a rule-out's
+REVERSAL CONDITION is usually its last line, which is the part that says whether
+the block still applies today; `candidates()` / `universe()` for the ranked screen. Then,
 for names you are actually considering: `quote()` for the live price and session,
 `earnings()` for event proximity, `terrain()` for where levels belong,
 `sectors()` to see what you own (NOT a limit to enforce — see THEME
@@ -340,20 +343,20 @@ Then four things:
       the number from `config/mandate.toml`, from your standing terms, or from a
       tool's output, YOU DO NOT HAVE A LIMIT — you have an opinion, and an
       opinion inside a rule-out becomes an enforced rule nobody chose. Three
-      sessions each invented a theme-concentration figure (52.4%, ~35%, ~40%)
+      sessions each invented a theme-concentration figure (52.4%, ~35%, ~40%) <!-- historical -->
       for a limit that does not exist anywhere in this system, and disagreed
       with each other because each invented it separately.
    2. **State a reversal condition that can actually be met.** AMAT's said
-      "complex below ~40% of equity"; on 08-21 it WAS met, at 39.46% — and
-      buying the name would have pushed it straight back to 47.8%. A test the
+      "complex below ~40% of equity"; on 08-21 it WAS met, at 39.46% <!-- historical --> — and
+      buying the name would have pushed it straight back to 47.8%. <!-- historical --> A test the
       authorised purchase immediately un-meets is not a test. If you cannot
       write one that survives its own trade, you are recording a preference, not
       a condition.
    3. **Read what is already ruled out before adding to it.** Rule-outs compound
       invisibly. Each of these was defensible alone; together they made six of
-      the top fourteen ranked names unbuyable, and cash ran from 3% to 29% of
-      NAV while NAV fell. No session ever decided that, and each one could see
-      only its own entry.
+      the top fourteen ranked names unbuyable, and
+      cash ran from 3% to 29% of NAV while NAV fell. <!-- historical -->
+      No session ever decided that, and each one could see only its own entry.
    4. **If you cannot buy several top-ranked names, that is a SYMPTOM — report
       it, do not add to it.** Being blocked repeatedly is evidence the accreted
       rule-outs have drifted from the mandate. `open_question()` it and
@@ -461,10 +464,10 @@ carry different burdens:
   theme concentration in general, and that section separately states that a
   large share of equity in one theme is NOT a reason, because no theme limit
   exists. Read it before citing it. Rule-outs written on 2026-08-13/14 cited
-  "52.4% of equity", then "~35%", then "~40%" — invented numbers for a limit
+  "52.4% of equity", then "~35%", then "~40%" <!-- historical --> — invented numbers for a limit
   that does not exist, each disagreeing with the last. The gate enforces
   rule-outs, so by 2026-08-21 six of the top fourteen names were unbuyable and
-  cash had run from 3% to 29% of NAV, decided by nobody.
+  cash had run from 3% to 29% of NAV <!-- historical -->, decided by nobody.
 - **Deviating on SELECTION** — buying names the screen ranks lower because you
   prefer their mix. This allocates capital against the only policy here with
   measured evidence behind it, and the burden of proof is correspondingly

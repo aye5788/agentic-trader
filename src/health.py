@@ -127,6 +127,32 @@ class Check:
         return self.status not in NON_ALERTING
 
 
+# Keys evaluate() can emit that are NOT scheduled-job specs, plus the prefixes
+# for the ones carrying a per-unit or per-finding identifier.
+DERIVED_KEYS = frozenset({
+    "unprotected_positions", "unrecorded_fills", "snapshot_identity",
+    "positions_snapshot",
+})
+KEY_PREFIXES = ("deployed_", "repo_check:")
+
+
+def is_known_key(key: str) -> bool:
+    """Is `key` a check this system can still PRODUCE? -> bool.
+
+    ⛔ THE DISTINCTION THIS EXISTS TO DRAW: "this check was deleted" and "this
+    check could not answer today" arrive as the same thing — an absent row.
+    health_check.diff() drops a flag whose check is absent, which is right for a
+    retired check (`schwab_token`, 2026-07-29) and WRONG for a live one that
+    merely went quiet: an unreadable journal or a failed systemd query would
+    silently clear a standing finding and report it "healed".
+
+    So absence is only treated as retirement when the key is not one this module
+    can emit at all. A live check that goes silent keeps its flag.
+    """
+    return (key in SPECS or key in DERIVED_KEYS
+            or any(key.startswith(pre) for pre in KEY_PREFIXES))
+
+
 # key -> (human label, stale after N days, what proves it ran)
 SPECS = {
     "slow_loop":     ("Slow loop (rebalance)",   3,  "research_store/current.json"),

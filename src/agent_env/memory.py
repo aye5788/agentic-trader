@@ -45,6 +45,7 @@ explicitly revisits, which is what "I decided against this" should mean.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -275,24 +276,122 @@ def _level_reasons(root: Path) -> dict:
     return out
 
 
-def research_log(root: Path, journal: Path, limit: int = 25) -> dict:
+# Per-entry reason budgets in the DEFAULT view, and the caps on how many
+# records it carries. Sized against the LIVE store rather than guessed: at 900
+# chars the response still came to 71,110 -- the total is driven by COUNT x
+# BUDGET, not by any one long entry, which is what the first attempt missed.
+# Rule-outs get the largest budget because they BIND and a session must see them.
+_REASON_CHARS = 350
+_RULEOUT_CHARS = 600
+_MAX_QUESTIONS = 8
+_MAX_SYMBOL_DECISIONS = 8
+_SYMBOL_DECISION_CHARS = 1200
+
+
+def _clip(text, symbol=None, budget=None):
+    """Truncate one reason, and SAY SO — never silently."""
+    budget = budget or _REASON_CHARS
+    if not isinstance(text, str) or len(text) <= budget:
+        return text
+    hint = f"research_log(symbol=\"{symbol}\")" if symbol else "research_log(symbol=...)"
+    return (text[:budget]
+            + f"  ...[TRUNCATED {len(text) - budget} chars. "
+              f"Call {hint} for the full text — do NOT act on the clipped "
+              f"version, the reversal condition is often at the end.]")
+
+
+def research_log(root: Path, journal: Path, limit: int = 25,
+                 symbol: str = "") -> dict:
     """What past sessions decided and why — the agent reading its own record.
 
     Gathers reasoning from EVERY place it is actually written (see
     _reasoned_events and _level_reasons), plus current rule-outs and open
     questions. Without this the agent can record reasoning it never reads back,
     which is a write-only memory.
+
+    ⛔ IT MUST FIT IN A TOOL RESULT, OR IT IS A WRITE-ONLY MEMORY AGAIN. On
+    2026-08-21 this returned 107,619 characters and the session could not read it
+    at all: rule-out reasons had grown to 1,500+ chars each, and nothing bounded
+    the total. That session learned about two binding rule-outs only by tripping
+    them at the order gate, and said so itself — "that was luck, not design: a
+    rule-out I didn't happen to trip would have stayed invisible to me."
+
+    So reasons are CLIPPED in the default view and the clip is announced. Pass
+    `symbol` to get every record for one name in FULL — which is what you want
+    before deciding about it, because a rule-out's reversal condition is usually
+    the last thing in its text.
     """
+    sym = (symbol or "").strip().upper()
+
     decisions = _reasoned_events(journal)
     decisions.sort(key=lambda r: str(r.get("when") or ""))
+    if sym:
+        decisions = [d for d in decisions
+                     if str(d.get("symbol") or "").upper() == sym
+                     or sym in str(d.get("symbol") or "").upper().split(",")]
     decisions = decisions[-int(limit):][::-1]
+
     mem = ruled_out(root)
+    rules = mem["ruled_out"]
+    levels = _level_reasons(root)
+    qs = questions(root)["open"]
+
+    if sym:
+        # FULL TEXT, one name. Everything here is about that symbol, so nothing
+        # is clipped -- this is the view you read before acting on a name, and
+        # a rule-out's reversal condition is usually its last line.
+        rules = {k: v for k, v in rules.items() if k == sym}
+        levels = {k: v for k, v in levels.items() if k == sym}
+        # ⛔ WORD BOUNDARY, NOT SUBSTRING. Matching "TER" anywhere pulled in every
+        # question containing AFTER / COUNTER / QUARTER, unclipped, and pushed the
+        # worst single-symbol view to 59,750 chars -- larger than the default view
+        # this exists to shrink. Clipped and capped for the same reason.
+        def _mentions(q):
+            text = (q if isinstance(q, str) else str(q.get("question") or "")).upper()
+            return re.search(rf"\b{re.escape(sym)}\b", text) is not None
+        qs = [_clip(q, sym, _SYMBOL_DECISION_CHARS) if isinstance(q, str)
+              else {**q, "question": _clip(q.get("question"), sym, _SYMBOL_DECISION_CHARS)}
+              for q in qs if _mentions(q)][-_MAX_QUESTIONS:]
+        # ⛔ RULE-OUTS AND LEVELS STAY FULL -- they are what BINDS, and the
+        # reversal condition is usually the last line. Decisions are history, so
+        # they are capped: measured on the live store, AMAT's 18 full decisions
+        # made the single-name view LARGER than the default one it exists to
+        # avoid (36,870 chars), which would reproduce the bug being fixed.
+        shown = decisions[:_MAX_SYMBOL_DECISIONS]
+        older = len(decisions) - len(shown)
+        # Generous, but still bounded: a single session's record_decision can run
+        # to several thousand characters, and eight of them alone came to 33,351.
+        decisions = [{**d, "reason": _clip(d.get("reason"), sym, _SYMBOL_DECISION_CHARS)}
+                     for d in shown]
+        return {"symbol": sym, "recent_decisions": decisions,
+                "older_decisions_not_shown": older,
+                "levels_and_why": levels, "ruled_out": rules,
+                "open_questions": qs, "full_text": True,
+                "note": f"FULL text for {sym}, nothing clipped. Your own past "
+                        f"reasoning, not market fact. Supersede it freely with "
+                        f"a stated reason."}
+
+    decisions = [{**d, "reason": _clip(d.get("reason"), d.get("symbol"))}
+                 for d in decisions]
+    rules = {k: {**v, "reason": _clip(v.get("reason"), k, _RULEOUT_CHARS)}
+             for k, v in rules.items()}
+    levels = {k: {**v, "reason": _clip(v.get("reason"), k)}
+              for k, v in levels.items()}
+    dropped_q = max(0, len(qs) - _MAX_QUESTIONS)
+    qs = [_clip(q) if isinstance(q, str)
+          else {**q, "question": _clip(q.get("question"))}
+          for q in qs[-_MAX_QUESTIONS:]]
+
     return {"recent_decisions": decisions,
-            "levels_and_why": _level_reasons(root),
-            "ruled_out": mem["ruled_out"],
-            "open_questions": questions(root)["open"],
+            "levels_and_why": levels,
+            "ruled_out": rules,
+            "open_questions": qs,
+            "older_open_questions_not_shown": dropped_q,
+            "full_text": False,
             "note": "Your own past reasoning, not market fact. Supersede it "
-                    "freely with a stated reason."}
+                    "freely with a stated reason. Long reasons are CLIPPED "
+                    "here — call research_log(symbol=\"TICKER\") for the full "
+                    "text of any name before you act on it."}
 
 
 def _selftest() -> None:

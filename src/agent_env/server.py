@@ -1801,15 +1801,28 @@ def news(symbols: str = "", limit: int = 20) -> str:
 # ---- memory: what past sessions concluded --------------------------------
 
 @mcp.tool()
-def research_log(limit: int = 25) -> str:
+def research_log(limit: int = 25, symbol: str = "") -> str:
     """What past sessions decided and why, plus current rule-outs and questions.
 
     Read this early. Sessions are separate processes with separate contexts, so
     without it you re-derive the same conclusions and re-litigate the same
     rejections. It is YOUR past reasoning, not market fact — supersede it freely
     with a stated reason.
+
+    ⛔ **THEN READ IT AGAIN PER NAME, BEFORE YOU ACT ON ONE.** The default view
+    CLIPS long reasons and says where it did. `research_log(symbol="LITE")`
+    returns every record for that name in FULL — decisions, levels, rule-outs,
+    questions. Do this for anything you are about to buy: a rule-out's REVERSAL
+    CONDITION is usually the last line of its text, and it is the part that tells
+    you whether the block still applies today.
+
+    ⚠️ On 2026-08-21 this returned 107,619 characters and the session could not
+    read it at all. It discovered two binding rule-outs only by having its orders
+    refused, and recorded that as luck rather than design. A memory too large to
+    return is the same as no memory.
     """
-    return json.dumps(memory.research_log(REPO / "research_store", JOURNAL, limit),
+    return json.dumps(memory.research_log(REPO / "research_store", JOURNAL,
+                                          limit, symbol=symbol),
                       indent=2, default=str)
 
 
