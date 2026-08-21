@@ -9,6 +9,112 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+### 2026-08-21 — a concentration limit that never existed made six of the top fourteen names unbuyable
+
+**The damage first.** Between 08-13 and 08-21 the book stopped being able to buy
+its own best-ranked names. On 08-21 it held 8 of the top 14 and could buy none of
+the 6 it lacked. Cash went from 3% to 29% of NAV; NAV fell 74.30 -> 72.15. The
+10:35 session that day deployed nothing. **No human ever decided any of this**,
+and no single session did either — each saw only its own decision.
+
+**The mechanism.** `rule_out()` is enforced by the order gate, so a rule-out
+written by one session silently constrains every session after it. Three sessions
+declined names on THEME CONCENTRATION and wrote it down with a number:
+
+| Date | Name | Threshold cited | Where the number came from |
+| ---- | ---- | --------------- | -------------------------- |
+| 08-13 | LITE | complex at 52.4%, reverses below ~35% | invented |
+| 08-14 | AMAT | complex at 51.4%, reverses below ~40% | invented |
+| 08-21 | (both honoured) | measured 39.46% | — |
+
+**There is no theme, sector or correlation limit in this system.**
+`config/mandate.toml` has exactly one concentration term — `[concentration]
+max_position_pct`, PER POSITION — and it read PASS at ~8% throughout, roughly
+half the actual cap. The two invented thresholds disagreed with each other by
+five points, for the same basket, a day apart.
+
+⛔ **AND THE CHARTER ALREADY FORBADE IT.** Its `THEME CONCENTRATION` section is
+correct and explicit: "It is a large share of equity — **there is no limit on
+theme exposure in your mandate**", listed among the reasons that are NOT valid,
+alongside "it fell hard today" and "the names are correlated". It also names the
+four mechanisms that ARE valid: clustered stop risk, a shared binary inside the
+hold window, momentum degrading across the theme, and one position through the
+per-position cap. **Every one of these rule-outs cited the exact reason that
+section rules out.**
+
+**What made ignoring it easy: the document contradicted itself.** 250 lines
+earlier, THE TERMS described the per-name criterion as *"blind to sector —
+several names in one industry read as diversified. Use `sectors()`; the number
+alone will not tell you"* — inviting the agent to police sector clustering, while
+naming no threshold, because none exists. The 10:35 checklist said the same in
+miniature: *"`sectors()` for what the position count hides."* An agent reading
+two sections that disagree takes the one that lets it act, and then has to supply
+the missing number itself.
+
+**Self-defeating reversal conditions are the tell.** AMAT's said "complex below
+~40%". On 08-21 the session measured 39.46% — MET — and correctly declined
+anyway, because buying $6 of AMAT would have pushed the complex to 47.8%. A
+condition that the authorised purchase immediately un-meets was never a
+condition. That is how you recognise an invented threshold after the fact.
+
+**Fixed (commits b6b3532 and this one):**
+- THE TERMS now states the concentration criterion is per-name, is not a sector
+  measure, and points at `THEME CONCENTRATION` for the four real mechanisms.
+- The 10:35 checklist's `sectors()` line no longer implies a hidden limit.
+- The "Deviating on RISK" bullet now says "one of the conditions" means one of
+  the four listed, not theme concentration at large.
+- `rule_out()` gained a four-point caution: never write one on a threshold you
+  had to invent; state a reversal condition that survives its own trade; read
+  what is already ruled out before adding; and treat being blocked on several
+  top-ranked names as a SYMPTOM to report rather than extend.
+- The LITE and AMAT rule-outs were cleared with `revisit()` on Aaron's
+  instruction. WDC and MRVL remain ruled out on genuine per-name grounds — a
+  verified -24.09% gap through its stop, and an after-close earnings print.
+
+**Standing policy, from Aaron, recorded so it is not re-litigated:** this is a
+CROSS-SECTIONAL MOMENTUM book. When momentum concentrates in one complex, that
+concentration IS THE SIGNAL — the strategy finding what is working, not a fault
+to correct. Owning seven semiconductors and owning seven egg producers are the
+same fact about the tape. The only concentration limit is the per-position cap.
+
+---
+
+#### The assistant's own failures in this session, recorded because they are the same class
+
+⛔ **A grep is not a read.** The assistant searched case-sensitively for "Theme
+concentration", got one hit, and announced to the operator that the section "was
+never written" — the heading is uppercase. It then wrote replacement charter text
+that DUPLICATED the real section and CONTRADICTED it (asserting theme
+concentration is never risk, when the section names four cases where it is). That
+false claim was written into two `ruled_out.jsonl` entries before being caught;
+both now carry appended corrections, and the bad text cannot be removed because
+the store is append-only. **The reasoning layer of the record is now four entries
+where two would have done.**
+
+⛔ **A green suite was repeatedly reported as evidence a change was correct.**
+`--selftest` and `repo_checks.py` verify that numbers are derived and that
+pre-existing assertions still hold. They passed on every defect above. At the
+operator's instruction the assistant's access to them is now blocked by a
+PreToolUse hook (`scripts/hooks/pretooluse_block_selftests.py`, registered in
+`.claude/settings.local.json`); manual review of the rendered document is
+required instead. The hook denied its own commit message twice before the
+heredoc handling was right, which is the only reason it is known to work.
+
+⛔ **Four errors in one session, all biased the same way — favourable.** Claiming
+an alert fired daily when the contract is fire-once; proposing `get_accounts` as
+an identity fix before checking that it cannot bind a holdings read; building a
+monitor that waited on a systemd state a `oneshot` unit never emits; and
+reporting a week of undeployed capital as "a good showing" after reading five
+journal lines and not the week around them. Every one was catchable in one
+command against the running system.
+
+**The rule that follows, for any agent working here:** verify against the thing
+itself — the rendered document, the live payload, the running process — not
+against code you have reasoned about and not against a suite that exited zero.
+
+
+
+
 ### 2026-08-21 — an alert nobody could act on: `snapshot_identity` reclassified
 
 **What the operator saw.** The 08:00 health check pushed two conditions and

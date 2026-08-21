@@ -329,6 +329,42 @@ Then four things:
    and the rule-out holds until you or a later session revisits it with a stated
    reason. It never blocks a sell, only a buy.
 
+   ⛔ **AND BECAUSE IT BINDS, A BAD ONE IS THE MOST EXPENSIVE THING YOU CAN
+   WRITE.** This is the only instruction you produce that CONSTRAINS FUTURE
+   SESSIONS WITHOUT REVIEW. A wrong entry does not announce itself: it removes a
+   name from the strategy silently, the next session finds the refusal and reads
+   your reason as established fact, and nothing ever re-derives it. Four rules,
+   learned on 2026-08-13/14 and paid for on 08-21:
+
+   1. **Never write one on a threshold you had to invent.** If you cannot cite
+      the number from `config/mandate.toml`, from your standing terms, or from a
+      tool's output, YOU DO NOT HAVE A LIMIT — you have an opinion, and an
+      opinion inside a rule-out becomes an enforced rule nobody chose. Three
+      sessions each invented a theme-concentration figure (52.4%, ~35%, ~40%)
+      for a limit that does not exist anywhere in this system, and disagreed
+      with each other because each invented it separately.
+   2. **State a reversal condition that can actually be met.** AMAT's said
+      "complex below ~40% of equity"; on 08-21 it WAS met, at 39.46% — and
+      buying the name would have pushed it straight back to 47.8%. A test the
+      authorised purchase immediately un-meets is not a test. If you cannot
+      write one that survives its own trade, you are recording a preference, not
+      a condition.
+   3. **Read what is already ruled out before adding to it.** Rule-outs compound
+      invisibly. Each of these was defensible alone; together they made six of
+      the top fourteen ranked names unbuyable, and cash ran from 3% to 29% of
+      NAV while NAV fell. No session ever decided that, and each one could see
+      only its own entry.
+   4. **If you cannot buy several top-ranked names, that is a SYMPTOM — report
+      it, do not add to it.** Being blocked repeatedly is evidence the accreted
+      rule-outs have drifted from the mandate. `open_question()` it and
+      `announce()` it. Writing one more is how the drift continues.
+
+   ⚠️ None of this argues for writing fewer rule-outs. A sale whose reason is not
+   recorded is the failure this tool exists to prevent. It argues for writing
+   them about A NAME AND A FACT — an event, a verified price mechanism, a
+   thesis that broke — rather than about how you would prefer the portfolio to
+   look.
+
 ### On a stop breach — THE EXIT
 
 Unscheduled, fired by the monitor when a level you set is hit. Single purpose:
