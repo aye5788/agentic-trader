@@ -77,6 +77,66 @@ Full chronology and recovery steps are in `docs/OPSLOG.md` under
 
 ---
 
+## ⛔ A PASSING SELFTEST IS NOT EVIDENCE YOUR CHANGE IS RIGHT  (agents: read this)
+
+`--selftest`, `src/repo_checks.py` and friends verify that NUMBERS ARE DERIVED
+and that ASSERTIONS THAT ALREADY EXISTED still hold. They cannot tell you whether
+what you wrote is TRUE, whether it CONTRADICTS something 200 lines away, or
+whether it says a thing the document already said. They passed on every defect
+listed below.
+
+⛔ **DO NOT report a change as verified because a suite passed, and do not run one
+in place of reading.** Instruction text — CLAUDE.md, prompts/charter.md,
+src/charter.py, docs/ — has NO meaningful automated check at all: the only one
+that exists asserts that literal thresholds are not hardcoded. That is spelling,
+not meaning.
+
+**What is required instead: READ THE WHOLE DOCUMENT YOU ARE CHANGING**, rendered
+as its consumer sees it, and specifically look for
+  (a) a statement elsewhere that contradicts your edit,
+  (b) a statement elsewhere that already says it, and
+  (c) a cross-reference pointing at a section that does not exist.
+
+This rule was written 2026-08-21 after all three happened at once, and cost real
+money — and the assistant then committed (b) and (c) AGAIN while writing this
+very section, which is why it is stated so bluntly.
+
+What actually happened: `prompts/charter.md` has a THEME CONCENTRATION section
+that is CORRECT and explicit — "a large share of equity in one theme is NOT a
+reason to act, there is no theme limit in your mandate" — and lists the four
+mechanisms that ARE reasons (clustered stop risk, a shared binary in the hold
+window, momentum degrading across the theme, one position through the
+per-position cap). Sessions cited "52.4% of equity", then "~35%", then "~40%" —
+the exact reason that section rules out, with invented thresholds that disagreed
+with each other. Each went into a `rule_out()`, which the ORDER GATE ENFORCES,
+which the next session inherited as binding fact.
+
+What made that easy was a CONTRADICTION 250 lines away: THE TERMS described the
+per-name concentration criterion as "blind to sector — several names in one
+industry read as diversified" and sent the agent to `sectors()`, naming no
+threshold because none exists. Two sections of one document disagreeing is how
+an agent ends up choosing the one that lets it act.
+
+⛔ AND THE ASSISTANT'S OWN FAILURE, recorded because it is the same class: it
+grepped case-sensitively for "Theme concentration", got one hit, and announced
+the section "was never written" — then wrote a replacement that DUPLICATED the
+real section and CONTRADICTED it (stating theme concentration is never risk,
+when four cases are). A `grep` is not a read. That is what (b) and (c) above
+are for.
+
+By 2026-08-21 six of the top fourteen ranked names were unbuyable, cash had run
+from 3% to 29% of NAV with NAV falling, and no human had ever decided any of it.
+Every selftest passed throughout. The agent itself finally reported that the
+rule-outs "collectively encode a theme cap that exists nowhere in the mandate".
+
+⛔ **THE STANDING RULE THAT FELL OUT OF IT:** this book is CROSS-SECTIONAL
+MOMENTUM. When momentum concentrates in one complex, that concentration IS THE
+SIGNAL, not a fault to correct. The only concentration limit is the per-position
+cap in `config/mandate.toml`. There is no sector, theme or correlation limit —
+do not add one, in code, in a prompt, or in a rule-out.
+
+---
+
 ## Data sources and their roles
 
 Full scope + **verified moomoo surface** is in [`docs/DATA_SOURCES.md`](docs/DATA_SOURCES.md);

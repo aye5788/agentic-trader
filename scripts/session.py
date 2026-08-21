@@ -484,7 +484,11 @@ def _claude_argv(brief: str) -> list[str]:
         raise RuntimeError("the empty-string argument to --tools was lost — "
                            "refusing to start a session whose built-in tools "
                            "may not actually be disabled")
-    return ["claude", "-p", "--model", "claude-opus-5", *args]
+    # stream-json emits one JSON line per event AS IT HAPPENS instead of a
+    # single blob at exit, so the run can be watched live. --verbose is required
+    # for stream-json to include tool calls rather than only the final message.
+    return ["claude", "-p", "--output-format", "stream-json", "--verbose",
+            "--model", "claude-opus-5", *args]
 
 
 def run(mode: str, dry_run: bool = False) -> dict:
@@ -552,28 +556,45 @@ def run(mode: str, dry_run: bool = False) -> dict:
         # with "Input must be provided either through stdin or as a prompt
         # argument". stdin also sidesteps MAX_ARG_STRLEN (128KiB per argument,
         # not the 2MB ARG_MAX) -- the brief is ~28KB today and grows.
-        proc = subprocess.Popen(
-            _claude_argv(brief), cwd=str(REPO),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            start_new_session=True)     # own group, so _kill_group reaches the tree
+        # ⛔ STDOUT GOES TO A FILE, NOT A PIPE. communicate() only returns once
+        # the child exits, so a piped stdout is invisible until the run is over
+        # -- which is useless for watching a live session and, worse, gives the
+        # operator nothing to look at while real orders are being placed. A file
+        # is written as the child produces each line, so it can be tailed. The
+        # transcript is read back off disk afterwards, so classify() and the
+        # timeout drain below see exactly what they saw before.
+        stream_path = REPO / "logs" / f"session_stream.{mode}.jsonl"
+        stream_path.parent.mkdir(parents=True, exist_ok=True)
+        sfh = open(stream_path, "w")
         try:
-            out, err = proc.communicate(input=brief,
-                                        timeout=TIMEOUT_S.get(mode, 900))
-            rc = proc.returncode
-        except subprocess.TimeoutExpired:
-            # DRAIN AFTER KILLING. The first form discarded everything the
-            # session had printed -- and a session that hung is the one MOST
-            # likely to have placed orders and most in need of a transcript to
-            # reconcile against. communicate() returns once the pipes close,
-            # which the kill guarantees.
-            _kill_group(proc)
+            proc = subprocess.Popen(
+                _claude_argv(brief), cwd=str(REPO),
+                stdin=subprocess.PIPE,
+                stdout=sfh, stderr=subprocess.PIPE, text=True,
+                start_new_session=True)  # own group, so _kill_group reaches the tree
             try:
-                out, err = proc.communicate(timeout=10)
-            except Exception:       # noqa: BLE001
-                out, err = "", ""
-            err = (err or "") + f"\ntimed out after {TIMEOUT_S.get(mode, 900)}s"
-            rc = -1
+                _, err = proc.communicate(input=brief,
+                                          timeout=TIMEOUT_S.get(mode, 900))
+                rc = proc.returncode
+            except subprocess.TimeoutExpired:
+                # DRAIN AFTER KILLING. The first form discarded everything the
+                # session had printed -- and a session that hung is the one MOST
+                # likely to have placed orders and most in need of a transcript
+                # to reconcile against. communicate() returns once the pipes
+                # close, which the kill guarantees. stdout is already on disk.
+                _kill_group(proc)
+                try:
+                    _, err = proc.communicate(timeout=10)
+                except Exception:       # noqa: BLE001
+                    err = ""
+                err = (err or "") + f"\ntimed out after {TIMEOUT_S.get(mode, 900)}s"
+                rc = -1
+        finally:
+            sfh.close()
+        try:
+            out = stream_path.read_text()
+        except OSError:
+            out = ""
 
         ok, error = classify(rc, out, err)
         fill_after = snapshot_freshness.latest_fill_ts(

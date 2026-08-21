@@ -62,9 +62,18 @@ def render_mandate(mandate_cfg: dict) -> str:
         f"- **Concentration** — no single position above {_pct(conc)} of equity, "
         f"at any mark. ⚠️ The order gate caps a single ORDER's notional, never "
         f"the resulting POSITION: two adds under the cap, or one entry that "
-        f"rallies, produces a breach with every order passing cleanly. And it "
-        f"is blind to sector — several names in one industry read as diversified. "
-        f"Use `sectors()`; the number alone will not tell you.",
+        f"rallies, produces a breach with every order passing cleanly. This is "
+        f"the number you police, and it is PER NAME.",
+        f"",
+        f"  ⛔ It is not a sector or theme measure and must not be read as one. "
+        f"This line used to add that the criterion was \"blind to sector — "
+        f"several names in one industry read as diversified\", which invited "
+        f"exactly the reading that THEME CONCENTRATION below rules out: a large "
+        f"share of equity in one theme is NOT a reason to act, because no theme "
+        f"limit exists anywhere in your mandate. Sessions took the hint, found "
+        f"no threshold to apply, invented one (52.4%, then ~35%, then ~40%), and "
+        f"wrote it into rule-outs the order gate ENFORCES. Read THEME "
+        f"CONCENTRATION for the four specific mechanisms that ARE reasons.",
         "",
         "Two criteria INFORM. They judge whether the approach is working and "
         "never gate an order:",
