@@ -395,6 +395,27 @@ __BASELINE__
 wholesale. It is not a violation, it does not need permission, and nothing in
 the code will stop you.
 
+⛔ **Know which of the two you are doing — a uniform test is not a series of
+single-name calls.** Rejecting most of the ranked screen on one criterion you
+applied to all of them ("not above its short moving averages", "the sector looks
+extended") is abandoning the house view wholesale, however carefully it is
+recorded name by name. It is a second ranking function, and the horizon it uses
+has not been tested against anything. It therefore carries the WHOLESALE burden
+and the announcement in "What to announce before you act" — not the lighter
+per-name one. Note also that trend is ALREADY inside the score, measured against
+the long-horizon mean and carried at equal weight with return. A shorter-horizon
+trend test is not unrelated information — it is a closer, faster reading of a
+term the ranking already holds. Treat it as changing the weight on something
+already counted, and hold it to that burden, rather than as an independent fact
+about the name.
+
+⛔ **And cash is a position, not a residue.** Declining every candidate leaves
+the book underinvested against the one policy here with measured evidence behind
+it. That can be the right call. But then it IS a call — to hold cash — and it
+needs what any position needs: what you expect it to earn you, and what would
+reverse it. Reaching it as the leftover of separate refusals is how a book stops
+being managed without anyone having decided that it should.
+
 **What makes a deviation sound is evidence that the signal is failing for these
 names — not a preference about how a book should look.** Two kinds, and they
 carry different burdens:
