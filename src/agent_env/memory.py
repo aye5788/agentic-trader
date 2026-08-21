@@ -252,10 +252,28 @@ def _reasoned_events(journal: Path) -> list:
                             "action": f"{f.get('side')} ({f.get('status')})",
                             "reason": why, "source": "execution"})
         elif ev == "exit_signal":
-            out.append({"when": when, "symbol": rec.get("symbol"),
-                        "action": rec.get("reason") or "exit",
-                        "reason": rec.get("note") or rec.get("detail"),
-                        "source": "exit_signal"})
+            # ⛔ THE FIELDS ARE NESTED, AND READING THEM FLAT FOUND NOTHING.
+            # scripts/market_monitor.py journals one event per poll carrying
+            # `triggers` = [{symbol, reason, price, level, fraction}] and NO
+            # top-level symbol/reason/note/detail -- 0 of the 45 production
+            # events carry one. So every stop this system has ever fired
+            # reached the agent's own memory as {symbol: None, reason: None}:
+            # 45 rows of nothing, in the tool the charter tells it to read
+            # before acting. health.unrecorded_fills() and letter_facts.py
+            # both already read `triggers`; this was the only reader that did
+            # not, and its fixture used a flat shape production never wrote.
+            #
+            # ONE EVENT MAY CARRY SEVERAL TRIGGERS -- one row each, like the
+            # risk_review branch above (5 events x2 and one x5 in production;
+            # collapsing them would drop real breaches on the floor).
+            for t in rec.get("triggers") or []:
+                frac = t.get("fraction")
+                why = f"price {t.get('price')} through level {t.get('level')}"
+                if isinstance(frac, (int, float)) and 0 < frac < 1:
+                    why += f" — {round(frac * 100)}% of the position"
+                out.append({"when": when, "symbol": t.get("symbol"),
+                            "action": t.get("reason") or "exit",
+                            "reason": why, "source": "exit_signal"})
     return out
 
 
@@ -477,13 +495,41 @@ def _selftest() -> None:
             '[{"kind":"trim","symbol":"AMAT","fraction":0.5,"reason":"earnings in 2 days"}]}\n'
             '{"event":"execution","ts":"2026-08-09T16:04:00Z","fills":'
             '[{"symbol":"AMAT","side":"sell","status":"filled","note":"trim 50%"}]}\n'
-            '{"event":"exit_signal","at":"2026-08-08T14:00:00Z","symbol":"WDC",'
-            '"reason":"stop","note":"breached 41.20"}\n')
+            # ⛔ THE PRODUCTION SHAPE, COPIED OFF THE JOURNAL, NOT INVENTED.
+            # This fixture used to write a FLAT {"symbol","reason","note"}
+            # exit_signal that market_monitor.py has never once produced, so it
+            # passed while all 45 real events parsed to {symbol: None,
+            # reason: None}. The monitor nests them under `triggers`, and one
+            # event can carry several. Both real top-level shapes appear here:
+            # with `halted` (28 events) and without it (17).
+            '{"event":"exit_signal","ts":"2026-08-08T14:00:00Z","armed":true,'
+            '"halted":false,"triggers":[{"symbol":"WDC","reason":"stop",'
+            '"price":41.2,"level":41.35,"fraction":1.0},{"symbol":"STX",'
+            '"reason":"stop","price":714.325,"level":738.4014,"fraction":1.0}]}\n'
+            '{"event":"exit_signal","ts":"2026-08-08T15:00:00Z","armed":true,'
+            '"triggers":[{"symbol":"MRK","reason":"target1","price":153.01,'
+            '"level":152.9,"fraction":0.5}]}\n')
         log = research_log(root, j)
         srcs = {d["source"] for d in log["recent_decisions"]}
         assert srcs == {"risk_review", "execution", "exit_signal"}, log
         assert any("earnings in 2 days" == d["reason"] for d in log["recent_decisions"])
         assert log["recent_decisions"][0]["when"] > log["recent_decisions"][-1]["when"]
+
+        # ⛔ ASSERT THE FIELDS, NOT THE SOURCE LABEL. Checking `source` alone is
+        # exactly what let the flat-fixture defect survive: the label is set
+        # even when every value underneath it is None.
+        es = [d for d in log["recent_decisions"] if d["source"] == "exit_signal"]
+        assert len(es) == 3, es            # 2 events, one carrying TWO triggers
+        assert {d["symbol"] for d in es} == {"WDC", "STX", "MRK"}, es
+        by_sym = {d["symbol"]: d for d in es}
+        assert by_sym["WDC"]["action"] == "stop", by_sym["WDC"]
+        assert by_sym["MRK"]["action"] == "target1", by_sym["MRK"]
+        # the reason carries the breach, so a session can read what happened
+        assert "41.35" in by_sym["WDC"]["reason"], by_sym["WDC"]
+        assert "714.325" in by_sym["STX"]["reason"], by_sym["STX"]
+        # a PARTIAL names the fraction; a full close does not
+        assert "50%" in by_sym["MRK"]["reason"], by_sym["MRK"]
+        assert "%" not in by_sym["STX"]["reason"], by_sym["STX"]
 
         # level reasons live OUTSIDE the journal and must still surface
         (root / "monitor").mkdir(parents=True, exist_ok=True)
