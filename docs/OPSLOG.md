@@ -9,6 +9,92 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+### 2026-08-21 — an alert nobody could act on: `snapshot_identity` reclassified
+
+**What the operator saw.** The 08:00 health check pushed two conditions and
+filed GitHub issue #12 (`bug`+`auto-fix`). One of them, `snapshot_identity`,
+told him to *"re-publish from a broker read that includes the account."*
+
+**That instruction cannot be carried out.** `refresh_broker_snapshot()` records
+`identity_verified: false` when the broker payload names no account, and it sets
+`identity_verified = bool(from_broker)` where `from_broker` comes only from
+`get_portfolio -> account_number` or a `get_equity_positions` row. Checked live:
+neither field exists. The portfolio object names no account anywhere; position
+rows carry only `symbol/quantity/average_buy_price/shares_*/type`, one page, no
+`next`. The snapshot was republished from a clean, fully-paginated live read
+(`ok: true`, 10 positions) and the flag stayed false. **That republish is the
+evidence — not the reasoning.**
+
+⛔ It is evidence about ONE observed response shape, not proof about every
+future one. The writer still reads the field from three places and the check
+flips to `ok` the moment the broker supplies it.
+
+**The defect was the CHANNEL, not the flag.** The contract is fire-once, so this
+was never a daily buzz — it alerted once and sat flagged. But a condition with
+no available operator action was routed to the place reserved for conditions
+that need one. `unverified` is now a distinct status: visible and COUNTED on the
+dashboard, never paging. Deliberately not `unknown` — the check ran and the
+answer is known, so it settles and clears its standing flag, whereas `unknown`
+(a probe that could not be performed) must never clear one. Without that
+distinction a non-alerting check never becomes `ok`, its flag sticks forever,
+and the fire-once rule then permanently suppresses the key — the `schwab_token`
+leak of 2026-07-29 all over again.
+
+⛔ **Do not make `identity_verified` true.** Not from the pinned account, and not
+from `get_accounts`. `get_accounts` DOES name the account — it is the only
+surface that does — but it cannot bind that name to a given holdings read: the
+account number is what we SEND to `get_equity_positions`, never what the broker
+echoes back. Deriving it would make the payload assert the very thing being
+verified and turn the mismatch guard into a formality that always passes. The
+mismatch branch is untouched and still refuses outright whenever the broker DOES
+name an account and it is not the pinned one.
+
+**Three pre-existing defects found in the same area, all fixed in `f30ec24`:**
+
+1. **A failed probe looked like a retired check.** `_snapshot_identity_probe`
+   returned `None` on missing/corrupt JSON; no row is read by
+   `health_check.diff()` as "this check no longer exists", which SILENTLY
+   CLEARED the flag. A briefly-unreadable `positions.json` would have dropped a
+   live finding. Now reports `unknown`: never pages, never clears.
+2. **`bool(d["identity_verified"])` coerced the STRING `"false"` to `True`** —
+   i.e. "the broker confirmed this account" — which reads as `ok` and clears the
+   flag. Now a strict bool. An empty account is accepted when unverified (the
+   writer's own honest artifact when nothing is pinned) and rejected only when
+   verified: a confirmation naming nothing cannot be broker-sourced.
+3. **A MISSING `positions.json` reported `ok`.** `snapshot_freshness.status()`
+   only compares against the newest FILL, so with an empty journal "no book at
+   all" rendered green. Now `missing` (alertable, red) with a remedy pointing at
+   `refresh_broker_snapshot()` instead of the generic crontab advice — and a
+   detail stating the stop watcher FAILS OPEN (it keeps watching every eligible
+   thesis) rather than misstating stop coverage.
+
+The identity branch had **no test coverage at all**, which is how it shipped
+alertable-with-an-impossible-remedy. All three states are pinned now, plus every
+probe outcome and the flag-clearing behaviour.
+
+**On the oversight loop.** The `auto-fix` agent fired 5s after the issue was
+filed and correctly opened NO PR: it refused the tempting shortcut and declined
+to touch `src/health.py` unilaterally on the grounds that it is the oversight
+machinery. Its one wrong conclusion — *"there is no available code change here"*
+— came from a real limit, not sloppiness: it has no droplet or broker access, so
+it could not run the live read that settles the question. Worth remembering when
+reading its triage: it reasons only from the repo.
+
+**On review depth.** The operator required an independent review BEFORE applying.
+It took FIVE codex passes to converge — SPLIT -> DISSENT -> DISSENT -> DISSENT ->
+AFFIRM. The first three each found something real, including TWO regressions
+introduced while fixing the previous round (validation that rejected a file the
+writer legitimately produces, and alert text that misdescribed the stop watcher).
+One pass would have shipped a worse system than no change at all. Ask the
+reviewer to separate "blocks this diff" from "pre-existing, file separately", or
+scope expands without end.
+
+**Filed, not fixed:** `health_check.diff()` still clears a flag for ANY key
+absent from the current rows, which is unsafe for other optional probes that can
+return `None` (`_unrecorded_fills_probe`, `_deployed_probe`). The two snapshot
+checks no longer take that path; the general rule remains.
+
+
 ### "How do we know it will reconcile?" — we did not, and now we do
 
 Aaron asked the right question about the un-journalled RTX fill: what actually
