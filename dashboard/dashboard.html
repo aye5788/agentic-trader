@@ -262,6 +262,12 @@ document.getElementById("guardRows").innerHTML=
 // alert: a push tells you something CHANGED, this tells you what is TRUE now, so
 // an unresolved item stays visible long after its single notification is gone.
 const hrows=DATA.health||[];
+// "unverified" COUNTS here even though it never pages (reviewer, 2026-08-21).
+// A persistent counter is not the same thing as a repeated push: this is
+// the standing truth view, and saying "all healthy" while rendering a
+// known-unverified row is simply false. It counts; it just stays dim.
+// "unknown" does NOT count -- that check was never performed, so it is
+// not evidence of anything either way.
 const hbad=hrows.filter(h=>h.status!=="ok"&&h.status!=="unknown").length;
 document.getElementById("healthMeta").textContent=
   hrows.length? (hbad? `${hbad} need${hbad===1?'s':''} attention` : "all healthy") : "—";
@@ -269,8 +275,8 @@ document.getElementById("healthRows").innerHTML=
   hrows.length? hrows.map(h=>{
     // "blocked" reads red like "expired": the job is actively failing right now,
     // which is more urgent than an artifact that has merely gone quiet.
-    const col = h.status==="ok" ? "pos" : ((h.status==="expired"||h.status==="blocked") ? "neg" : (h.status==="unknown" ? "dim" : "warn"));
-    const word = {ok:"OK", stale:"STALE", never:"NEVER RAN", due:"DUE", expired:"EXPIRED", blocked:"BLOCKED", unknown:"—"}[h.status]||h.status;
+    const col = h.status==="ok" ? "pos" : ((h.status==="expired"||h.status==="blocked"||h.status==="missing") ? "neg" : ((h.status==="unknown"||h.status==="unverified") ? "dim" : "warn"));
+    const word = {ok:"OK", stale:"STALE", never:"NEVER RAN", due:"DUE", expired:"EXPIRED", blocked:"BLOCKED", unknown:"—", unverified:"UNVERIFIED", missing:"MISSING"}[h.status]||h.status;
     return prow(h.label, `${word}<span style="color:var(--dim);font-weight:400"> · ${h.detail}</span>`, col);
   }).join("") : prow("no health data","");
 

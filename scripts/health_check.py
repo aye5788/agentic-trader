@@ -99,6 +99,8 @@ REMEDY = {
     # No credential-expiry remedy remains. `schwab_token` lived here and was the
     # only recurring human chore in the whole system; moomoo authenticates through
     # OpenD, so there is nothing to renew on a schedule any more.
+    "positions_snapshot": ("Publish one: a session's refresh_broker_snapshot(), "
+                           "or record_fills() after a trade"),
     "signal_panel":  "OpenD likely logged out — see OPERATOR_MANUAL §4",
     "ledger_backup": "Check the box still has push access to agentic-trader-ledger",
     "adaptive_tune": "Check GitHub Actions — the weekly tuner has not run",
@@ -208,8 +210,18 @@ def diff(rows, flagged: dict) -> tuple[list, list]:
     """Pure: (checks, previously-flagged keys) -> (to_alert, healed_keys).
 
     to_alert = unhealthy and not already flagged  (fire-once)
-    healed   = previously flagged, now healthy    (clears silently)
-               ...plus any flag whose CHECK no longer exists at all.
+    healed   = previously flagged, now in a SETTLED non-alerting state
+               (health.KNOWN_NON_ALERTING: "ok", or "unverified" — a check that
+               ran and found the evidence simply does not exist). Clears
+               silently. ...plus any flag whose CHECK no longer exists at all.
+
+    ⛔ "unknown" is deliberately NOT in that set and must never clear a flag: a
+    probe that could not be PERFORMED tells you nothing about whether the
+    condition healed, so treating it as a heal would silently drop a live
+    finding. A settled non-alerting status is the opposite — the answer is
+    known, there is simply no action — and leaving THAT flagged is the leak
+    described below: it would stick forever, since a non-alerting check never
+    becomes "ok" on its own.
 
     That last clause matters: `healed` used to be derived only from current rows,
     so a flag for a deleted check could never be matched and never cleared. When
@@ -221,7 +233,8 @@ def diff(rows, flagged: dict) -> tuple[list, list]:
     """
     live = {c.key for c in rows}
     to_alert = [c for c in rows if c.alertable and c.key not in flagged]
-    healed = [c.key for c in rows if c.healthy and c.key in flagged]
+    healed = [c.key for c in rows
+              if c.status in health.KNOWN_NON_ALERTING and c.key in flagged]
     healed += [k for k in flagged if k not in live]      # check retired -> drop it
     return to_alert, healed
 
@@ -502,6 +515,19 @@ def _selftest() -> None:
     assert healed == [], "unknown must not clear an existing flag either"
     to_alert, healed = diff([unknown], {"adaptive_tune": {}})
     assert to_alert == [] and healed == [], "unknown leaves a prior flag untouched"
+
+    # ...but a SETTLED non-alerting status DOES clear, or the flag sticks forever
+    # (a non-alerting check never becomes "ok" by itself, and a stuck flag
+    # permanently suppresses that key -- the schwab_token leak, below). This is
+    # what migrates the snapshot_identity flag left by the 2026-08-21 run.
+    unver = C("snapshot_identity", "Snapshot account identity", None,
+              "unverified", "no broker-supplied account number")
+    to_alert, healed = diff([unver], {"snapshot_identity": {}})
+    assert to_alert == [], "a settled non-alerting condition must not page"
+    assert healed == ["snapshot_identity"], (to_alert, healed)
+    # and it must not alert on a FRESH flag set either
+    to_alert, healed = diff([unver], {})
+    assert to_alert == [] and healed == [], (to_alert, healed)
 
     # a flag whose CHECK no longer exists must be dropped, not carried forever.
     # `schwab_token` sat in health_state.json from 2026-07-28 through 2026-07-30

@@ -86,24 +86,45 @@ KILL_SWITCH = "research_store/HALT"
 BLOCKED_GAP = dt.timedelta(hours=12)
 
 
+# STATUSES THAT MUST NEVER PAGE THE OPERATOR, and the difference between them.
+#
+#   "ok"          healthy.
+#   "unknown"     the check COULD NOT BE PERFORMED. You cannot act on it, and it
+#                 must NOT clear a prior flag — a probe that was skipped tells
+#                 you nothing about whether the underlying condition healed.
+#   "unverified"  the check WAS performed and the answer is KNOWN: the evidence
+#                 it needs does not exist on the surface it must come from. Not
+#                 actionable either, but unlike "unknown" it IS a settled state,
+#                 so it DOES clear a prior flag (see KNOWN_NON_ALERTING).
+#
+# ⛔ Non-alerting is not the same as harmless, and it is never a way to quiet a
+# condition somebody could act on. It is only for conditions where NO operator
+# action exists. A finding with a remedy belongs in the push channel.
+NON_ALERTING = ("ok", "unknown", "unverified")
+
+# Non-alerting AND settled -> safe to clear a stale flag in health_state.json.
+# "unknown" is deliberately absent: see scripts/health_check.py:diff().
+KNOWN_NON_ALERTING = ("ok", "unverified")
+
+
 @dataclass(frozen=True)
 class Check:
     key: str
     label: str
     last_seen: dt.datetime | None
     status: str      # "ok" | "stale" | "never" | "blocked" | "due" | "expired" | "unknown"
-                     # | "unprotected" | "empty_snapshot" (unprotected_positions only)
+                     # | "unverified" | "missing" | "unprotected" | "empty_snapshot"
     detail: str
 
     @property
     def healthy(self) -> bool:
-        # "unknown" is not healthy, but it must never ALERT — you cannot act on a
-        # check that was not performed. health_check.py filters on alertable.
+        # Only "ok" is healthy. The two statuses below are NOT healthy — they
+        # still render on the dashboard — but they must never ALERT.
         return self.status == "ok"
 
     @property
     def alertable(self) -> bool:
-        return self.status not in ("ok", "unknown")
+        return self.status not in NON_ALERTING
 
 
 # key -> (human label, stale after N days, what proves it ran)
@@ -354,16 +375,62 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
             out.append(Check("unrecorded_fills", "Unrecorded fills", None, "ok",
                              f"every decided trade on {fday} has an execution recorded"))
 
-    # ⛔ AN UNVERIFIED SNAPSHOT IDENTITY IS A FINDING, NOT JUST A FIELD.
+    # SNAPSHOT IDENTITY: A SETTLED CONDITION WITH NO OPERATOR REMEDY.
     # refresh_broker_snapshot() records `identity_verified: false` when the
-    # broker payload carried no account number, so the account guard compared
-    # the snapshot against itself. That state was written and unit-tested and
-    # NO operational consumer ever rejected or surfaced it (reviewer,
-    # 2026-08-20) — which makes it a fact nobody acts on, the exact shape this
-    # module exists to remove. It is reported, not enforced: refusing to read a
-    # snapshot would strip stop coverage, which is the worse failure.
+    # broker payload carried no account number, so identity rests on the
+    # operator-pinned account rather than the broker's own bytes. Surfacing that
+    # was right — it was a fact nobody acted on (reviewer, 2026-08-20).
+    #
+    # ⚠️ WHAT CHANGED 2026-08-21, AND WHAT DID NOT. This was `alertable`, and the
+    # remedy it printed — "re-publish from a broker read that includes the
+    # account" — asks for a read that this broker surface does not offer. It was
+    # checked live: get_portfolio names no account in any field, and
+    # get_equity_positions rows carry only symbol/quantity/average_buy_price/
+    # shares_*/type (single page, no `next`, so not a truncation artifact).
+    # Republishing from a clean, fully-paginated live read left the flag false.
+    #
+    # ⛔ That is evidence about ONE observed response shape, not proof about
+    # every future one. The writer still reads the field from three places and
+    # this check still flips to "ok" the moment the broker supplies it — nothing
+    # here assumes it never will.
+    #
+    # The alerting contract is fire-once, so this was never a daily buzz: it
+    # alerted once and then sat flagged. The defect was the CHANNEL, not the
+    # frequency — a condition with no available action was routed to the place
+    # reserved for conditions that need one, carrying an instruction that cannot
+    # be carried out. `unverified` keeps that state visible and truthful on the
+    # dashboard while never paging, and unlike `unknown` it says what is
+    # actually true: the check ran and the evidence does not exist.
+    #
+    # NOTHING IS RELAXED. _write_broker_snapshot's mismatch branch still REFUSES
+    # the write outright whenever the broker DOES name an account and it is not
+    # the pinned one.
+    #
+    # ⛔ Do NOT "fix" this by making identity_verified true — not from the
+    # declared/pinned account, and not from get_accounts. get_accounts names the
+    # account but cannot bind it to THIS holdings read: the account number is
+    # what we SEND to get_equity_positions, never what the broker echoes back.
+    # Deriving it would make the payload assert the very thing being verified
+    # and turn the mismatch guard into a formality that always passes.
     ident = probes.get("snapshot_identity")
-    if ident is not None and ident.get("present"):
+    if ident is not None and ident.get("unreadable"):
+        # The probe FAILED. Not a finding and not a heal — see the probe's
+        # docstring: `unknown` never pages and never clears a standing flag.
+        out.append(Check("snapshot_identity", "Snapshot account identity",
+                         None, "unknown",
+                         "could not read research_store/rh/positions.json — "
+                         "identity not checked this run"))
+    elif ident is not None and ident.get("present") is False:
+        # ⛔ A LEGACY FILE MUST STILL EMIT A ROW. Emitting nothing made the key
+        # absent from `rows`, and health_check.diff() drops a flag whose check
+        # is absent (the retired-check rule) -- so a rolled-back snapshot format
+        # would silently clear a standing finding (reviewer, 2026-08-21).
+        # `unknown` says the true thing: this file cannot answer the question.
+        out.append(Check("snapshot_identity", "Snapshot account identity",
+                         None, "unknown",
+                         "positions.json predates the identity field — this "
+                         "snapshot cannot say which account it describes"))
+    elif ident is not None and ident.get("present"):
         if ident.get("verified"):
             out.append(Check("snapshot_identity", "Snapshot account identity",
                              None, "ok",
@@ -372,14 +439,36 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
         else:
             out.append(Check("snapshot_identity", "Snapshot account identity",
                              None, "unverified",
-                             "positions.json was published WITHOUT a broker-"
-                             "supplied account number, so the account guard is "
-                             "comparing the snapshot against itself; re-publish "
-                             "from a broker read that includes the account"))
+                             f"identity rests on "
+                             f"{'the operator-pinned account ' + ident['account']
+                                if ident.get('account')
+                                else 'no account at all (none pinned)'}, not on "
+                             f"the broker's own bytes — this surface returns no "
+                             f"account number to confirm it against. No operator "
+                             f"action exists; the mismatch guard still refuses "
+                             f"any payload that names a different account"))
 
     snapshot = probes.get("positions_snapshot")
     if snapshot is not None:
-        if snapshot["stale"]:
+        if snapshot.get("snapshot_ts") is None:
+            # ⛔ NO SNAPSHOT IS NOT "UP TO DATE". snapshot_freshness.status()
+            # only compares against the newest FILL, so with an empty journal a
+            # missing positions.json fell through to `ok` and the dashboard
+            # reported the book healthy while the stop watcher had nothing to
+            # read (reviewer, 2026-08-21). Predates the identity work; fixed
+            # here because it is the same false-green class.
+            # ⛔ NOT status "never" — that word means "this scheduled job has
+            # never run" and routes to the generic crontab remedy, which is the
+            # wrong place entirely for a missing artifact (reviewer).
+            out.append(Check("positions_snapshot", "Broker positions snapshot",
+                             None, "missing",
+                             "no readable positions.json — valuation, the "
+                             "dashboard and the weekly letter have no book to "
+                             "read. The stop watcher FAILS OPEN here (it keeps "
+                             "watching every eligible thesis, so protection is "
+                             "not dropped) but it cannot tell a real holding "
+                             "from a phantom until a snapshot is published"))
+        elif snapshot["stale"]:
             out.append(Check("positions_snapshot", "Broker positions snapshot",
                              snapshot["snapshot_ts"], "stale_after_fill",
                              "positions.json predates the newest execution event — "
@@ -592,20 +681,54 @@ def _unrecorded_fills_probe(root: pathlib.Path, today: str | None = None):
 
 
 def _snapshot_identity_probe(root: pathlib.Path):
-    """-> {present, verified, account} for the live positions snapshot, or None.
+    """-> {present, verified, account} | {unreadable: True} | None.
 
-    Thin I/O only. `present: False` when the file predates the field, which must
-    not read as a failure — it reads as nothing to say."""
+    Thin I/O only. THREE outcomes, and conflating any two of them is a bug:
+
+      * `present: False` — the file parsed but PREDATES the field, so it cannot
+        say which account it describes. evaluate() emits an `unknown` row (NOT
+        no row: an absent key is read as a retired check and drops the flag).
+      * `unreadable: True` — the file is missing, truncated or not JSON. The
+        probe FAILED; we learned nothing.
+      * `present: True` — a real answer.
+
+    ⛔ A FAILED PROBE MUST NOT LOOK LIKE A RETIRED CHECK. This returned None on
+    any exception, and None means "emit no row" — which health_check.diff()
+    reads as `k not in live`, i.e. "this check no longer exists", and SILENTLY
+    CLEARS its flag (reviewer, 2026-08-21). So a corrupt or briefly-unreadable
+    positions.json would drop a live finding and, because the fire-once rule
+    keys off that flag, re-arm the alert as though nothing had happened. It
+    reports `unknown` instead: never alerts, never clears a prior flag.
+    """
     p = root / "research_store" / "rh" / "positions.json"
     try:
         d = json.loads(p.read_text())
     except Exception:                                # noqa: BLE001
-        return None
+        return {"unreadable": True}
+    if not isinstance(d, dict):
+        return {"unreadable": True}
     if "identity_verified" not in d:
         return {"present": False, "verified": None,
                 "account": d.get("account_number")}
-    return {"present": True, "verified": bool(d.get("identity_verified")),
-            "account": d.get("account_number")}
+    v = d.get("identity_verified")
+    # ⛔ STRICT BOOLEAN. `bool(v)` coerced the STRING "false" -- and every other
+    # truthy junk value -- to True, which reads as "the broker confirmed this
+    # account" and, being `ok`, would clear a standing flag (reviewer,
+    # 2026-08-21). A field we cannot interpret is a probe that did not answer.
+    if not isinstance(v, bool):
+        return {"unreadable": True}
+    acct = d.get("account_number")
+    acct = acct.strip() if isinstance(acct, str) else ""
+    # ⛔ AN EMPTY ACCOUNT IS ONLY INCOHERENT WHEN THE CLAIM IS "CONFIRMED".
+    # _write_broker_snapshot legitimately writes account_number "" together with
+    # identity_verified false when no account is pinned (server.py:_expected_
+    # account() empty), so rejecting that outright would turn a real, honest
+    # artifact into "unreadable" (reviewer, 2026-08-21). Unverified-and-unnamed
+    # is exactly what this check exists to report. Verified-and-unnamed is not:
+    # a confirmation that names nothing cannot have come from the broker.
+    if v and not acct:
+        return {"unreadable": True}
+    return {"present": True, "verified": v, "account": acct}
 
 
 def _unprotected_probe(root: pathlib.Path):
@@ -827,6 +950,99 @@ def _selftest() -> None:
                   "last_fill_ts": now - day}
     c = {x.key: x for x in evaluate(now, {"positions_snapshot": fresh_snap})}
     assert c["positions_snapshot"].status == "ok", c
+
+    # SNAPSHOT IDENTITY. There was no coverage of this branch at all until
+    # 2026-08-21 (reviewer), which is how it went alertable-with-an-impossible-
+    # remedy unnoticed. Pin all three states AND their alerting behaviour.
+    def _ident(probe):
+        return {x.key: x for x in evaluate(now, {"snapshot_identity": probe})}
+
+    c = _ident({"present": True, "verified": True, "account": "948184924"})
+    i = c["snapshot_identity"]
+    assert i.status == "ok" and i.healthy and not i.alertable, i
+    assert "948184924" in i.detail, i
+
+    # broker named no account -> settled, visible, NOT healthy, NEVER pages.
+    c = _ident({"present": True, "verified": False, "account": "948184924"})
+    i = c["snapshot_identity"]
+    assert i.status == "unverified", i
+    assert not i.healthy, "an unconfirmed identity must not read as healthy"
+    assert not i.alertable, "there is no operator action — it must never page"
+    assert "948184924" in i.detail, i
+    # the old text told the operator to do something impossible; never again.
+    assert "re-publish" not in i.detail.lower(), i
+
+    # a file predating the field cannot answer -> a row that never pages and
+    # never clears a flag. It must NOT be absent: an absent key is read as a
+    # retired check and drops the flag.
+    i = _ident({"present": False, "verified": None, "account": None})["snapshot_identity"]
+    assert i.status == "unknown" and not i.alertable and not i.healthy, i
+    assert i.status not in KNOWN_NON_ALERTING, "a legacy file must not clear a flag"
+    assert "snapshot_identity" not in {x.key for x in evaluate(now, {})}, "no probe -> no row"
+
+    # ⛔ A FAILED PROBE IS NOT A RETIRED CHECK. Emitting no row here would let
+    # health_check.diff() clear a standing flag as though the check had been
+    # deleted, dropping a live finding (reviewer, 2026-08-21).
+    i = _ident({"unreadable": True})["snapshot_identity"]
+    assert i.status == "unknown", i
+    assert not i.alertable, "a failed probe has nothing to act on"
+    assert not i.healthy, "a failed probe is not a clean bill of health"
+    assert i.status not in KNOWN_NON_ALERTING, "it must NOT clear a prior flag"
+
+    # and the probe itself must classify the three cases apart
+    import tempfile as _tf                            # noqa: PLC0415
+    with _tf.TemporaryDirectory() as _pd:
+        _r = pathlib.Path(_pd)
+        _f = _r / "research_store" / "rh"
+        _f.mkdir(parents=True)
+        assert _snapshot_identity_probe(_r) == {"unreadable": True}, "missing file"
+        (_f / "positions.json").write_text("{not json")
+        assert _snapshot_identity_probe(_r) == {"unreadable": True}, "corrupt file"
+        (_f / "positions.json").write_text('["a list"]')
+        assert _snapshot_identity_probe(_r) == {"unreadable": True}, "not an object"
+        (_f / "positions.json").write_text('{"account_number": "1"}')
+        assert _snapshot_identity_probe(_r)["present"] is False, "legacy file"
+        # ⛔ the STRING "false" must never read as verified
+        (_f / "positions.json").write_text(
+            '{"account_number": "1", "identity_verified": "false"}')
+        assert _snapshot_identity_probe(_r) == {"unreadable": True}, "string bool"
+        (_f / "positions.json").write_text(
+            '{"account_number": "1", "identity_verified": 1}')
+        assert _snapshot_identity_probe(_r) == {"unreadable": True}, "int bool"
+        # an identity claim with no account names nothing
+        (_f / "positions.json").write_text('{"identity_verified": true}')
+        assert _snapshot_identity_probe(_r) == {"unreadable": True}, "no account"
+        (_f / "positions.json").write_text(
+            '{"account_number": "1", "identity_verified": false}')
+        _p = _snapshot_identity_probe(_r)
+        assert _p["present"] is True and _p["verified"] is False, _p
+
+    # a MISSING snapshot must never read as healthy just because nothing filled
+    c = {x.key: x for x in evaluate(now, {"positions_snapshot":
+         {"stale": False, "snapshot_ts": None, "last_fill_ts": None}})}
+    i = c["positions_snapshot"]
+    assert i.status == "missing" and i.alertable and not i.healthy, i
+    assert "fails open" in i.detail.lower(), "must not misstate stop coverage"
+
+    # unverified-and-unnamed is the writer's own honest artifact, not a fault
+    with _tf.TemporaryDirectory() as _pd2:
+        _r2 = pathlib.Path(_pd2)
+        (_r2 / "research_store" / "rh").mkdir(parents=True)
+        (_r2 / "research_store" / "rh" / "positions.json").write_text(
+            '{"account_number": "", "identity_verified": false}')
+        _q = _snapshot_identity_probe(_r2)
+        assert _q == {"present": True, "verified": False, "account": ""}, _q
+        # ...but a CONFIRMED identity naming no account is impossible
+        (_r2 / "research_store" / "rh" / "positions.json").write_text(
+            '{"account_number": "", "identity_verified": true}')
+        assert _snapshot_identity_probe(_r2) == {"unreadable": True}
+
+    # the two non-alerting statuses are NOT interchangeable: only the settled
+    # one may clear a stale flag (scripts/health_check.py:diff relies on this).
+    assert "unknown" in NON_ALERTING and "unknown" not in KNOWN_NON_ALERTING
+    assert "unverified" in NON_ALERTING and "unverified" in KNOWN_NON_ALERTING
+    assert not Check("k", "l", None, "unverified", "d").alertable
+    assert not Check("k", "l", None, "unverified", "d").healthy
 
     # the probe must never judge TODAY -- a decision and its fill are minutes
     # apart, so a same-day check reports a gap that is about to close itself
