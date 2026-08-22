@@ -55,6 +55,36 @@ _RH_TOOLS=(
 )
 
 SESSION_TOOL_ARGS=(
+  # ⛔ THE SETTINGS THAT GOVERN A TRADING SESSION ARE THE ONES WE HAND IT.
+  # `--setting-sources ""` drops the User, Project and Local settings sources.
+  # It does NOT drop `--settings` below, and it cannot drop enterprise policy:
+  # the CLI computes its enabled sources as {whatever this flag allows} ∪
+  # {flagSettings, policySettings}, so the order gate and any managed policy
+  # survive by construction. Verified against the installed binary (2.1.240),
+  # where the empty string is a first-class case and not an accident.
+  #
+  # WHY, AND IT IS NOT THE PERMISSIONS: on 2026-08-22 a probe of the real
+  # session configuration found the trader receiving a SessionStart block
+  # beginning "<EXTREMELY_IMPORTANT> You have superpowers." — the Superpowers
+  # plugin, enabled in ~/.claude/settings.json `enabledPlugins` for the HUMAN
+  # who codes on this box, inherited by the agent that trades it. It told the
+  # trader to invoke a `Skill` tool that does not exist in its surface, and it
+  # arrived through a channel this repo does not author, version or stamp. The
+  # two CLAUDE_CODE_DISABLE_* variables in scripts/session.py do not reach it:
+  # they suppress instruction FILES and auto-memory, and a plugin is neither.
+  #
+  # That is the class, not the instance. Anything an interactive session
+  # enables for itself — a plugin, a user hook, an output style, a project
+  # permission — was reaching the live-money session for free. This closes the
+  # inheritance, rather than naming the one plugin that revealed it.
+  #
+  # ⛔ THE EMPTY STRING IS THE ARGUMENT AND MUST SURVIVE. Same failure mode the
+  # `--tools ""` comment above describes. It fails CLOSED if it is ever lost:
+  # `--setting-sources` takes exactly one value, so a dropped "" makes it
+  # consume the next flag and the CLI refuses to start ("Invalid setting
+  # source: --strict-mcp-config"). A session that will not launch is loud; a
+  # session that quietly re-inherits the box's settings is not.
+  --setting-sources ""
   # ⚠️ --settings IS LOAD-BEARING AND WAS MISSING. The PreToolUse order gate
   # (scripts/hooks/pretooluse_order_gate.py) is declared ONLY in
   # deploy/loop_settings.json. Without this flag a session runs with the
@@ -84,6 +114,28 @@ SESSION_TOOL_ARGS=(
   --mcp-config "${_session_tools_root}/deploy/session_mcp.json"
   --tools ""
   --permission-mode dontAsk
+  # ⛔ EFFORT IS DECLARED, NOT INHERITED — AND IT USED TO BE INHERITED.
+  # Until the setting-source isolation above, the trading session was running
+  # at high effort because ~/.claude/settings.json says `"effortLevel": "high"`
+  # — the HUMAN's editor preference, picked up by the agent that trades real
+  # money. Nobody chose that for the trader; it was ambient, and closing the
+  # inheritance would have silently dropped the session to the model default.
+  # So it is stated here, where it can be read, reviewed and changed on
+  # purpose. This is the one execution characteristic deliberately carried
+  # over from the ambient configuration; everything else was dropped.
+  #
+  # The CLI value wins by construction: effort resolves cli -> settings, and
+  # the flag is parsed from argv, so it needs no settings source at all. It
+  # touches nothing else — not MCP, not hooks, not permissions, not session
+  # persistence. Verified against the installed binary (2.1.240), where an
+  # unrecognised value warns and falls back rather than failing, which is why
+  # the value here must stay one of: low, medium, high, xhigh, max.
+  #
+  # ⚠️ ITS SIBLING `--model` LIVES IN scripts/session.py, not here. The split
+  # is not principled — this file owns the tool/settings/MCP surface and that
+  # one owns the spawn — but a reader looking for "what model, at what effort"
+  # has to open both.
+  --effort high
   # ⛔ --allowedTools IS VARIADIC AND MUST STAY LAST. It swallows every
   # following argument as a tool name -- that is how the brief once became a
   # 47th "tool" and no session could start at all.

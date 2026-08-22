@@ -563,6 +563,87 @@ def build_brief(mode: str, evidence: str = "") -> str:
 # --------------------------------------------------------------------------- #
 # run
 # --------------------------------------------------------------------------- #
+# ⛔ THE SESSION'S MEMORY IS THIS REPOSITORY'S, NEVER CLAUDE CODE'S.
+#
+# The whole design rests on the agent being STATELESS at the model layer: a
+# fresh inference, the charter rendered from config, the institutional evidence
+# rebuilt seconds earlier, and current facts from the MCP tools. Everything the
+# agent is supposed to carry between sessions is carried by an artifact this
+# repo builds, versions and stamps onto the decisions it produced — which is
+# what makes a decision auditable against what the agent actually saw.
+#
+# But `claude` was spawned FROM THE REPO ROOT with the ambient environment, and
+# a headless run auto-discovers instruction sources that this system never
+# authored, never versions and never stamps. Measured 2026-08-22 against the
+# real session configuration, an open session was silently receiving:
+#
+#   /opt/agentic-trader/CLAUDE.md                              (45KB, Project)
+#   /root/.claude/projects/-opt-agentic-trader/memory/MEMORY.md (auto-memory
+#       index — 30 pointers written by INTERACTIVE coding sessions, carrying
+#       one human's working preferences and half-finished to-do lists)
+#
+# CLAUDE.md is written for a coding agent maintaining this box; it is not a
+# trading mandate, it disagrees with the charter in places, and it is not
+# rendered from config, so it cannot be checked the way the charter is. The
+# auto-memory index is worse in kind: it is SUBJECTIVE CROSS-SESSION STATE, it
+# reaches the trader through a channel no part of this system controls, and it
+# routes around the evidence artifact — the one place experience is supposed to
+# enter. That is the defect. Not the content of any one line.
+#
+# So the isolation is mechanical and it is scoped to THIS CHILD PROCESS. Both
+# variables are set in the spawn environment only: no export, nothing in the
+# systemd unit, nothing in a settings file — an interactive coding session on
+# this box still gets its CLAUDE.md and its memories, which is correct, because
+# a human debugging the droplet needs them and a trading session must not have
+# them.
+#
+#   CLAUDE_CODE_DISABLE_CLAUDE_MDS  every CLAUDE.md / .claude/rules loader in
+#       the CLI returns [] on this, for User, Project and Local memory alike —
+#       repo CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md, .claude/rules, the
+#       user's own, and nested discovery as the agent moves. It is the same
+#       variable the CLI sets for its own hermetic eval runs and for safe mode.
+#   CLAUDE_CODE_DISABLE_AUTO_MEMORY  checked first and unconditionally, before
+#       the settings file is even read, so it cannot be undone by a setting
+#       someone adds later. Disables the auto-memory directory for READ AND
+#       WRITE: the trader neither inherits an interactive session's memories
+#       nor deposits its own for one to inherit.
+#
+# ⛔ WHY NOT --setting-sources, WHICH ALSO SUPPRESSES THESE FILES: it suppresses
+# them by disabling the user/project/local SETTINGS SOURCES, which is a much
+# larger blast radius than the problem — and the order gate lives in a settings
+# file. It survives (`--settings` is `flagSettings`, always enabled, as is
+# policy) but the isolation would then be a SIDE EFFECT of a permissions change
+# rather than a statement about memory, and the next person to touch the
+# permission surface would silently re-open the leak. These two variables say
+# what they mean.
+#
+# ⛔ WHY NOT --bare, WHICH LOOKS LIKE EXACTLY THIS FLAG: it also skips HOOKS.
+# The PreToolUse order gate is a hook. `--bare` would place the trader outside
+# the kill switch, the drawdown halt, the per-order cap and shadow mode, and it
+# would look like a lockdown while doing it.
+#
+# ⛔ NOT --no-session-persistence. Nothing here passes -c/--continue or
+# --resume, so no previous transcript can enter a session; persistence is a
+# WRITE, and the file it writes is forensic evidence of a run that placed real
+# orders. Disabling it would delete evidence and close no hole.
+ISOLATION_ENV = {
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+}
+
+
+def _claude_env() -> dict:
+    """The child's environment: the ambient one, plus the isolation above.
+
+    SET, never defaulted -- `{**os.environ, **ISOLATION_ENV}` and not
+    `setdefault`. An operator who runs deploy/run_session.sh from inside an
+    interactive Claude Code session hands this process that session's whole
+    CLAUDE_CODE_* environment, and a "0" inherited from there would otherwise
+    re-enable the very thing this exists to switch off.
+    """
+    return {**os.environ, **ISOLATION_ENV}
+
+
 def _claude_argv(brief: str) -> list[str]:
     """The command line, with the tool surface sourced from session_tools.sh.
 
@@ -717,7 +798,7 @@ def run(mode: str, dry_run: bool = False) -> dict:
         sfh = open(stream_path, "w")
         try:
             proc = subprocess.Popen(
-                _claude_argv(brief), cwd=str(REPO),
+                _claude_argv(brief), cwd=str(REPO), env=_claude_env(),
                 stdin=subprocess.PIPE,
                 stdout=sfh, stderr=subprocess.PIPE, text=True,
                 start_new_session=True)  # own group, so _kill_group reaches the tree
@@ -926,6 +1007,18 @@ def _selftest() -> None:
     # --allowedTools is variadic: anything after it is eaten as a tool name.
     assert all(t.startswith("mcp__") for t in argv[argv.index("--allowedTools") + 1:]), (
         "a flag was placed after --allowedTools and will be swallowed as a tool")
+
+    # ⛔ THE CONTEXT ISOLATION MUST STILL BE ON THE CHILD'S ENVIRONMENT.
+    # Asserted here because it is invisible in the argv, in the settings file
+    # and in the systemd unit -- there is nowhere else a reader would look and
+    # notice it had been dropped. Both must be present AND truthy: the CLI
+    # treats "0"/"false"/"no"/"off" as "leave the feature on".
+    _env = _claude_env()
+    for _k in ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "CLAUDE_CODE_DISABLE_AUTO_MEMORY"):
+        assert _env.get(_k) == "1", (
+            f"{_k} is not set to 1 on the session's environment — the trading "
+            f"session would inherit CLAUDE.md / auto-memory as cross-session "
+            f"state, around the institutional-evidence artifact")
 
     # ⏱ THE SESSION + ITS REVIEW MUST STILL FIT THE AFTERNOON.
     # This used to assert against risk_review at 15:45 — that overlay was
