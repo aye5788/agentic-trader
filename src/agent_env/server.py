@@ -829,7 +829,8 @@ def record_fills(orders: str, broker_positions: str = "", portfolio: str = "") -
 
     snapshot_result = None
     if filled_orders:
-        snapshot_result = _write_broker_snapshot(broker_positions, portfolio, ts)
+        snapshot_result = _write_broker_snapshot(broker_positions, portfolio, ts,
+                                                 orders=filled_orders)
 
     if not fills:
         reconciled = not filled_orders or bool(snapshot_result and snapshot_result.get("ok"))
@@ -941,9 +942,46 @@ def _position_pages(value) -> tuple[list, str]:
     return rows, account_number
 
 
+def _record_lifecycle(positions, ts: str, orders, account_number) -> dict:
+    """Append the POSITION LIFECYCLE events this publish implies. NEVER raises.
+
+    ⛔ THIS IS BOOKKEEPING AND IT RUNS AFTER THE AUTHORITATIVE WRITE. It observes
+    and records; it places, cancels, blocks and changes NOTHING, and it makes no
+    broker call at all. Its result is reported beside the snapshot result and is
+    deliberately NOT folded into `ok`: `record_fills()` and scripts/session.py
+    both read `ok` to decide whether account state reconciled, and a failure to
+    journal a lifecycle fact is not a failure to publish the book. Conflating
+    them would let a bookkeeping bug read as an unreconciled session.
+
+    ⛔ AND IT MUST NOT FABRICATE TO STAY GREEN. On any failure it returns
+    ok:false with the reason and appends nothing further. Nothing is lost by
+    that: prior state is replayed from the append-only stream itself (see
+    src/lifecycle_journal.py), so the next reconciliation re-derives the same
+    transition from the same evidence and records it then. A partial append is
+    safe for the same reason — the replay reads exactly what reached disk.
+    """
+    appended = []
+    try:
+        import lifecycle_journal                            # noqa: PLC0415
+        result = lifecycle_journal.reconcile(
+            store.read_journal(), positions, observed_at=ts,
+            orders=orders or (), account_number=account_number or None)
+        for event in result["events"]:
+            store.append_journal(event)
+            appended.append(f"{event['event']}:{event['symbol']}")
+        out = {"ok": True, "mode": result["mode"], "appended": len(appended)}
+        if appended:
+            out["events"] = appended
+        if result["ignored"]:
+            out["unattributed"] = result["ignored"]
+        return out
+    except Exception as e:      # noqa: BLE001 - bookkeeping never breaks a publish
+        return {"ok": False, "appended": len(appended), "error": str(e)}
+
+
 def _write_broker_snapshot(broker_positions, portfolio, ts: str,
                            *, liquidated: bool = False,
-                           declared_account: str = "") -> dict:
+                           declared_account: str = "", orders=()) -> dict:
     """VALIDATE broker reads, then atomically publish the shares/cost snapshot.
 
     ⛔ THIS USED TO COERCE, NOT VALIDATE, and the difference is the whole point.
@@ -1089,7 +1127,14 @@ def _write_broker_snapshot(broker_positions, portfolio, ts: str,
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(snap, indent=2, allow_nan=False) + "\n")
         os.replace(tmp, path)
-        return {"ok": True, "ts": ts, "positions": len(positions)}
+        # THE SNAPSHOT IS NOW PUBLISHED AND NOTHING BELOW CAN UNDO IT. Lifecycle
+        # bookkeeping is deliberately downstream of the write it describes: if it
+        # fails, the book is still correct and the transition is re-derived next
+        # time. If it ran first, an event could describe a publish that never
+        # happened, and there would be nothing to retry against.
+        published = {"ok": True, "ts": ts, "positions": len(positions)}
+        published["lifecycle"] = _record_lifecycle(positions, ts, orders, acct)
+        return published
     except Exception as e:  # noqa: BLE001 - return loudly through the MCP tool
         return {"ok": False, "error": str(e)}
 
@@ -2342,10 +2387,18 @@ def _selftest() -> None:
         snap = json.loads(RH_POSITIONS.read_text())
         assert snap["positions"]["DELL"] == {"qty": 2.0, "avg_cost": 100.0}, snap
         assert snap["ts"], snap
-        f = _journalled2[0]["fills"][0]
+        # ⛔ SELECT THE EXECUTION EVENT, NEVER INDEX [0]. The same publish now
+        # also appends position-lifecycle events to this same append-only stream
+        # (_record_lifecycle, below the publisher), and they land BEFORE the
+        # execution event because the snapshot is written before the fill is
+        # journalled. Positional indexing asserted an ordering that was never
+        # promised; what this case is about is the CONTENT of the execution
+        # record, which is unchanged.
+        _execs = [e for e in _journalled2 if e.get("event") == "execution"]
+        assert len(_execs) == 1, _journalled2
+        f = _execs[0]["fills"][0]
         assert f["symbol"] == "AMAT" and f["order_id"] == "abc", f
         assert abs(f["amount"] - 0.004646 * 547.0328) < 1e-6, f
-        assert _journalled2[0]["event"] == "execution", _journalled2[0]
 
         # IDEMPOTENT: an order already on the record must never double-append,
         # or the letter counts the same trade twice and P&L is fabricated
@@ -2354,7 +2407,18 @@ def _selftest() -> None:
                                        "fills": [{"order_id": "abc"}]}]
         r2 = json.loads(record_fills.fn(_payload, _bp, _port) if hasattr(record_fills, "fn")
                         else record_fills(_payload, _bp, _port))
-        assert r2["recorded"] == 0 and _journalled2 == [], r2
+        assert r2["recorded"] == 0, r2
+        # ⛔ NOT `_journalled2 == []` ANY MORE, AND THE WEAKENING IS ONLY
+        # APPARENT. Lifecycle bookkeeping shares this stream, so the list is no
+        # longer empty on a successful publish. The invariant this case exists
+        # for is untouched — an order already on the record must never produce a
+        # SECOND execution event, or the weekly letter counts the same trade
+        # twice and P&L is fabricated — and the second assertion pins down
+        # everything else that may appear, so a stray event of any other kind
+        # still fails here.
+        assert [e for e in _journalled2 if e.get("event") == "execution"] == [], r2
+        assert all(e.get("event") in ("position_opened", "position_event",
+                                      "position_closed") for e in _journalled2), _journalled2
 
         # A fill is still journalled if reconciliation input is absent, but the
         # tool must return a loud failure rather than declaring completion.
