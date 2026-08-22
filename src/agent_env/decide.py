@@ -511,11 +511,23 @@ def write_levels(symbol: str, stop, targets, reason: str, ts: str,
     return merged
 
 
-def decision_entry(symbol: str, action: str, reason: str, ts: str) -> dict:
+def decision_entry(symbol: str, action: str, reason: str, ts: str,
+                   position_id=None) -> dict:
     """Build the journal event for one agent decision. Pure.
 
     Every field is required. An action with no reason is exactly the thing that
     makes a later review impossible.
+
+    `position_id` is OPTIONAL BOOKKEEPING SUPPLIED BY THE ENVIRONMENT, never by
+    the agent — the caller derives it by replaying the lifecycle stream, and the
+    tool surface has no parameter for it. Present, it means one narrow thing:
+    *this decision was made while that real position lifecycle was open*. It is
+    NOT a claim that the decision caused the position. Absent — a symbol we are
+    flat in, a basket, a sentinel, or a stream we could not read — is a valid and
+    permanent state: the field is forward-only and historical records have none,
+    so every reader must tolerate its absence. The key is omitted entirely rather
+    than written as null, so an unstamped record is byte-identical to one written
+    before this existed.
     """
     sym = str(symbol or "").strip().upper()
     act = str(action or "").strip().lower()
@@ -527,8 +539,12 @@ def decision_entry(symbol: str, action: str, reason: str, ts: str) -> dict:
     if not why:
         raise ValueError("reason is required: an action with no stated why cannot "
                          "be reviewed")
-    return {"event": "agent_decision", "ts": ts, "symbol": sym,
-            "action": act, "reason": why}
+    entry = {"event": "agent_decision", "ts": ts, "symbol": sym,
+             "action": act, "reason": why}
+    pid = str(position_id or "").strip()
+    if pid:
+        entry["position_id"] = pid
+    return entry
 
 
 def _selftest() -> None:

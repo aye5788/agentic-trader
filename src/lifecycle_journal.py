@@ -207,3 +207,46 @@ def reconcile(journal, positions, *, observed_at: str, orders=(),
                                open_lifecycles=open_lifecycles,
                                observed_at=observed_at, orders=orders,
                                account_number=account_number)}
+
+
+def active_position_id(journal, symbol):
+    """The id of the lifecycle currently OPEN for `symbol`, or None. Pure.
+
+    The read side of the same fold `reconcile()` uses. It answers exactly one
+    question — "is there, right now, one open lifecycle for this symbol, and
+    what is its identity" — and it answers None whenever it cannot answer that
+    truthfully. It is descriptive: nothing here decides, blocks or mutates.
+
+    ⛔ NONE IS ALWAYS A LEGAL ANSWER, AND AN ID IS NEVER INVENTED. A symbol we
+    are flat in has no open lifecycle, so a decision about it links to nothing —
+    which is the truth at decision time, and the reason a pre-entry BUY or SKIP
+    is not retroactively attached to a lifecycle that may open minutes later.
+
+    SENTINELS AND BASKETS COST NOTHING TO EXCLUDE because they are excluded by
+    construction: `active` is keyed by the symbols the broker reports holding,
+    so PORTFOLIO, CASH or BOOK cannot appear in it, and neither can the
+    comma-joined string a basket decision carries ("AMD,MU,INTC"). ⛔ Do NOT
+    "fix" that by splitting a basket and picking one id — a scalar position_id
+    must identify exactly one lifecycle, and a basket names several. The comma
+    guard below is therefore belt-and-braces that states the contract; the fold
+    would miss anyway. ⛔ Nor add a sentinel denylist: CASH is a real listed
+    ticker (Pathward Financial), so a name-based rule would be wrong in exactly
+    the case it claims to protect. Absence from the fold is the mechanism.
+
+    AN INCONSISTENT STREAM YIELDS None, NOT A GUESS. If any lifecycle event for
+    this symbol failed attribution, `replay()` reports it in `ignored` and we
+    decline to link rather than stamp an id we cannot vouch for. That condition
+    is already surfaced where it is actionable — the snapshot publish reports it
+    as `unattributed` — so it needs no second channel here.
+    """
+    sym = str(symbol or "").strip().upper()
+    if not sym or "," in sym:
+        return None
+    state = replay(journal)
+    # `ignored` entries are "{event}:{SYMBOL}:{position_id}"; neither the event
+    # name nor a symbol contains a colon, so index 1 is the symbol.
+    for ref in state["ignored"]:
+        if ref.split(":", 2)[1:2] == [sym]:
+            return None
+    current = state["active"].get(sym)
+    return current["position_id"] if current else None

@@ -1239,6 +1239,32 @@ def refresh_broker_snapshot(broker_positions: str, portfolio: str,
         declared_account=str(account_number or "")), indent=2)
 
 
+def _active_position_id(symbol: str):
+    """(position_id, linkage_error) for a decision about `symbol`. NEVER raises.
+
+    ⛔ THIS IS DESCRIPTIVE METADATA AND IT IS ALLOWED TO COME BACK EMPTY. It
+    reads the append-only stream and nothing else; it places, blocks, changes
+    and mutates nothing, and no failure of it may reach the decision. A decision
+    that could not be linked is still a decision, and it is still journalled —
+    losing the linkage costs a join in later analysis, whereas losing the
+    decision costs the record of the judgement itself. So every exception is
+    caught: an unreadable journal line, a missing module, a stream we cannot
+    fold. The failure is REPORTED beside the result rather than swallowed, and
+    it is never papered over with a fabricated id.
+
+    ⛔ IT IS ALSO NOT THE AGENT'S. The tool surface exposes no position_id
+    parameter, so the agent cannot supply, guess or copy one; the environment
+    derives it from the same replay that recorded the lifecycle in the first
+    place. There is no second state file and no cache to go stale — the id comes
+    from the events themselves, every time.
+    """
+    try:
+        import lifecycle_journal                            # noqa: PLC0415
+        return lifecycle_journal.active_position_id(store.read_journal(), symbol), None
+    except Exception as e:      # noqa: BLE001 - linkage never breaks a decision
+        return None, str(e)
+
+
 @mcp.tool()
 def record_decision(symbol: str, action: str, reason: str) -> str:
     """Record a decision and WHY, to the append-only journal.
@@ -1250,12 +1276,19 @@ def record_decision(symbol: str, action: str, reason: str) -> str:
     action is free text: open, add, trim, exit, hold, skip, tighten_stop, …
     """
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    position_id, linkage_error = _active_position_id(symbol)
     try:
-        entry = decide.decision_entry(symbol, action, reason, ts)
+        entry = decide.decision_entry(symbol, action, reason, ts,
+                                      position_id=position_id)
     except ValueError as e:
         return json.dumps({"ok": False, "error": str(e)}, indent=2)
     store.append_journal(entry)
-    return json.dumps({"ok": True, "recorded": entry}, indent=2)
+    out = {"ok": True, "recorded": entry}
+    if linkage_error:
+        # Reported, not raised. The decision is on the record either way; this
+        # only says the LINK could not be derived, which is bookkeeping.
+        out["linkage_error"] = linkage_error
+    return json.dumps(out, indent=2)
 
 
 @mcp.tool()
