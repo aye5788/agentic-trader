@@ -51,6 +51,7 @@ import charter                      # noqa: E402
 import integrity                    # noqa: E402
 import mandate as mandate_mod       # noqa: E402
 import session_lock                 # noqa: E402
+import evidence_receipt             # noqa: E402
 import strategy                     # noqa: E402
 import snapshot_freshness            # noqa: E402
 
@@ -412,7 +413,58 @@ def render_review(rev: dict | None, mode: str) -> str:
     return "\n".join(out) + "\n---\n\n"
 
 
-def build_brief(mode: str) -> str:
+EVIDENCE = REPO / "research_store" / "reviews" / "institutional_evidence.json"
+
+
+def evidence_block(path=EVIDENCE) -> tuple:
+    """(rendered block, provenance) for this session. ("", None) when nothing
+    is validated, the artifact is missing, or it cannot be read.
+
+    ⛔ ABSENCE IS DELIVERED AS ABSENCE. No artifact, nothing validated and an
+    unreadable artifact all render the empty string — the session context gets no
+    section at all rather than a line announcing that there is no evidence. A
+    stateless agent told "no evidence available" has been told something, and
+    what it would infer from that is not a fact anyone here has.
+
+    ⛔ READ ONCE, AND ONLY HERE. The pair returned is what the session was
+    handed; `record_decision` reads it back from the receipt rather than from
+    this file, so an operator rebuilding the artifact mid-session cannot change
+    what a decision claims the agent saw.
+
+    Never raises: an evidence layer that can stop a trading session from starting
+    is a worse failure than one that goes quiet.
+    """
+    try:
+        import institutional_evidence as ie                # noqa: PLC0415
+        evidence = json.loads(Path(path).read_text())
+        items = ie.select(evidence)
+        block = ie.render_agent_block(items)
+        if not block:
+            return "", None
+        problems = ie.check_block(block)
+        if ie.version_of(items) != evidence.get("version"):
+            # The stored version is what a decision would be stamped with, so it
+            # has to be the hash of what is actually being rendered. A mismatch
+            # means the artifact was edited after it was built, and stamping it
+            # would put a false provenance on real decisions.
+            problems.append("the artifact's version does not match the evidence "
+                            "it contains — it was edited after it was built")
+        if problems:
+            # REFUSE TO DELIVER, rather than deliver something that broke its own
+            # contract. A block over the cap or carrying verdict vocabulary is a
+            # defect in this repo, not a fact about the market, and the session is
+            # strictly better off with no section than with that one.
+            print("evidence block withheld: " + "; ".join(problems), file=sys.stderr)
+            return "", None
+        return block, ie.provenance(evidence, items)
+    except FileNotFoundError:
+        return "", None
+    except Exception as e:                                 # noqa: BLE001
+        print(f"evidence block unavailable ({type(e).__name__}: {e})", file=sys.stderr)
+        return "", None
+
+
+def build_brief(mode: str, evidence: str = "") -> str:
     """Render the charter for this session. Called AFTER the lock is held."""
     text = charter.render(mandate_mod.load(), strategy.load(), _tool_names())
     stamp = datetime.now(timezone.utc).astimezone()
@@ -447,8 +499,16 @@ def build_brief(mode: str) -> str:
             pass    # never let bookkeeping stop a session being briefed
     handoff_block = ("\n\n---\n\nOPERATOR RECOVERY HANDOFF — read this before acting:\n"
                      + handoff + "\n") if handoff else ""
+    # Read-only, and last of the fact blocks: it describes the PAST, and the
+    # charter above it describes the mandate. It is empty on almost every day and
+    # renders nothing at all when it is.
+    # The text above already ends in a `---` rule EXCEPT when a recovery handoff
+    # was appended, which ends in prose. Adding a second rule unconditionally
+    # produced a doubled separator on the ordinary day.
+    evidence_section = (("\n---\n\n" if handoff_block else "")
+                        + evidence + "\n---\n\n") if evidence else ""
     return (f"{text}\n\n---\n\n{render_review(last_review(), mode)}"
-            f"{handoff_block}"
+            f"{handoff_block}{evidence_section}"
             f"THIS SESSION: **{mode}**, "
             f"{stamp.strftime('%A %Y-%m-%d %H:%M %Z')}.\n")
 
@@ -502,8 +562,9 @@ def run(mode: str, dry_run: bool = False) -> dict:
         # NOTHING that touches the world: no lock, no spawn, no snapshot. The
         # point is to prove the brief renders, and a dry run that took the lock
         # would block the real session it is being used to debug.
-        brief = build_brief(mode)
-        print(f"brief_bytes: {len(brief)}")
+        block, _prov = evidence_block()
+        brief = build_brief(mode, evidence=block)
+        print(f"brief_bytes: {len(brief)}  evidence_block_bytes: {len(block)}")
         print(brief[:400])
         return {"ok": True, "mode": mode, "error": None, "dry_run": True,
                 "brief_bytes": len(brief)}
@@ -533,7 +594,17 @@ def run(mode: str, dry_run: bool = False) -> dict:
 
         # FACTS AFTER THE LOCK. See the module docstring -- the wait can be
         # fifteen minutes, and a brief built before it is that much out of date.
-        brief = build_brief(mode)
+        # THE EVIDENCE SET IS FIXED HERE, ONCE, AND RECORDED. Everything after
+        # this point — including every record_decision the agent makes — reads
+        # the receipt, not the artifact, so a mid-session rebuild cannot change
+        # what a decision claims the session saw. No block -> no receipt -> the
+        # decisions carry no evidence fields at all, which is the truthful state.
+        block, delivered = evidence_block()
+        brief = build_brief(mode, evidence=block)
+        evidence_receipt.write(delivered, mode=mode)
+        if delivered:
+            print(f"evidence delivered: {delivered['evidence_version']} "
+                  f"({', '.join(delivered['evidence_ids_seen'])})")
 
         # Read BEFORE the clock too, same reasoning as `before`/`started` right
         # below: `finally` keys the level check on `started`, so these are read
@@ -658,6 +729,11 @@ def run(mode: str, dry_run: bool = False) -> dict:
                         result["level_warning"] = warn
             except Exception as e:      # noqa: BLE001
                 print(f"level check failed: {e}", file=sys.stderr)
+        # THE RECEIPT DIES WITH THE SESSION. Left behind it could not stamp
+        # another session anyway -- the reader demands process ancestry -- but a
+        # stale file describing a run that is over is exactly the kind of
+        # artifact a later reader mistakes for a live one.
+        evidence_receipt.clear()
         if fh is not None:
             session_lock.release(fh)
 

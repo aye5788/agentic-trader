@@ -41,6 +41,7 @@ import strategy as strat                        # noqa: E402
 import momentum                                 # noqa: E402
 import rank_history                             # noqa: E402
 import snapshot_freshness                       # noqa: E402
+import evidence_receipt                         # noqa: E402
 import pandas as pd                             # noqa: E402
 
 mcp = FastMCP("agentic-trader")
@@ -664,7 +665,11 @@ def set_levels(symbol: str, stop: float,
     # (decide.decision_entry + store.append_journal) -- reason is already
     # guaranteed non-blank here, since write_levels()/merge_levels() would
     # have raised ValueError above otherwise.
-    store.append_journal(decide.decision_entry(sym, "set_level", reason.strip(), ts))
+    _seen = _evidence_seen()
+    store.append_journal(decide.decision_entry(
+        sym, "set_level", reason.strip(), ts,
+        evidence_version=_seen.get("evidence_version"),
+        evidence_ids_seen=_seen.get("evidence_ids_seen")))
 
     prod = read_current()
     thesis = None
@@ -744,7 +749,10 @@ def clear_levels(symbol: str, reason: str = "") -> str:
                                     "recorded reason cannot be judged later"}, indent=2)
     remaining = decide.clear_levels_file(sym)
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    entry = decide.decision_entry(sym, "clear_level", reason.strip(), ts)
+    _seen = _evidence_seen()
+    entry = decide.decision_entry(sym, "clear_level", reason.strip(), ts,
+                                  evidence_version=_seen.get("evidence_version"),
+                                  evidence_ids_seen=_seen.get("evidence_ids_seen"))
     store.append_journal(entry)
     return json.dumps({"ok": True, "symbol": sym, "cleared": True,
                        "remaining_symbols": sorted(remaining)}, indent=2)
@@ -1265,6 +1273,27 @@ def _active_position_id(symbol: str):
         return None, str(e)
 
 
+def _evidence_seen() -> dict:
+    """The evidence provenance THIS session may claim, as decision_entry kwargs.
+
+    WHAT THIS SESSION WAS HANDED, not what is on disk right now. The receipt was
+    captured when the session context was built; re-reading the evidence artifact
+    here would stamp a version the agent may never have seen, because an operator
+    rebuild mid-session changes the file and not the context.
+
+    Empty -> both keys are omitted from the entry, which is the truthful state
+    for an interactive session, for the monitor's exit executor, and for every
+    session that was handed no block. See src/evidence_receipt.py.
+
+    ⛔ EVERY WRITER OF AN `agent_decision` GOES THROUGH HERE. `set_level` and
+    `clear_level` land in the `risk_level` group, which IS one of the four the
+    institutional evidence covers — so a decision stamped there and a decision
+    unstamped beside it would make that group's own provenance unreadable, when
+    the fact was mechanically available the whole time.
+    """
+    return evidence_receipt.read() or {}
+
+
 @mcp.tool()
 def record_decision(symbol: str, action: str, reason: str) -> str:
     """Record a decision and WHY, to the append-only journal.
@@ -1277,9 +1306,12 @@ def record_decision(symbol: str, action: str, reason: str) -> str:
     """
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     position_id, linkage_error = _active_position_id(symbol)
+    seen = _evidence_seen()
     try:
         entry = decide.decision_entry(symbol, action, reason, ts,
-                                      position_id=position_id)
+                                      position_id=position_id,
+                                      evidence_version=seen.get("evidence_version"),
+                                      evidence_ids_seen=seen.get("evidence_ids_seen"))
     except ValueError as e:
         return json.dumps({"ok": False, "error": str(e)}, indent=2)
     store.append_journal(entry)

@@ -512,7 +512,8 @@ def write_levels(symbol: str, stop, targets, reason: str, ts: str,
 
 
 def decision_entry(symbol: str, action: str, reason: str, ts: str,
-                   position_id=None) -> dict:
+                   position_id=None, evidence_version=None,
+                   evidence_ids_seen=None) -> dict:
     """Build the journal event for one agent decision. Pure.
 
     Every field is required. An action with no reason is exactly the thing that
@@ -528,6 +529,20 @@ def decision_entry(symbol: str, action: str, reason: str, ts: str,
     so every reader must tolerate its absence. The key is omitted entirely rather
     than written as null, so an unstamped record is byte-identical to one written
     before this existed.
+
+    `evidence_version` / `evidence_ids_seen` are the same kind of field, for the
+    same reason: bookkeeping supplied by the ENVIRONMENT, never by the agent, and
+    with no parameter on the tool surface. Together they say one narrow thing:
+    *this session was handed that exact institutional-evidence set before it
+    decided*. They are NOT a claim that the evidence caused the decision, that
+    the agent read it, or that it agreed with it — only that it was in front of
+    it, which is the fact a later reader cannot reconstruct from anything else.
+
+    ⛔ BOTH KEYS ARE OMITTED, NEVER WRITTEN NULL, when no block was delivered.
+    Absent means "no evidence reached this session"; null would mean "a block was
+    delivered and it was empty", which never happens — an empty block is not
+    rendered at all. Historical decisions carry neither and remain valid; nothing
+    backfills them.
     """
     sym = str(symbol or "").strip().upper()
     act = str(action or "").strip().lower()
@@ -544,6 +559,14 @@ def decision_entry(symbol: str, action: str, reason: str, ts: str,
     pid = str(position_id or "").strip()
     if pid:
         entry["position_id"] = pid
+    ver = str(evidence_version or "").strip()
+    ids = [str(i).strip() for i in (evidence_ids_seen or []) if str(i).strip()]
+    # BOTH OR NEITHER. A version with no ids names a set whose contents cannot be
+    # recovered; ids with no version name contents whose statistics cannot be. A
+    # half-stamp is worse than no stamp, because it reads as a complete one.
+    if ver and ids:
+        entry["evidence_version"] = ver
+        entry["evidence_ids_seen"] = ids
     return entry
 
 
