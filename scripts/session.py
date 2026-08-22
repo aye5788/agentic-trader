@@ -52,6 +52,7 @@ import integrity                    # noqa: E402
 import mandate as mandate_mod       # noqa: E402
 import session_lock                 # noqa: E402
 import evidence_receipt             # noqa: E402
+import evidence_build               # noqa: E402
 import strategy                     # noqa: E402
 import snapshot_freshness            # noqa: E402
 
@@ -416,7 +417,48 @@ def render_review(rev: dict | None, mode: str) -> str:
 EVIDENCE = REPO / "research_store" / "reviews" / "institutional_evidence.json"
 
 
-def evidence_block(path=EVIDENCE) -> tuple:
+def session_date() -> str:
+    """The date THIS session is running, in the box's local (market) timezone.
+
+    ⛔ THE EVIDENCE AGES AGAINST THIS, NOT AGAINST THE PRICE PANEL. Evidence
+    freshness is a property of the session consuming it: a panel that stopped
+    updating a week ago must narrow what is MEASURABLE, and must not make a
+    52-day-old observation report as 45 and stay agent-visible past the
+    staleness line. Same source as the "THIS SESSION" stamp on the brief, so the
+    date the agent is told it is and the date its evidence is aged against
+    cannot disagree.
+    """
+    return datetime.now(timezone.utc).astimezone().date().isoformat()
+
+
+def rebuild_evidence(write: bool = True) -> tuple:
+    """Rebuild the institutional evidence artifact. -> (ok, error).
+
+    ⛔ THIS RUNS BEFORE ANYTHING RENDERS EVIDENCE, EVERY SESSION. The artifact
+    is the agent's only view of what past decisions were followed by, and a
+    stateless session that reads one assembled before its own experience is
+    reading a lie of omission. There is no cron and no timer behind this on
+    purpose: the only moment the evidence has to be fresh is the moment before
+    a session consumes it, and that moment is here.
+
+    ⛔ A FAILED REBUILD IS NOT A REASON TO DELIVER WHAT IS ON DISK. Evidence is
+    advisory, so a failure must never stop the session trading — but the artifact
+    left behind by an earlier run has unknown freshness for THIS session, and
+    delivering it would stamp its version onto decisions taken under experience
+    it does not describe. The caller renders nothing, writes no receipt, and says
+    so loudly. Silence and stale evidence are the two outcomes forbidden here.
+
+    `write=False` computes without touching the artifact — the dry run holds no
+    session lock and must not write a file a live session may be reading.
+    """
+    try:
+        evidence_build.rebuild(evidence_as_of=session_date(), write=write)
+        return True, None
+    except Exception as e:                                 # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
+def evidence_block(path=EVIDENCE, evidence=None) -> tuple:
     """(rendered block, provenance) for this session. ("", None) when nothing
     is validated, the artifact is missing, or it cannot be read.
 
@@ -436,7 +478,12 @@ def evidence_block(path=EVIDENCE) -> tuple:
     """
     try:
         import institutional_evidence as ie                # noqa: PLC0415
-        evidence = json.loads(Path(path).read_text())
+        if evidence is None:
+            # READ BACK FROM DISK on the real path, deliberately: the artifact
+            # the session just wrote is the artifact whose version gets stamped
+            # onto decisions, so the block must come from the file itself and
+            # not from an in-memory object that was never persisted.
+            evidence = json.loads(Path(path).read_text())
         items = ie.select(evidence)
         block = ie.render_agent_block(items)
         if not block:
@@ -562,9 +609,25 @@ def run(mode: str, dry_run: bool = False) -> dict:
         # NOTHING that touches the world: no lock, no spawn, no snapshot. The
         # point is to prove the brief renders, and a dry run that took the lock
         # would block the real session it is being used to debug.
-        block, _prov = evidence_block()
+        # The same rebuild the real path runs, with write=False: this proves the
+        # startup ordering and the rendered block against live sources without
+        # taking the lock or overwriting the artifact a live session may be
+        # reading. It is the safe way to inspect what a session would receive.
+        try:
+            dry_evidence = evidence_build.rebuild(evidence_as_of=session_date(),
+                                                  write=False)
+            build_error = None
+        except Exception as e:                             # noqa: BLE001
+            dry_evidence, build_error = None, f"{type(e).__name__}: {e}"
+        if build_error:
+            print(f"⚠️ INSTITUTIONAL EVIDENCE: rebuild failed ({build_error}) — a "
+                  f"real session would deliver NO evidence block", file=sys.stderr)
+            block, _prov = "", None
+        else:
+            block, _prov = evidence_block(evidence=dry_evidence)
         brief = build_brief(mode, evidence=block)
-        print(f"brief_bytes: {len(brief)}  evidence_block_bytes: {len(block)}")
+        print(f"brief_bytes: {len(brief)}  evidence_block_bytes: {len(block)}  "
+              f"evidence_version: {(dry_evidence or {}).get('version')}")
         print(brief[:400])
         return {"ok": True, "mode": mode, "error": None, "dry_run": True,
                 "brief_bytes": len(brief)}
@@ -594,12 +657,27 @@ def run(mode: str, dry_run: bool = False) -> dict:
 
         # FACTS AFTER THE LOCK. See the module docstring -- the wait can be
         # fifteen minutes, and a brief built before it is that much out of date.
+        # ⛔ REBUILD FIRST, RENDER SECOND. This order is the whole point of the
+        # step: rendering before rebuilding would hand the agent evidence
+        # assembled before its own most recent experience, and then stamp THAT
+        # version onto the decisions it took. The session lock is already held,
+        # so no second normal session can be rebuilding the same artifact.
+        built, build_error = rebuild_evidence()
+        if not built:
+            # ADVISORY, SO IT DOES NOT STOP THE SESSION -- and NOT a licence to
+            # deliver the artifact already on disk, whose freshness for THIS
+            # session is exactly what just failed to be established.
+            print(f"⚠️ INSTITUTIONAL EVIDENCE: rebuild failed ({build_error}) — "
+                  f"this session runs with NO evidence block and NO provenance; "
+                  f"the artifact on disk is deliberately NOT delivered",
+                  file=sys.stderr)
+
         # THE EVIDENCE SET IS FIXED HERE, ONCE, AND RECORDED. Everything after
         # this point — including every record_decision the agent makes — reads
         # the receipt, not the artifact, so a mid-session rebuild cannot change
         # what a decision claims the session saw. No block -> no receipt -> the
         # decisions carry no evidence fields at all, which is the truthful state.
-        block, delivered = evidence_block()
+        block, delivered = evidence_block() if built else ("", None)
         brief = build_brief(mode, evidence=block)
         evidence_receipt.write(delivered, mode=mode)
         if delivered:
