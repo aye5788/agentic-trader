@@ -116,6 +116,19 @@ def render_gate(gov_cfg: dict) -> str:
     # the rule-out limb were both missing until 2026-08-18 -- an agent could be
     # refused for a reason the charter never named, and the drawdown halt is the
     # one refusal it cannot diagnose from its own tools.
+    #
+    # ⛔ AND IT WAS STILL INCOMPLETE. Found 2026-08-23 by walking decide()'s
+    # branches against this list: `live_approved` and the stop-out COOLDOWN both
+    # refuse a live BUY and neither was named, and three malformed-order denials
+    # (unreadable order record, side neither buy nor sell, a buy the gate cannot
+    # size) were absent too. The list is now ordered to match decide()'s own
+    # evaluation order, so the next reader can walk the two side by side. If you
+    # add a branch to decide(), add it here in the same position.
+    #
+    # ⛔ NO LITERAL for the cooldown duration. [monitor] cooldown_days is not in
+    # the governance table this function is handed, and a number typed here would
+    # be both undeclared and drift-prone. The gate's own refusal text names the
+    # actual date, so the charter says "until the date it names" and stays true.
     order_pct = gov_cfg.get("max_order_pct")
     max_dd = gov_cfg.get("max_drawdown")
     # ⛔ SPLIT BY SIDE, because the previous single list was WRONG in three ways
@@ -131,10 +144,14 @@ def render_gate(gov_cfg: dict) -> str:
     #     hook performs NO account check; that protection is at the broker.
     return "\n".join([
         "Before any order reaches the broker it passes a gate that runs in the "
-        "harness, not in your judgment.",
+        "harness, not in your judgment. This is every refusal it can produce, in "
+        "the order it applies them.",
         "",
         "**Refused whatever the side, buy or sell:**",
         "",
+        "- an order record the gate cannot read, or one whose side is neither "
+        "buy nor sell — it cannot tell whether the order adds risk, so it "
+        "refuses rather than guessing",
         "- any order while the **kill switch** is set — exits must then be "
         "placed by hand",
         "- **every** order while shadow mode is set, sells included",
@@ -143,13 +160,29 @@ def render_gate(gov_cfg: dict) -> str:
         "here is software, so blocking a sell would remove a position's only "
         "protection.",
         "",
+        "- a buy while this box is not armed to open positions at all — the "
+        "`live_approved` master switch is off. Exits stay available, for the "
+        "same reason the drawdown halt leaves them available.",
         "- a buy while entries are halted",
-        "- a buy for a symbol outside the configured universe",
         f"- a buy while the book is more than **{_pct(max_dd)}** below its "
         f"tracked equity peak",
+        "- a buy in a name the monitor stopped out recently, while its recorded "
+        "COOLDOWN is still running — the refusal names the date it runs to. A "
+        "name can stop out and still be top-ranked; the cooldown is why the "
+        "rebuy is refused today rather than never.",
         "- a buy in a name carrying an active `rule_out`, until `revisit()` "
         "clears it",
+        "- a buy the gate cannot SIZE — no dollar amount, and no quantity × "
+        "limit price to multiply out. It must not fetch a quote on the critical "
+        "path, so it refuses rather than guessing: **place buys as a dollar "
+        "amount.** The same limb refuses a buy whose amount, or the account "
+        "value the cap is computed from, is missing or not a finite number.",
+        "- a buy for a symbol outside the configured universe",
         f"- a buy whose notional exceeds **{_pct(order_pct)} of equity**",
+        "",
+        "One more, and it is not about your order: the gate FAILS CLOSED. If it "
+        "cannot reach a verdict at all — an unreadable config, a bug in it — it "
+        "denies and names the exception. Report that one; do not retry it.",
         "",
         "The account you may trade in is enforced at the broker, not by this "
         "gate.",
@@ -414,10 +447,14 @@ def _selftest() -> None:
     # the 15:15 handoff is what makes research_log a HANDOFF and not an archive
     assert "10:35 session" in out.split("Write to tomorrow")[1][:400]
 
-    # ⚠️ PRESERVE WHAT WORKS. The de-risk trim is the behaviour with the best
-    # measured record in this system (two AMAT trims, +6.53% and +3.38%, both
-    # ahead of a known earnings date). A charter saying only "reduce, close or
-    # hold" reads as binary and would quietly discard it.
+    # ⚠️ PRESERVE THE ACTION, NOT A RESULT. A charter saying only "reduce, close
+    # or hold" reads as binary and quietly discards the partial. So the ACTION is
+    # pinned here as first-class. What is deliberately NOT pinned -- and was
+    # removed from the charter on 2026-08-23 -- is the standing empirical claim
+    # that trims had the best measured record: a result written into standing
+    # policy cannot be revised by later evidence and cannot go stale, which is
+    # exactly the job the institutional-evidence layer now does under mechanical
+    # validation and staleness. Do not put a measured result back in here.
     assert "Trimming is a first-class action" in out
     assert "not a half-measure" in out
     assert "twice in one day" in out, "the no-double-trim discipline was dropped"

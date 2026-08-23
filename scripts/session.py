@@ -55,6 +55,8 @@ import evidence_receipt             # noqa: E402
 import evidence_build               # noqa: E402
 import strategy                     # noqa: E402
 import snapshot_freshness            # noqa: E402
+import broker_read                  # noqa: E402
+import governance as gov            # noqa: E402
 
 MODES = ("premarket", "open", "close", "wake")
 LOCK = REPO / "research_store" / "session.lock"
@@ -735,6 +737,41 @@ def run(mode: str, dry_run: bool = False) -> dict:
                               f"{session_lock.LOCK_WAIT_S.get(mode)}s waiting for "
                               f"{session_lock.holder(LOCK)} — refusing to run a "
                               f"second session against the same book")}
+
+        # ---- FRESH BROKER FACT -> GOVERNANCE PEAK -------------------------
+        # ⛔ FIRST THING AFTER THE LOCK, AND ALWAYS BEFORE THE SPAWN.
+        #
+        # research_store/governance/state.json's peak_value is the denominator of
+        # a HARD ENTRY GATE (the PreToolUse hook's drawdown refusal, via
+        # governance.drawdown_breach). Until 2026-08-23 the only thing that ever
+        # advanced it was the agent electing to call check_order() -> gates() ->
+        # update_peak(): the boundary moved as a side effect of being previewed,
+        # and only if the agent happened to look. check_order() is read-only now,
+        # so maintaining the peak is infrastructure work and it belongs here,
+        # where it is deterministic and happens whether the agent looks or not.
+        #
+        # AFTER THE LOCK, because the wait can be fifteen minutes and a peak set
+        # from a pre-lock reading is a peak from a different market. BEFORE the
+        # spawn, because the gate must already be current the first time the
+        # agent can attempt a buy.
+        #
+        # ⛔ AND IT FAILS THE SESSION. Not a warning, not a skip: proceeding would
+        # launch a full-authority agent against a drawdown boundary this run knows
+        # it could not establish, which is exactly the silent loosening this whole
+        # change exists to end. update_peak() is never reached on this path, so a
+        # failure LEAVES THE STORED PEAK UNTOUCHED -- it is never lowered, never
+        # zeroed, never written from a value that failed validation.
+        try:
+            account_value = broker_read.read_current_account_value()
+        except Exception as e:                              # noqa: BLE001
+            return {"ok": False, "mode": mode,
+                    "error": (f"broker account read failed ({type(e).__name__}: "
+                              f"{e}) — refusing to start a session whose drawdown "
+                              f"gate could not be brought up to date. The stored "
+                              f"peak is unchanged and no order was placed.")}
+        peak = gov.update_peak(account_value)["peak_value"]
+        print(f"governance peak maintained: account_value={account_value:.8f} "
+              f"peak={peak}")
 
         # FACTS AFTER THE LOCK. See the module docstring -- the wait can be
         # fifteen minutes, and a brief built before it is that much out of date.

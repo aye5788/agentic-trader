@@ -83,11 +83,14 @@ def update_peak(account_value: float) -> dict:
     all-time peak" exist in this repo and they read differently RIGHT NOW
     (this file's persisted peak_value=82.22 vs max(research_store/history/
     equity.jsonl "value")=81.99): this one is sampled at whatever moment
-    scripts/fast_loop.py happens to call gates()/drawdown_halt() (today, once
-    per weekday run, but nothing stops a manual/test invocation from seeding it
-    with an intraday or off-cycle mark that scripts/log_equity.py's daily
-    close-to-close append never records) — so it is NOT reproducible from
-    anything on disk and NOT audited against a fixed cadence.
+    scripts/session.py calls it — once per session as of 2026-08-23, from a
+    FRESH BROKER READ taken after the lock and before the model spawns
+    (src/broker_read.py). That is a real cadence and a real provenance, and both
+    are new: fast_loop.py was its caller until 2026-08-14, and between then and
+    now the only writer was check_order(), i.e. whenever the agent happened to
+    preview an order. Nothing still stops a manual invocation from seeding it
+    with an off-cycle mark that scripts/log_equity.py's daily close-to-close
+    append never records — so it remains NOT reproducible from anything on disk.
 
     DECISION: src/mandate.py's drawdown() — which recomputes max() fresh from
     research_store/history/equity.jsonl on every call — is the ONLY authoritative
@@ -131,6 +134,45 @@ def drawdown_halt(account_value: float, cfg) -> tuple[bool, float]:
     if not math.isfinite(account_value):
         return True, float("nan")
     peak = update_peak(account_value)["peak_value"] or float(account_value)
+    dd = 0.0 if peak <= 0 else (float(account_value) / peak - 1.0)
+    return dd < -abs(cfg["governance"]["max_drawdown"]), dd
+
+
+def drawdown_probe(account_value: float, cfg) -> tuple[bool, float]:
+    """(halted?, drawdown) EXACTLY as drawdown_halt() would answer — but READ-ONLY.
+
+    ⛔ WHY A THIRD DRAWDOWN FUNCTION. There are now three, and the difference
+    between them is WHICH PEAK they measure against and WHETHER THEY WRITE:
+
+      drawdown_halt   effective peak = max(stored, account_value).  WRITES it.
+      drawdown_probe  effective peak = max(stored, account_value).  Writes NOTHING.
+      drawdown_breach stored peak only.                             Writes NOTHING.
+
+    This one exists because `check_order()` is described to the agent as an
+    ADVISORY PREFLIGHT, and an advisory preflight that mutates the state the
+    authoritative gate later evaluates is not advisory — consulting it moved the
+    thing being consulted about. It called gates() -> drawdown_halt() ->
+    update_peak() and ratcheted the persisted peak on every preview.
+
+    ⚠️ IT IS NOT A SUBSTITUTE FOR drawdown_breach(). The PreToolUse hook must
+    keep using that one: the hook is the AUTHORITY and must judge against the
+    peak actually on disk, not against a peak it inferred from the account value
+    it was just handed. Do not "unify" these two.
+
+    THE VERDICT IS IDENTICAL TO drawdown_halt()'s FOR EVERY INPUT — same
+    fail-closed rule on a non-finite value, same `or float(account_value)`
+    fallback when the effective peak is falsy, same comparison, same threshold
+    read the same way (a missing [governance] max_drawdown raises here exactly
+    as it does there, because this is that function's twin and not the hook's
+    fail-open path). The ONLY difference is the absent write.
+    """
+    if not math.isfinite(account_value):
+        return True, float("nan")
+    # max(stored, current) IN MEMORY -- what update_peak() would have persisted,
+    # modelled without persisting it. Never snapshot-and-restore: nothing here
+    # opens the state file for writing at all.
+    stored = float(_load_state().get("peak_value", 0.0))
+    peak = max(stored, float(account_value)) or float(account_value)
     dd = 0.0 if peak <= 0 else (float(account_value) / peak - 1.0)
     return dd < -abs(cfg["governance"]["max_drawdown"]), dd
 
@@ -293,9 +335,41 @@ def gates(account_value: float, cfg) -> dict:
     `block_entries` non-empty means buys are refused but exits remain available.
 
     Always updates the drawdown peak, including on a halted day, so the peak
-    keeps tracking while the system is paused.
+    keeps tracking while the system is paused. ⛔ THAT WRITE IS WHY THIS IS THE
+    AUTHORITATIVE PATH AND NOT THE PREVIEW ONE -- see gates_preview() for the
+    read-only twin, and drawdown_probe() for the three-way split. Behaviour here
+    is unchanged: same peak advance, same verdict, same order of evaluation.
     """
-    halted, dd = drawdown_halt(account_value, cfg)
+    halted, dd = drawdown_halt(account_value, cfg)      # WRITES the peak
+    return _verdict(account_value, cfg, halted, dd)
+
+
+def gates_preview(account_value: float, cfg) -> dict:
+    """gates() with ZERO PERSISTENT SIDE EFFECTS. Same shape, same verdict.
+
+    The preview path for `check_order()`, which the charter and the tool's own
+    description call an ADVISORY PREFLIGHT. Reading the switch files and the
+    stored peak is all it does; nothing on disk changes, so consulting it
+    repeatedly is free and cannot ratchet a live gate.
+
+    ⚠️ IT DOES NOT PREVIEW THE WHOLE PRETOOLUSE GATE, and must not grow into
+    that. It answers exactly what gates() answers -- kill switch, halt-entries,
+    invalid account value, drawdown halt -- and is silent on SHADOW mode,
+    live_approved, cooldowns and rule-outs, which the hook checks and this does
+    not. check_order()'s docstring lists that split for the agent.
+    """
+    halted, dd = drawdown_probe(account_value, cfg)     # writes nothing
+    return _verdict(account_value, cfg, halted, dd)
+
+
+def _verdict(account_value: float, cfg, halted: bool, dd: float) -> dict:
+    """The gate verdict for an ALREADY-COMPUTED drawdown decision.
+
+    Shared by gates() and gates_preview() so the two cannot drift: the only
+    thing that differs between them is which drawdown function produced
+    (halted, dd), and therefore whether the peak was persisted on the way.
+    Writes nothing itself; the two switch-file existence checks are its only I/O.
+    """
     g = cfg["governance"]
     block_all: list[str] = []
     block_entries: list[str] = []

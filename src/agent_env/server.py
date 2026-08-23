@@ -384,9 +384,23 @@ def compare_trims(notional: float, symbols: str = "") -> str:
 def mandate_status() -> str:
     """All four mandate criteria with real numbers and the room left on each.
 
-    Blocking criteria (drawdown, concentration) gate trading. Informational ones
-    (P&L concentration, relative return) judge whether the approach is working and
-    never gate an order. A criterion reporting INSUFFICIENT_DATA is NOT a pass.
+    ⚠️ MEASURED AND REPORTED — NOTHING HERE ACTS. No criterion on this page gates
+    an order: the PreToolUse order gate never reads mandate status, and the
+    function that would turn a breach into a mechanical close has no caller. The
+    mandate calls drawdown and concentration BLOCKING to say the agent must
+    police them, not that the machine will. Informational ones (P&L
+    concentration, relative return) judge whether the approach is working. A
+    criterion reporting INSUFFICIENT_DATA is NOT a pass.
+
+    THE HARD GATES ARE ELSEWHERE, and they are different numbers measured a
+    different way. At placement the gate enforces its own [governance] drawdown
+    limit against its own tracked peak, a per-ORDER notional cap, and the
+    universe whitelist (plus the kill switch, shadow mode, halt-entries,
+    live_approved, cooldowns and rule-outs). There is no hard limit on the size
+    of a resulting POSITION anywhere in the code — the order cap bounds one
+    order, and two orders under it produce a breach with both passing cleanly —
+    so the concentration figure here is a fact for your judgement, and nothing
+    will refuse an order because of it.
     """
     v = marks.load()
     eq_dated = state.equity_series_with_dates(EQUITY)
@@ -1462,20 +1476,34 @@ def _dvol_from(path, symbol: str, source: str):
 
 @mcp.tool()
 def check_order(symbol: str, side: str, amount: float) -> str:
-    """Ask whether an order is permitted BEFORE you place it.
+    """PREFLIGHT PREVIEW of an order. ⚠️ ADVISORY — this is not permission.
+
+    `allowed: true` is not a guarantee the order will be placed. The authority is
+    the PreToolUse gate that runs in the harness when you actually call
+    place_equity_order; this tool re-runs only PART of what that gate checks,
+    from the same governance code, and cannot speak for the rest. Treat it as a
+    way to catch an obvious refusal cheaply, never as a clearance.
 
     Returns JSON: {"allowed": bool, "reasons": [...], "liquidity_advisory": {...}}.
     Call this first, then place through the Robinhood MCP tools if allowed. It
     does not place anything itself. A refusal is a finding worth reporting,
     never something to work around.
 
-    What can make `allowed` false (buys only -- see below): the kill switch
-    (blocks everything, buy or sell), HALT-ENTRIES and the drawdown halt (block
-    new buys only), the per-order size cap, and the universe whitelist.
+    WHAT THIS TOOL CHECKS (buys only where noted): the kill switch (blocks
+    everything, buy or sell), HALT-ENTRIES and the [governance] drawdown halt
+    (new buys only), the per-order size cap, and the universe whitelist.
+
+    WHAT IT DOES NOT CHECK, any of which can still refuse at placement: SHADOW
+    mode (which refuses EVERY order, sells included), the live_approved master
+    switch, a stop-out COOLDOWN on this symbol, and an active `rule_out` on it.
+    A clean answer here followed by a refusal there is normal and is not a
+    contradiction — read the refusal's reason and decide, never retry blind.
+
     A SELL is NEVER refused by the drawdown halt, HALT-ENTRIES, the whitelist,
     or the order cap -- stops in this system are software-only, so refusing an
-    exit would strand a position's only protection (only the kill switch, which
-    stops ALL placement by design, can still show up in a sell's reasons).
+    exit would strand a position's only protection. In this tool's own reasons
+    only the kill switch can block a sell; at placement SHADOW mode blocks one
+    too, and both stop ALL placement by design.
 
     `liquidity_advisory` is reported SEPARATELY and NEVER makes `allowed` false.
     It is ADVISORY ONLY, pending task #30: research_store/prices/pool_dvol.parquet
@@ -1496,7 +1524,13 @@ def check_order(symbol: str, side: str, amount: float) -> str:
     sd = str(side).strip().lower()
     reasons: list[str] = []
 
-    g = gov.gates(acct, cfg)
+    # ⛔ gates_preview, NEVER gates(). This tool is described to the agent as an
+    # ADVISORY PREFLIGHT, and gates() -> drawdown_halt() -> update_peak() WRITES
+    # research_store/governance/state.json -- so every preview ratcheted the very
+    # peak the authoritative PreToolUse gate later measures against. A preview
+    # that moves the thing it previews is not a preview. gates_preview() returns
+    # the identical verdict from the identical inputs and persists nothing.
+    g = gov.gates_preview(acct, cfg)
     reasons += g["block_all"]
     if sd == "buy":
         reasons += g["block_entries"]
@@ -1721,13 +1755,25 @@ def _overrides() -> dict:
 
 @mcp.tool()
 def performance(limit: int = 30) -> str:
-    """Your own track record — the equity curve and every closed round trip.
+    """Realised historical outcomes for this account — the equity curve, every
+    closed round trip, and every partial close.
 
-    Answers the question none of the other tools do: is what I am doing working?
-    `positions` shows unrealized P&L on what is open; `mandate_status` judges
-    against the terms. This is the history: where equity started, where it is,
-    its high-water mark, the drawdown from it, and each completed trade with its
-    return, holding period and how it ended (stop / target / rebalanced).
+    CONTEXT, NOT VALIDATION. This is what the account actually did: where equity
+    started, where it is, its high-water mark, the drawdown from it, and each
+    completed trade with its return, holding period and how it ended (stop /
+    target / rebalanced). `positions` shows unrealized P&L on what is open;
+    `mandate_status` measures against the terms.
+
+    ⚠️ It does NOT answer "is what I am doing working", and must not be cited as
+    evidence that it is. Two reasons, both about what the data can support. The
+    series spans more than one decision regime — part of it was placed by a
+    deterministic executor that no longer exists, part by sessions deciding for
+    themselves — and no field in the record marks where one ends and the other
+    begins, so no slice of it can be attributed to the way decisions are made
+    now. And it is raw outcome: never validated for sample size or age, and
+    never lifecycle-linked. The layer that does apply those tests is the
+    institutional evidence delivered in the session context, which is a
+    different thing, is not reachable from here, and is not what this returns.
 
     `win_rate` is reported ONLY alongside average win and average loss. A win
     rate on its own is the most misleading number in trading — 78% winners lost
@@ -1940,15 +1986,28 @@ def research_log(limit: int = 25, symbol: str = "") -> str:
 def rule_out(symbol: str, reason: str, until: str = "") -> str:
     """Record that you decided against this name, and why. ⛔ THIS BLOCKS BUYS.
 
-    Not a fact about the name — your own decision. But it BINDS: the 10:00 fast
-    loop drops the name from its order plan and the order gate refuses the buy,
-    until `revisit` clears it. That is the point. The loop is deterministic and
-    knows nothing about why you sold; unrecorded, it rebuys the name the next
-    morning — which is exactly what happened to AMAT three days running.
+    Not a fact about the name — your own decision. But it BINDS: it is a
+    persistent, symbol-level BUY exclusion, and the PreToolUse order gate refuses
+    any buy in that name until `revisit` clears it (or `until` passes). That gate
+    runs in the harness on every order, whatever proposed it, so this is enforced
+    rather than advisory. The deterministic 10:00 loop that used to honour it as
+    well was deleted on 2026-08-14; the gate is now the only enforcement, and it
+    is sufficient.
 
     It never blocks a sell, a trim or an exit. Buys only.
 
     If you sell a name for a reason that should still hold tomorrow, call this.
+    Your reasoning does not survive the session: the next one boots blank, and
+    the ranked screen it reads will still show the name you just sold.
+
+    ⛔ IT IS FOR A NAME AND A FACT — NEVER FOR A CONCLUSION ABOUT A CLASS.
+    Aggregate evidence about how some kind of decision has tended to turn out —
+    from `performance()`, or from the institutional experience block in your
+    session context — is ABOUT A CLASS AND NAMES NO SYMBOL, so on its own it can
+    never justify excluding one. Use any of it as an input to a specific current
+    thesis about THIS name; that is what it is for. What you may not do is
+    convert a pattern into a permanent block on a symbol the pattern never
+    named.
 
     `until`: ISO date (YYYY-MM-DD) for a reason with a known expiry — "flat into
     earnings on the 13th" should stop binding afterwards. Leave it empty and the
@@ -2015,12 +2074,18 @@ def wake_deregister(key: str) -> str:
 
 @mcp.tool()
 def brief() -> str:
-    """Everything you need to decide, assembled fresh: mandate status, what you
+    """The current operational facts, assembled fresh: mandate status, what you
     hold and whether it is protected, the top candidates, and the market backdrop.
 
     These are FACTS, not instructions. The regime line is an observation, not a
     switch — nothing here decides for you. Pull `terrain(symbol)` before setting
     levels, and `universe()` if the top candidates do not suit.
+
+    SCOPE — current state, and only that. It carries no measured historical
+    evidence: institutional experience is delivered once, in the session context
+    at startup, and is deliberately not readable from any tool. It carries no
+    past session's reasoning either; that is `research_log()`. Neither is
+    missing here by oversight, and neither belongs here.
     """
     prod = read_current()
     v = marks.load() or {}
