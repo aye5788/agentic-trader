@@ -9,8 +9,19 @@
 #
 # Cadence: 10 minutes. Drift used to persist until the 08:00 health check — up
 # to ~24h of a stop watcher enforcing last week's logic. Ten minutes is short
-# enough that the window stops mattering and long enough that a multi-file edit
-# is not restarted halfway through. The run is a no-op when nothing is stale.
+# enough that the window stops mattering. The run is a no-op when nothing is
+# stale.
+#
+# ⛔ CADENCE IS THE RETRY INTERVAL, NOT A SAFETY MECHANISM. This comment used to
+# claim ten minutes was "long enough that a multi-file edit is not restarted
+# halfway through". That was never true — it is a race the edit usually wins,
+# not a guarantee — and on 2026-08-23 it lost: the timer restarted the monitor
+# while unreviewed exit-executor code sat in the working tree. What actually
+# prevents a half-finished or unreviewed edit from deploying is the COMMIT
+# BOUNDARY in agentic-reload.service: an ExecCondition that skips the run
+# entirely unless the checkout is a clean committed HEAD. Shortening or
+# lengthening this interval changes only how soon a deployable change goes
+# live.
 [Unit]
 Description=agentic-trader stale-code reload schedule (every 10 min)
 Documentation=file:/opt/agentic-trader/scripts/reload_stale.py

@@ -31,14 +31,50 @@ refuse and say so; the next run picks it up.
 `agentic-dashboard.service` is a read-only Flask page on localhost. It has no
 such hazard and should never have generated a human alert at all.
 
+THE COMMIT BOUNDARY — WHY "NEWER ON DISK" IS NOT "READY TO DEPLOY"
+------------------------------------------------------------------
+This script answers "is the running process behind the disk?". It used to treat
+that as sufficient, which quietly equated two different states:
+
+    the file changed          (a mtime fact)
+    the change is deployable  (an approval fact)
+
+Measured 2026-08-23: during the exit-executor work the monitor was deliberately
+NOT restarted, so unreviewed code would not reach the live stop watcher before
+review. The 10-minute backstop restarted it anyway — correctly by its own rule,
+and wrongly by the only rule that mattered. Refraining from running this script
+does not hold a review boundary, because a timer runs it for you.
+
+So automatic deployment now requires a CLEAN COMMITTED CHECKOUT. A commit is the
+point where a change stops being someone's work-in-progress, and it is a
+boundary the repo already keeps. Deployable: clean HEAD, including one that is
+ahead of origin or never pushed — origin is not consulted and no network is
+touched. Not deployable: any tracked modification, staged-but-uncommitted file,
+tracked deletion, unignored untracked file, or a git state that cannot be read.
+Ignored runtime artifacts are not dirtiness; this repo writes them constantly.
+
+⛔ THE CHECK IS REPO-WIDE, NOT PER-SERVICE. Intersecting the dirty files with
+each service's import closure would be a second, weaker dependency model beside
+src/deployed.py — and it would miss the config, prompt and settings files this
+repo reads dynamically, which no AST walk can see. Dirty anywhere blocks
+everything; one dirty file must not deploy the other service either.
+
+⛔ AND IT IS ENFORCED TWICE, ON PURPOSE. This function guards manual runs and
+any future caller. It cannot guard the timer, because the timer runs THIS FILE:
+an unreviewed edit here would be the code deciding whether unreviewed edits may
+deploy. deploy/agentic-reload.service therefore carries an ExecCondition that
+makes the same decision in shell, before this interpreter starts, using nothing
+from the repo. Neither layer is redundant; they fail in different directions.
+
 USAGE
     .venv/bin/python scripts/reload_stale.py            # restart what is stale
     .venv/bin/python scripts/reload_stale.py --dry-run  # say what it would do
     .venv/bin/python scripts/reload_stale.py --selftest
 
 Exit status: 0 = nothing stale, or everything stale was restarted.
-             1 = something stale was NOT restarted (deferred or failed) — the
-                 caller still has a reason to look.
+             1 = something stale was NOT restarted (blocked by a dirty or
+                 unreadable checkout, deferred, or failed) — the caller still
+                 has a reason to look.
 """
 from __future__ import annotations
 
@@ -47,6 +83,7 @@ import datetime as dt
 import pathlib
 import subprocess
 import sys
+from typing import NamedTuple
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -107,6 +144,69 @@ def exit_in_flight(req: pathlib.Path | None = None,
     return age <= max_secs
 
 
+class Checkout(NamedTuple):
+    """The deployability of the working tree. `status` is the decision;
+    `detail` is what a human needs to act on it."""
+    status: str          # "clean" | "dirty" | "unknown"
+    detail: str
+
+    @property
+    def deployable(self) -> bool:
+        return self.status == "clean"
+
+
+#: How many offending entries to name before truncating. A dirty tree during a
+#: refactor can hold hundreds; the point is to identify the state, not to dump it.
+DIRT_SHOWN = 10
+
+
+def checkout_state(repo: pathlib.Path | None = None) -> Checkout:
+    """Is this checkout a clean committed HEAD, and therefore deployable?
+
+    ONE probe, and it is the authoritative one:
+
+        git status --porcelain --untracked-files=all
+
+    ⛔ NOT `git diff --quiet`. That is the obvious choice and it is wrong three
+    ways: it ignores staged-but-uncommitted changes, ignores untracked files
+    entirely, and (with no `--cached`) misses the index. Every one of those is a
+    real "someone is mid-edit" shape, and a guard that green-lights them is
+    worse than no guard because the timer trusts it. `--untracked-files=all`
+    also expands untracked directories, so a new directory of unreviewed files
+    cannot hide behind a single collapsed entry.
+
+    Ignored paths are excluded — this repo writes research_store artifacts,
+    logs and __pycache__ continuously, and counting those as dirtiness would
+    mean the backstop never ran again.
+
+    ORIGIN IS NOT CONSULTED. The boundary is the local commit, so an unpushed or
+    ahead-of-origin branch deploys normally. No fetch, no network, no
+    origin/main comparison — a deployment guard that needs the network fails
+    when the network does.
+
+    FAILS CLOSED. A non-zero git, a missing directory, a non-repository or any
+    exception is "unknown", never "clean". The whole point is that a state we
+    cannot read is not a state we may deploy from.
+    """
+    repo = repo or REPO
+    try:
+        p = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=str(repo), capture_output=True, text=True, timeout=30)
+    except Exception as e:                                # noqa: BLE001
+        return Checkout("unknown", f"git status could not run in {repo}: "
+                                   f"{type(e).__name__}: {e}")
+    if p.returncode != 0:
+        why = (p.stderr or p.stdout or f"exit {p.returncode}").strip()
+        return Checkout("unknown", f"git status failed in {repo}: {why}")
+    entries = [ln for ln in p.stdout.splitlines() if ln.strip()]
+    if not entries:
+        return Checkout("clean", "working tree matches HEAD")
+    shown = ", ".join(e.strip() for e in entries[:DIRT_SHOWN])
+    more = f" (+{len(entries) - DIRT_SHOWN} more)" if len(entries) > DIRT_SHOWN else ""
+    return Checkout("dirty", f"{len(entries)} uncommitted change(s): {shown}{more}")
+
+
 def blocked_reason(unit: str) -> str | None:
     """Why this unit must NOT be restarted right now, or None if it may be.
 
@@ -156,8 +256,29 @@ def main() -> int:
 
     stale = stale_units()
     if not stale:
+        # ⛔ A DIRTY TREE IS NOT ITSELF A FAULT. Nothing is stale, so nothing
+        # wants deploying and there is nothing to refuse — checking the
+        # checkout here would turn "you have edits open" into a recurring
+        # non-event every 10 minutes. Staleness is what makes commit state
+        # relevant, so the probe belongs below, not above.
         print("reload_stale: nothing stale — every watched service matches disk")
         return 0
+
+    # ⛔ DECIDED ONCE, FOR THE WHOLE OPERATION, BEFORE ANY RESTART. The commit
+    # boundary is repo-wide: with edits open we do not deploy the dashboard
+    # while deferring the monitor, because "half the box is running reviewed
+    # code" is a state nobody chose and nobody can reason about afterwards.
+    co = checkout_state()
+    if not co.deployable:
+        for s in stale:
+            print(f"reload_stale: BLOCKED {s['unit']} — {s['detail']}")
+        print(f"reload_stale: automatic reload REFUSED — checkout is "
+              f"{co.status.upper()}: {co.detail}. Deployment happens only from a "
+              f"clean committed HEAD (unpushed is fine; origin is not consulted). "
+              f"Commit or stash, then re-run. The reviewed process stays live "
+              f"until then — it is running the last committed code, which is the "
+              f"safer of the two.")
+        return 1
 
     rc = 0
     for s in stale:

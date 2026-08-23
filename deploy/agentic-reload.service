@@ -14,6 +14,41 @@ User=root
 WorkingDirectory=/opt/agentic-trader
 Environment=HOME=/root
 
+# ⛔ THE COMMIT BOUNDARY — DEPLOY ONLY FROM A CLEAN COMMITTED CHECKOUT.
+#
+# "The file on disk is newer" and "the change may go live" are different facts,
+# and this unit used to treat them as one. On 2026-08-23 the monitor was
+# deliberately left un-restarted so unreviewed exit-executor code would not
+# reach the live stop watcher before review; the timer restarted it anyway,
+# correct by its own rule and wrong by the only one that mattered. NOT running
+# the remedy by hand does not hold a boundary when a timer runs it for you.
+#
+# ExecCondition, not a check inside reload_stale.py, and the distinction is the
+# whole point: the timer EXECUTES that script, so a guard living only there
+# would be unreviewed code deciding whether unreviewed code may deploy. This
+# runs FIRST, in shell, touching nothing from the repo but git itself. (The
+# script carries the same policy independently, for manual and future callers —
+# two layers, failing in different directions.)
+#
+# ExecCondition semantics: exit 0 runs ExecStart; a non-zero exit SKIPS the unit
+# cleanly, with no failed-unit alert — which is exactly right, since "there are
+# edits open" is a normal state, not a fault. The next tick re-checks.
+#
+# ⛔ `git status --porcelain --untracked-files=all`, NOT `git diff --quiet`.
+# git diff ignores staged changes and untracked files entirely; both are real
+# mid-edit shapes. `--untracked-files=all` expands directories so a new folder
+# of unreviewed files cannot hide as one collapsed entry. Ignored paths stay
+# excluded — this repo writes research_store, logs and __pycache__ constantly,
+# and counting those would mean this never runs again.
+#
+# Origin is NOT consulted: no fetch, no origin/main comparison. Unpushed and
+# ahead-of-origin both deploy. A deployment guard that needs the network fails
+# when the network does.
+#
+# FAILS CLOSED: unreadable directory, non-repository, or a git that errors all
+# exit non-zero and skip. `$$` is a literal `$` to systemd.
+ExecCondition=/bin/sh -c 'cd /opt/agentic-trader 2>/dev/null || { echo "agentic-reload: /opt/agentic-trader is unreadable — automatic reload SKIPPED (failing closed)"; exit 1; }; dirt=$$(git status --porcelain --untracked-files=all 2>&1); if [ $$? -ne 0 ]; then echo "agentic-reload: git state UNKNOWN — automatic reload SKIPPED (failing closed): $$dirt"; exit 1; fi; if [ -n "$$dirt" ]; then echo "agentic-reload: working tree is DIRTY — automatic reload SKIPPED. Services keep running the last committed code, which is the safer of the two. Deploy only from a clean committed HEAD (unpushed is fine); commit or stash, then it resumes on the next tick. Uncommitted:"; echo "$$dirt" | head -20; exit 1; fi; exit 0'
+
 # ⛔ .venv python (3.12): reload_stale imports src/deployed.py. It never imports
 # moomoo, so it must NOT use the system 3.10 interpreter.
 ExecStart=/opt/agentic-trader/.venv/bin/python scripts/reload_stale.py
