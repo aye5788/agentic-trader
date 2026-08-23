@@ -21,6 +21,7 @@ morning (stop-vs-momentum churn guard).
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -30,6 +31,7 @@ from zoneinfo import ZoneInfo
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "scripts" / "hooks"))
 
 try:                                     # NTFY_TOPIC for phone push alerts
     from dotenv import load_dotenv
@@ -43,6 +45,13 @@ from research_store import read_current, store   # noqa: E402
 from adapters.moomoo import prices as mmp        # noqa: E402
 from adapters.moomoo.client import quote_ctx     # noqa: E402
 from notify import push as notify               # noqa: E402  shared ntfy helper
+# ⛔ ONE DEFINITION OF "THE SAME REQUEST", shared with the gate that enforces it.
+# The producer of the identity and its verifier must never drift into two
+# implementations, so the stamp the executor is launched with and the check the
+# hook performs come from the same function. That module is stdlib-only for
+# exactly this reason: the monitor runs under system /usr/bin/python3 (3.10) and
+# the hook under the repo .venv (3.12).
+from pretooluse_exit_scope import request_id as _exit_request_id   # noqa: E402
 
 MON = REPO / "research_store" / "monitor"
 STATE = MON / "state.json"
@@ -1124,7 +1133,109 @@ def add_reentry_review(symbol: str, tier: str, exit_price: float, days: int):
     _save(REENTRY, rv)
 
 
-def run_executor(timeout_secs: int = 300) -> dict:
+#: The exit executor's MCP tool surface, stated here rather than inherited.
+#: place_equity_order appears because there is no sell-only variant of it; SELL-
+#: ONLY is enforced mechanically by scripts/hooks/pretooluse_exit_scope.py.
+#:
+#: ⛔ THE BUILT-INS ARE DELIBERATELY ABSENT FROM THIS LIST, AND MUST STAY ABSENT.
+#: prompts/exit.md does need Bash, Read and Write — it drives deterministic
+#: recording scripts and writes its own result/reconciliation files, and this is
+#: NOT the sessions' MCP architecture (do not quietly convert it into one). But
+#: a BARE tool name in --allowedTools is a BLANKET grant that overrides the
+#: narrow `Bash(...)` / `Write(...)` rules in the settings file: probed on this
+#: box, an executor granted bare `Bash` ran `ls /opt` happily while
+#: deploy/exit_executor_settings.json permitted only four specific
+#: `.venv/bin/python scripts/record_*.py` commands. Naming the built-in here
+#: silently converts "may run four recording scripts" into "may run anything".
+#: Their authority therefore comes from the per-command and per-path rules in
+#: that settings file, which is the only place it can be read and reviewed.
+EXECUTOR_TOOLS = [
+    "mcp__robinhood-trading__get_accounts",
+    "mcp__robinhood-trading__get_equity_positions",
+    "mcp__robinhood-trading__get_portfolio",
+    "mcp__robinhood-trading__get_equity_quotes",
+    "mcp__robinhood-trading__get_equity_orders",
+    "mcp__robinhood-trading__get_realized_pnl",
+    "mcp__robinhood-trading__review_equity_order",
+    "mcp__robinhood-trading__place_equity_order",
+]
+
+
+def executor_argv() -> list:
+    """The exact argv for one exit-executor spawn. PURE (no clock, no I/O).
+
+    Split out from run_executor() so the invocation can be READ and probed
+    without spawning a model against a live broker.
+
+    ⛔ EVERY FLAG HERE CLOSES AN INHERITANCE. Until now this process was started
+    as `claude -p --model ... --settings loop_settings.json <prompt>`, and
+    everything not named was whatever the box happened to have: the repo
+    CLAUDE.md, auto-memory, the user's plugins, the user's settings, and the
+    user-level MCP config with every claude.ai connector on it. The trading
+    sessions were isolated from exactly that on 2026-08-22 (commit 2f72df7);
+    this path was not, and it is the one that runs unattended on a price breach.
+
+    --setting-sources ""  drops the User, Project and Local settings sources. It
+        does NOT drop --settings below, and cannot drop enterprise policy: the
+        CLI computes enabled sources as {what this flag allows} ∪ {flagSettings,
+        policySettings}, so both order gates survive by construction.
+        ⛔ THE EMPTY STRING IS THE ARGUMENT AND MUST SURVIVE. It fails CLOSED if
+        lost — the flag takes exactly one value, so a dropped "" makes it eat
+        the next flag and the CLI refuses to start. A monitor that cannot spawn
+        an executor is loud; one that quietly re-inherits the box is not.
+    --settings            the executor's OWN contract, not the shared loop file:
+        the general order gate AND the exit-scope gate, plus a permission
+        allowlist scoped to this job.
+    --strict-mcp-config   makes --mcp-config the only MCP source. This is what
+        removes the OTHER BROKERS (Interactive Brokers, webull, Public.com) that
+        a user-level connector list had mounted on a live-money exit process.
+    --permission-mode dontAsk  auto-DENIES anything unlisted instead of
+        prompting: headless there is nobody to answer and `default` would hang
+        until the wall-clock timeout, which on this path means an unplaced stop.
+    --allowedTools        MUST STAY LAST — it is variadic and swallows every
+        following argument as a tool name.
+
+    ⚠️ NOT `--tools ""`. The sessions disable every built-in because they need
+    no shell. This executor DOES: steps 6, 7c, 7d and 7e of prompts/exit.md run
+    `.venv/bin/python scripts/record_*.py`, and it writes its own result file.
+    Removing the built-ins here would break exit recording in the direction that
+    looks like a quiet day.
+    """
+    return ["claude", "-p",
+            # model pinned — the exit path must never break because a default
+            # model was retired
+            "--model", "claude-opus-4-8",
+            "--setting-sources", "",
+            "--settings", str(REPO / "deploy" / "exit_executor_settings.json"),
+            "--strict-mcp-config",
+            "--mcp-config", str(REPO / "deploy" / "exit_mcp.json"),
+            "--permission-mode", "dontAsk",
+            "--allowedTools", *EXECUTOR_TOOLS]
+
+
+def executor_env(req_id: str) -> dict:
+    """The environment one exit-executor spawn runs under. PURE.
+
+    ⛔ AGENTIC_EXIT_REQUEST_ID IS THE AUTHORIZATION. It is the content hash of
+    the request just written, and scripts/hooks/pretooluse_exit_scope.py refuses
+    every order unless the file on disk still hashes to it. That is what binds
+    THIS PROCESS to THE REQUEST IT WAS LAUNCHED FOR: an executor started by hand
+    carries no stamp and can sell nothing, and a request rewritten underneath a
+    running executor stops authorizing it mid-flight. Verified on this box that
+    the value reaches the hook: hooks inherit the CLI's environment.
+
+    The two CLAUDE_CODE_DISABLE_* variables suppress instruction FILES and
+    auto-memory — they are NOT what closes plugin/settings inheritance (that is
+    `--setting-sources ""` in executor_argv), and the pair only look redundant.
+    """
+    env = dict(os.environ)
+    env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+    env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    env["AGENTIC_EXIT_REQUEST_ID"] = req_id
+    return env
+
+
+def run_executor(req_id: str, timeout_secs: int = 300) -> dict:
     """Fire the headless exit executor and return its result file ([] on failure).
 
     Deliberately reads the RESULT FILE rather than trusting the subprocess exit
@@ -1137,8 +1248,6 @@ def run_executor(timeout_secs: int = 300) -> dict:
     180s on post-sale reconciliation. That is survivable now, but a timeout that
     routinely fires is a timeout carrying no information."""
     try:
-        # model pinned (see run_fast_loop.sh) — the exit path must never break
-        # because a default model was retired
         # ⚠️ --settings IS LOAD-BEARING AND WAS MISSING SINCE THIS PATH WAS
         # WRITTEN. Without it the exit executor runs under .claude/settings.json,
         # which is deliberately permissive for humans and carries NO `hooks` key
@@ -1148,10 +1257,27 @@ def run_executor(timeout_secs: int = 300) -> dict:
         # whitelist. (The monitor checks the kill switch itself, so HALT worked;
         # nothing else did.) This is the same defect documented as caught for
         # sessions in deploy/session_tools.sh -- it was still live here.
-        subprocess.run(["claude", "-p", "--model", "claude-opus-4-8",
-                        "--settings", str(REPO / "deploy" / "loop_settings.json"),
-                        (REPO / "prompts" / "exit.md").read_text()],
-                       cwd=str(REPO), timeout=timeout_secs, check=False)
+        #
+        # ⛔ AND --settings ALONE WAS STILL NOT SCOPE. The general order gate
+        # ALLOWS every sell by design (a gate that refuses one strips a
+        # fractional position of its only stop), so it bound this process to
+        # global safety policy and to nothing about THIS request: the executor
+        # could have sold a holding the monitor never asked about and passed.
+        # The second hook in exit_executor_settings.json is what closes that;
+        # the request id below is what it checks against.
+        #
+        # ⛔ THE PROMPT GOES ON STDIN, NEVER IN ARGV. `--allowedTools` is
+        # VARIADIC, so a trailing prompt argument is consumed as one more tool
+        # name and the CLI then exits 1 with "Input must be provided either
+        # through stdin or as a prompt argument" — i.e. a breached stop that
+        # places nothing, and the monitor reads the absent result file as a
+        # failed exit. scripts/session.py:784 records the same failure for the
+        # trading sessions; this path inherits the lesson rather than the bug.
+        # (It also sidesteps MAX_ARG_STRLEN, 128KiB per argument.)
+        subprocess.run(executor_argv(),
+                       input=(REPO / "prompts" / "exit.md").read_text(),
+                       text=True, cwd=str(REPO), env=executor_env(req_id),
+                       timeout=timeout_secs, check=False)
     except Exception as e:                            # never let execution crash the monitor
         print(f"  executor error: {e}")
     return _load(EXIT_RES, {"sold": []})
@@ -1787,10 +1913,18 @@ def check_once(cfg, client) -> int:
         st["executor_launches"] = _pruned
         _save(STATE, st)                     # persist BEFORE spawning: a crash
                                              # mid-run must still count the launch
-        _save(EXIT_REQ, {"ts": ts, "account": "948184924", "exits": act})
+        # ⛔ THE REQUEST AND ITS IDENTITY COME FROM THE SAME OBJECT. The hash is
+        # taken from the dict that is written, not re-read from disk, so the
+        # stamp the executor is launched with describes exactly the bytes it
+        # will be checked against. Anything that rewrites exit_request.json
+        # afterwards — a later trigger, or the executor itself — stops matching,
+        # and scripts/hooks/pretooluse_exit_scope.py then refuses every order.
+        _request = {"ts": ts, "account": "948184924", "exits": act}
+        _save(EXIT_REQ, _request)
         if EXIT_RES.exists():
             EXIT_RES.unlink()
-        result = run_executor(int(m.get("executor_timeout_secs", 300)))
+        result = run_executor(_exit_request_id(_request),
+                              int(m.get("executor_timeout_secs", 300)))
         result_present = EXIT_RES.exists()
         sold = {s["symbol"] for s in result.get("sold", [])}
         failed = {t["symbol"] for t in act} - sold

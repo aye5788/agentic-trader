@@ -9,6 +9,22 @@ HARD RULES (CLAUDE.md overrides everything):
 - Equities only, options OFF. SELLS ONLY in this procedure.
 - Only sell symbols in `research_store/monitor/exit_request.json`. Never exceed
   the position you actually hold.
+- ⛔ THOSE RULES ARE MECHANICALLY ENFORCED, not merely asked of you. A PreToolUse
+  gate (`scripts/hooks/pretooluse_exit_scope.py`) refuses any order that is not a
+  SELL, names a symbol outside this request, targets another account, or exceeds
+  the fraction the monitor authorized — and it is bound to the ONE request you
+  were launched for, so an older request authorizes nothing.
+- ⛔ ONE ORDER PER SYMBOL PER REQUEST. The first order Robinhood accepts spends
+  this request's authorization for that symbol; a second is refused however
+  small. If a remainder is still open, say so in your report and stop — the
+  monitor reconciles and issues a fresh request. Do not top up a partial fill.
+- Option trading is unavailable to you: option-order tools are NOT permission-
+  approved for this process, and `place_option_order` is not offered by the
+  broker surface at all. Read-only option schemas are visible but every one of
+  them is denied, so do not attempt them.
+- A refusal is never something to work around; it means the order did not match
+  your authority. Report it and stop — do not retry it in another shape, do not
+  re-place it as a different order type, and do not sell something else instead.
 
 PROCEDURE — follow exactly:
 
@@ -21,9 +37,17 @@ PROCEDURE — follow exactly:
 4. For each exit, sells only:
    - `fraction == 1.0` → sell the ENTIRE position (full stop / final target).
    - `fraction < 1.0`  → sell that fraction of the CURRENT quantity (scale-out).
-   - Use a **market**, dollar-or-fractional-quantity sell in regular hours
-     (fractional sells are allowed). `review_equity_order` → on a clean review →
-     `place_equity_order`. If the position is already gone/zero, skip it.
+   - Use a **market**, FRACTIONAL-SHARE-QUANTITY sell in regular hours.
+     `review_equity_order` → on a clean review → `place_equity_order`. If the
+     position is already gone/zero, skip it.
+   - ⛔ EVERY exit — full or partial — must be placed as a share `quantity`,
+     never as a `dollar_amount`, and only after the step-3
+     `get_equity_positions` read for THIS run. The scope gate bounds the order
+     against the shares that read reports (`quantity` for a full exit,
+     `fraction × quantity` for a trim) and will not convert a dollar amount
+     through a price it would have to invent. A dollar-priced exit is refused,
+     and so is any exit placed before that broker read. Robinhood rejects a
+     dollar-notional sell of a whole position anyway.
    - ⛔ **Rewrite `exit_result.json` immediately after EACH placement**, before
      moving to the next symbol — do not batch it to the end. You are on a wall-
      clock timeout and can be killed at any moment. That file is the ONLY thing

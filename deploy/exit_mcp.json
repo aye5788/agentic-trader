@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "THE EXIT EXECUTOR'S MCP SURFACE — DECLARED, NEVER INHERITED.",
+    "Used with `claude --strict-mcp-config --mcp-config deploy/exit_mcp.json`,",
+    "which ignores the user/global MCP config entirely.",
+    "",
+    "WHY THIS FILE EXISTS. Until now the exit executor was spawned with no MCP",
+    "flags at all, so it inherited the USER-level config in /root/.claude.json",
+    "— every claude.ai account connector the human who codes on this box has",
+    "ever connected. That is the same inheritance that killed the 10:35 open",
+    "session on 2026-08-13 by context-thrashing, and deploy/session_mcp.json",
+    "closed it for the trading sessions while leaving it wide open here.",
+    "",
+    "⛔ AND IT IS WORSE ON THIS PATH THAN IT WAS ON THAT ONE. The connectors",
+    "reachable that way include OTHER BROKERS with live trading surfaces —",
+    "Interactive Brokers, webull, Public.com. A stop-triggered, headless,",
+    "live-money process had them mounted. Nothing is known to have called one:",
+    "the permission allowlist never named them. But CLAUDE.md's first hard rule",
+    "is that execution happens ONLY through Robinhood and ONLY in the Agentic",
+    "account, and a rule enforced solely by an allowlist that nobody re-derives",
+    "when a connector is added is a rule waiting to be edited by accident. Under",
+    "strict mode those servers are not merely forbidden, they are ABSENT.",
+    "",
+    "ONE SERVER, deliberately. prompts/exit.md reaches the broker over MCP and",
+    "everything else over Bash (`.venv/bin/python scripts/record_*.py`), so the",
+    "agentic-trader server the trading sessions use is not needed here and is",
+    "not mounted — see deploy/exit_executor_settings.json for the full surface.",
+    "",
+    "⛔ NO SECRETS HERE, AND NONE MAY BE ADDED. Robinhood is a remote HTTP MCP",
+    "whose OAuth lives in the CLI's own credential store, not in this file.",
+    "This file is committed."
+  ],
+  "mcpServers": {
+    "robinhood-trading": {
+      "type": "http",
+      "url": "https://agent.robinhood.com/mcp/trading"
+    }
+  }
+}
