@@ -62,7 +62,30 @@ WATCHED = (
 
 # Where a bare `import governance` resolves from. These mirror the sys.path
 # inserts the entry scripts perform at import time.
-SEARCH_ROOTS = ("src", "")
+#
+# ⛔ THIS TUPLE IS THE COVERAGE, NOT JUST A CONVENIENCE. A directory an entry
+# script adds to sys.path and this tuple does not model is a directory whose
+# modules resolve to None in _resolve(), drop silently out of import_closure(),
+# and are therefore never compared against the process start time. The check
+# then keeps reporting green for a file it cannot see — the same
+# "under-covers while still reporting green" failure this module's docstring
+# was written about, arriving through the SEARCH PATH instead of through a new
+# import. Adding an import is covered automatically; adding an import ROOT is
+# not, and that asymmetry is the trap.
+#
+# `scripts/hooks` is the third root because scripts/market_monitor.py inserts it
+# and imports `request_id` from pretooluse_exit_scope — the function that stamps
+# AGENTIC_EXIT_REQUEST_ID and binds an exit executor to the one request it was
+# launched for. Producer and verifier of that identity must be the same code: a
+# monitor still holding an old copy while the hook on disk has a new one breaks
+# precisely the binding that keeps a live exit in scope, and until this line the
+# drift detector could not see that happen. Found 2026-08-23 by walking the
+# closure during deployment verification — no check fired, because the file was
+# invisible to every check there is.
+#
+# ORDER IS PRIORITY: _resolve() returns the FIRST hit, so `src` stays ahead of
+# everything and no existing resolution moves.
+SEARCH_ROOTS = ("src", "scripts/hooks", "")
 
 
 def _candidates(module: str, root: pathlib.Path) -> list[pathlib.Path]:
