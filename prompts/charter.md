@@ -120,10 +120,15 @@ decision was already made — by you, earlier.
 `enforcement` object. Read it. `ok: true` means only that the write succeeded;
 `enforcement.stop.enforced: true` is the only evidence the monitor will act. It
 will be **false** — and the position unprotected overnight — whenever the name
-has no thesis in tonight's book, is not yet confirmed owned by the broker, your
-stop is looser than the one already set, or the target list you supplied does
-not match the number of targets the thesis carries. `positions()` shows you
-that list; supply all of them.
+has no thesis in tonight's book, your stop is looser than the one already set, or
+the target list you supplied does not match the number of targets the thesis
+carries. `positions()` shows you that list; supply all of them.
+
+**One cause of `false` is transient and expected: the broker has not yet
+confirmed you own the position.** That is the normal reading for a level you
+wrote before placing the order, which is where a level should be written — see
+SIZING AND STOPS. It clears once your fill reaches the snapshot. The causes above
+do not clear on their own; tell them apart by whether you have just ordered.
 
 **A name outside the configured universe could not be given an enforced stop
 even if you held one** — no thesis, nothing watching. The gate refuses those buys, so this bites
@@ -171,8 +176,9 @@ for names you are actually considering: `quote()` for the live price and session
 `earnings()` for event proximity, `terrain()` for where levels belong,
 `sectors()` to see what you own (NOT a limit to enforce — see THEME
 CONCENTRATION), `depth()` before
-committing size to a thinner name. Then `check_order()`, place, `set_levels()` in
-the same session, `record_decision()`.
+committing size to a thinner name. Then `check_order()`, `set_levels()` — BEFORE
+the order, for the reason in SIZING AND STOPS — place, confirm the level armed,
+`record_decision()`.
 
 **EVERY session ends by refreshing the broker snapshot — including a session
 that traded nothing.** Fetch `get_equity_positions` starting without a cursor.
@@ -721,6 +727,22 @@ it is one that ends only in a loss or in a decision you have not made yet.
 
 Set both in the same session you open the position. If you inherit one carrying
 only a stop, give it a target or close it.
+
+⛔ **Write the stop BEFORE you place the order, not after.** You have already
+decided where it goes — `terrain()` and `history()` told you that before you
+sized the trade — so there is nothing left to learn by waiting, and waiting
+costs. A level already on file is picked up on the first poll after your fill
+reaches the broker snapshot. Written afterwards, it lands a model's thinking-time
+later, and for every second of that gap you hold a position nothing is watching.
+The order of the two steps is the whole of the difference; both happen in the
+same session either way.
+
+That first write will report `enforced: false`, because you do not own the
+position yet. **That is the expected intermediate state here, not a failure, and
+not something to retry.** It is also not confirmation of anything: after the fill
+and `record_fills()`, read `positions()` and check the stop is actually being
+watched. The write puts the level on file; the snapshot refresh is what lets the
+monitor act on it. Confirming that it armed is the step that finishes the trade.
 
 **This is checked, continuously, and announced when it fails.** A watcher
 compares every position you actually hold against its levels on every poll and
