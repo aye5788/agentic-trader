@@ -9,6 +9,125 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-24 — the charter told the agent to place first and set the stop after, so every buy fired a false UNPROTECTED alert
+
+**Symptom.** The 10:35 session made four buys and the operator got four red
+phone pushes: `🚨 Unprotected position(s) — no stop being watched`, each ending
+"Set a stop or exit by hand." All four were false. Nothing was ever unprotected
+beyond the arming gap, and every position carried its stop by the time the alert
+landed on the phone.
+
+**Measured, from `journalctl -u agentic-monitor` and the fills in
+`research_store/journal.jsonl`:**
+
+| Symbol | Fill | Alert | Armed | Fill→alert | Alert→armed | Fill→armed |
+| ------ | ---- | ----- | ----- | ---------- | ----------- | ---------- |
+| MRK  | 10:38:44 | 10:39:18 | 10:39:34 | 33s | 16s | 49s |
+| KO   | 10:49:28 | 10:50:21 | 10:51:07 | 52s | 46s | 98s |
+| MNST | 10:49:36 | 10:50:21 | 10:51:22 | 45s | 61s | 106s |
+| FCX  | 10:58:47 | 10:59:22 | 10:59:52 | 34s | 30s | 64s |
+
+Fill→armed: mean 79s, max 106s. Alert→armed: mean 38s, max 61s. n=4, one
+session; the dominant term is model latency and is not a stable quantity.
+
+**Root cause — the charter's own sequencing.** `prompts/charter.md` line 174
+read "Then `check_order()`, place, `set_levels()` in the same session,
+`record_decision()`." The agent followed it exactly. Placing first means the
+position exists, and `record_fills()` republishes the snapshot, well before any
+level is on file — so the monitor sees an owned name with no stop and alerts.
+`standalone_candidates()` (`scripts/market_monitor.py:908`) requires the
+override to ALREADY exist before the symbol enters the quote set, so the
+alert-suppression subtraction at line 1594 (`cur_unprot - _pending_early`) has
+nothing to subtract and the push goes out.
+
+Not a race — deterministic on every new buy. Also self-healing: the level write
+is itself what puts the symbol into the quote set, so the next poll arms it.
+Each of today's four armed one poll after its override landed, MRK ten seconds
+BEFORE the agent's retry. The agent re-called `set_levels` three times believing
+the first write had failed; those retries changed the report, never the
+enforcement.
+
+**Fix — `prompts/charter.md` only, commit `627cba6`. Three edits:**
+
+1. Line 174 sequence is now `check_order()`, `set_levels()` — before the order —
+   place, confirm the level armed, `record_decision()`.
+2. SIZING AND STOPS carries the rule and the reason: the level is already
+   decided during sizing (`terrain()`/`history()` produced it), so writing it
+   first costs nothing and puts it on file before the position exists.
+3. The enforcement-semantics passage listed "is not yet confirmed owned by the
+   broker" among the causes of `enforced: false` that leave a position
+   "unprotected overnight". That would make the agent read its own pre-order
+   write as a danger. Split out: that cause is transient and now the EXPECTED
+   reading for a pre-order write; the other three do not clear on their own.
+
+**Verification.** `src/repo_checks.py` is blocked by operator hook, correctly.
+Verified instead by rendering the charter as `session.py` hands it to the agent
+(`charter.render(mandate.load(), strategy.load(), _tool_names())`) and reading
+it: placeholders all substituted, the new cross-reference to SIZING AND STOPS
+resolves, and all five `set_levels` mentions checked for conflict. Edit 3 is
+what that read turned up — it was not in the original plan.
+
+`reload_stale.py --dry-run`: nothing stale. The charter is read fresh at session
+start, so this needed no restart and was live for the same day's 15:15 session.
+
+**What this does NOT fix.** The 30–50s between the fill and ownership reaching
+`research_store/rh/positions.json`. The monitor has no broker access — it learns
+what is held only from that file, written by the agent. Expect fill→armed
+~45–65s rather than 49–106s; the floor is architectural.
+
+**The alarm itself is deliberately unchanged.** A delay before firing was
+considered and rejected as treating the symptom: if the new sequence is
+followed, the level is on file before the watchdog ever sees the position and
+the condition never arises. If the push still fires, that is evidence the
+sequence is not being followed, which is worth knowing.
+
+
+## 2026-08-23 — the letter's date line cannot tell two issues apart, and two facts the prompt needs are never produced
+
+Three defects in the newsletter pipeline, found while writing issue 009. None of
+them touch trading; all three touch what the letter can honestly say.
+
+**1. `issue_date` is derived from the run's Monday, with no disambiguator.**
+`scripts/letter_facts.py:397` sets
+`"issue_date": f"Week of {monday.strftime('%B %-d, %Y')}"`. Issue 008 was
+generated Mon 2026-08-17 and issue 009 on Sun 2026-08-23, so both carry the
+identical heading **"Week of August 17, 2026"** — while 008 reported +9.6% for a
+window opening August 10 and 009 reports −5.1% for August 17–21. Two different
+weeks, two contradictory numbers, one date line. A reader chaining them would
+compound figures that overlap. `week_pnl_from`/`week_pnl_to` and
+`week_pnl_window_matches_header` are both emitted and both correct; the header
+string simply ignores them. Issue 009 works around this in prose (paragraph 1
+states the window explicitly and warns off the comparison), but the producer is
+unfixed. Suggested fix: build `issue_date` from `week_pnl_from`/`week_pnl_to`, or
+append the issue number, so no two issues can print the same date line.
+
+**2. `trade_pnl_at_stop_pct_cost` is documented but never emitted.**
+`prompts/newsletter.md` step 1f instructs the writer to use that field to rank
+the `profitable_now_but_loss_at_stop` positions by severity. It appears nowhere
+in `letter_facts.py` and nowhere in facts.json. This week 8 of 10 positions
+carried the flag (all but MU and SNDK), so the ranking the prompt asks for was
+exactly the case it was written for, and was impossible. Issue 009 names all
+eight without ordering them rather than computing a number the facts do not
+contain. Either emit the field or drop it from the prompt.
+
+**3. `realized` is passed through with no freshness check.**
+`letter_facts.py:475` does `"realized": _read_json(RS / "rh" / "realized.json",
+None)` — raw, unstamped against the reporting window. This week the file carried
+`ts: 2026-08-14`, predating all four of the week's closes (MRK, TER, RTX, BAC),
+so a letter reading it naively would have presented −$12.37 / −7.05% as the
+banked result *including* those trades. It includes none of them. Issue 009
+reports the figure with its as-of date and says so explicitly. Suggested fix:
+compare `realized.ts` against `week_pnl_to` and mark the block stale when it
+lags, so the writer cannot mistake it for current.
+
+**Related, already logged:** the agent-recorded stop levels in
+`agent_decisions_this_week` still disagree with the authoritative
+`positions[].stop` for held names (AMD 413.69 vs 419.94, FTNT 140.00 vs 143.90,
+XOM 155.00 vs 158.50). Issue 009 handles this by describing stop reasoning
+qualitatively for still-held names and quoting explicit levels only for closed
+ones, so the letter never contradicts its own table.
+
+
 ### 2026-08-21 — a concentration limit that never existed made six of the top fourteen names unbuyable
 
 **The damage first.** Between 08-13 and 08-21 the book stopped being able to buy
