@@ -318,6 +318,82 @@ def _clip(text, symbol=None, budget=None):
               f"version, the reversal condition is often at the end.]")
 
 
+def entry_rationale(decisions: list, symbol: str, position_id) -> dict:
+    """WHY this position is held, joined on position_id. Pure. Never raises.
+
+    ⛔ EXACT LIFECYCLE JOIN, NEVER LATEST-BY-SYMBOL. A held name the ranking did
+    not select carries a GENERATED thesis string ("HELD, not in the ranked
+    selection ... whether to close it is YOUR call") and nothing else, so every
+    session inherits the position with no reason attached and the cheapest
+    correct-looking action is to hold it again. The reason does exist -- the
+    session that bought it called record_decision -- but only as prose in the
+    append-only stream, and the agent is stateless between sessions.
+
+    ⛔ THE OBVIOUS IMPLEMENTATION IS WRONG. "Most recent decision mentioning
+    SYM" silently attaches:
+      - the PREVIOUS lifecycle's reasoning after a full close and re-entry, which
+        is a rationale for a position that no longer exists;
+      - a basket decision (`symbol: "AMD,MU,INTC"`) to one of its legs. Excluded
+        by exact string equality: "AMD,MU,INTC" != "AMD". Do not "fix" that by
+        splitting the string -- one scalar position_id cannot describe a basket.
+      - a decision recorded BEFORE the buy, which has no active lifecycle to
+        stamp and is never linked retroactively.
+    Each of those reads as authoritative and is unfalsifiable by the reader.
+
+    So: a rationale is reported ONLY when a decision carries the position_id of
+    the lifecycle that is open right now. Otherwise the field is None and
+    `rationale_join_status` says which of those cases applies. An honest "not
+    linked" is worth more than a plausible wrong reason, because the wrong one
+    gets acted on.
+
+    `position_id` is derived by the ENVIRONMENT from the lifecycle replay
+    (lifecycle_journal.active_position_id); the agent cannot supply or guess one.
+    Absence is a permanent, valid state for records written before that field
+    existed -- so this must degrade to "unlinked", never to an error.
+    """
+    out = {"position_id": position_id, "entry_rationale": None,
+           "entry_decision_ts": None, "entry_decision_action": None,
+           "rationale_source": None, "rationale_join_status": None,
+           "rationale_missing": True}
+    if not position_id:
+        out["rationale_join_status"] = (
+            "no_active_lifecycle — no open position_id for this symbol in the "
+            "journal replay, so no decision can be linked to it")
+        return out
+    try:
+        mine = [d for d in (decisions or [])
+                if str(d.get("position_id") or "") == str(position_id)
+                and str(d.get("symbol") or "") == str(symbol)
+                and isinstance(d.get("reason"), str) and d.get("reason").strip()]
+    except Exception:                                   # noqa: BLE001 — never raises
+        mine = []
+    if not mine:
+        out["rationale_join_status"] = (
+            f"unlinked — no reasoned decision carries position_id {position_id}. "
+            f"The buy may predate the lifecycle stamp, or have been recorded as a "
+            f"basket. Call research_log(symbol=\"{symbol}\") to read the history "
+            f"yourself; do NOT assume the position is unreasoned.")
+        return out
+    mine.sort(key=lambda d: str(d.get("ts") or ""))
+    # The OPENING decision is the thesis; a later trim/hold note is not.
+    opens = [d for d in mine
+             if any(k in str(d.get("action") or "").lower()
+                    for k in ("open", "buy", "enter", "add"))]
+    pick = (opens or mine)[0]
+    out.update({
+        "entry_rationale": _clip(pick.get("reason"), symbol, _SYMBOL_DECISION_CHARS),
+        "entry_decision_ts": pick.get("ts"),
+        "entry_decision_action": pick.get("action"),
+        "rationale_source": ("record_decision, joined on the currently-open "
+                             "position_id" + ("" if opens else
+                             " (no opening decision found; earliest linked "
+                             "decision shown instead)")),
+        "rationale_join_status": "linked",
+        "rationale_missing": False,
+    })
+    return out
+
+
 def research_log(root: Path, journal: Path, limit: int = 25,
                  symbol: str = "") -> dict:
     """What past sessions decided and why — the agent reading its own record.

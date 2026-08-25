@@ -47,7 +47,8 @@ def _armed_solo(agent_stop, live_price) -> bool:
 
 def holdings(valued: dict, theses: list, overrides: dict | None = None,
              monitor_prices: dict | None = None,
-             min_fractional_order_usd: float = 1.0) -> dict:
+             min_fractional_order_usd: float = 1.0,
+             rationale: dict | None = None) -> dict:
     """Merge broker positions with the levels the agent set for them.
 
     `overrides` is research_store/monitor/overrides.json — the levels the agent
@@ -224,6 +225,15 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
             "thesis_as_of": getattr(t, "as_of", None) if t else None,
             "eligibility_state": _eligibility,
             "retention_state": _retention,
+            # ⛔ WHEN THE LOOP EXPECTS TO LOOK AGAIN — NOT A THESIS DEADLINE.
+            # slow_loop rewrites review_by to `asof + 7 days` on EVERY run, so
+            # it rolls forward and never falls due while the job is healthy; it
+            # only goes stale if the product stops refreshing. Named
+            # `next_scheduled_review` for exactly that reason: read as a
+            # deadline it would imply a position has been reviewed when nothing
+            # reviewed it. It is a liveness fact about the LOOP, not a
+            # commitment about this position.
+            "next_scheduled_review": getattr(t, "review_by", None) if t else None,
             # ---- Codex spec step 5: STOP-DERIVED. Unblocked only because the
             # resolver above now decides one effective stop and the replay
             # fixtures prove it equals what the monitor enforces.
@@ -301,6 +311,18 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
                     f"{_lv['effective_stop']}, targets {_lv['effective_targets']}.")
             if o.get("reason"):
                 rec["level_reason"] = o["reason"]
+        # WHY THIS IS HELD, joined on the open lifecycle — supplied by the
+        # caller (agent_env.memory.entry_rationale) because this function is
+        # pure and does not read the journal. Absent mapping = field omitted,
+        # so every existing caller and fixture is unchanged.
+        #
+        # ⚠️ `level_reason` above is NOT this. It is the reason for the STOP,
+        # and on a same-day buy it is usually enforcement mechanics ("retrying,
+        # the guard failed closed on a missing price") rather than the
+        # investment case. Reading it as the thesis is the mistake this field
+        # exists to prevent.
+        if rationale and sym in rationale:
+            rec.update(rationale[sym])
         out[sym] = rec
     return out
 

@@ -9,6 +9,63 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-25 — a held name the ranking did not select arrived with no reason attached
+
+**Operator question: how do we address positions with no thesis that continue to
+be live? Diagnosed, reviewed by `codex` (SPLIT — it corrected the central claim),
+then implemented as reviewed.**
+
+Five of thirteen positions (FCX, JNJ, KO, MNST, MRK) carry `source: "protective"`
+— held, but not selected by the ranking. That is deliberate:
+`slow_loop.protective_theses()` supplies geometry so the monitor has a base stop
+for a name the agent bought on its own judgement. They are all `watched: true`.
+
+The gap is not protection, it is REASONING. Their thesis text is generated
+boilerplate ("HELD, not in the ranked selection … whether to close it is YOUR
+call"). The actual buy reason existed only as journal prose from a session that
+no longer exists, and the agent is stateless between sessions — so each session
+inherited a live position with no case for or against it, and holding again was
+the cheapest correct-looking action. `level_reason` was the nearest thing
+available and it describes the STOP, often enforcement mechanics rather than the
+investment case.
+
+`positions()` now reports `entry_rationale` for every holding, joined on the
+lifecycle that is open RIGHT NOW (`lifecycle_journal.active_position_id`), plus
+`rationale_join_status` saying whether the join actually succeeded. On the live
+book all five protective names come back `linked` with their real buy reasons;
+the older ranked names (AMD, FTNT, INTC, MU, PANW, SNDK, STX) come back
+`unlinked` because they predate the lifecycle stamp — reported as such rather
+than guessed at.
+
+**What the review changed.** The obvious implementation — "most recent decision
+mentioning SYM" — was rejected: after a full close and re-entry it attaches the
+PREVIOUS lifecycle's reasoning to a different position, and it splits a basket
+decision (`symbol: "AMD,MU,INTC"`) onto one leg. Both read as authoritative and
+neither is falsifiable by the reader. Unjoinable now yields `null` plus a status,
+because an honest "not linked" is worth more than a plausible wrong reason.
+
+`review_by` is surfaced as **`next_scheduled_review`**, deliberately not as a
+deadline: the loop rewrites it to `asof + 7 days` every run, so it rolls forward
+and never falls due while the job is healthy. Presented as a deadline it would
+imply a position had been reviewed when nothing reviewed it.
+
+**Rejected, and the review agreed:** any rule that force-sells or flags-for-sale
+names outside the ranked selection. That is a retention cap by another name, it
+contradicts "THE BOOK IS WHATEVER THE AGENT HOLDS", and accreted rule-outs
+already made 6 of the top 14 unbuyable once. Nothing here can refuse a trade.
+
+**⚠️ OPEN, NOT ADDRESSED — the real finding.** The assistant claimed the weekly
+rebuild would absorb MRK (rank 13) and JNJ (rank 14) back into the top-14 book,
+and `codex` showed that is FALSE: `momentum.select()` retains incumbents through
+the rank-20 band, so if all 14 incumbents stay inside it there is no free slot,
+and `current.json` already holds names at true ranks 15, 16 and 19 while
+higher-ranked MRK and JNJ sit outside. A higher-ranked name can therefore stay
+protective indefinitely. That is selection POLICY, not plumbing, and nothing in
+this change touches it.
+
+---
+
+
 ## 2026-08-25 — the exit path's snapshot was written by a second clock: a correct positions.json read "stale after fill"
 
 **Fixed the same day. Diagnosis by the assistant, corrected and sharpened by an

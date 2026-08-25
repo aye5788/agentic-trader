@@ -167,6 +167,24 @@ def positions() -> str:
     `watched: false` means the position has NO stop being enforced — it is
     unprotected. That is deliberately reported rather than hidden.
 
+    `entry_rationale` is WHY THIS POSITION IS HELD — the reason recorded by the
+    session that opened it, joined on the lifecycle that is open right now. It
+    matters most for a name whose `retention_state` says the ranking did not
+    select it: that thesis text is GENERATED ("whether to close it is your
+    call") and carries no reason, so without this the position arrives with no
+    case for or against it, and holding again is the cheapest thing to do.
+    ⛔ `rationale_join_status` is part of the answer, not decoration. `linked`
+    means the reason belongs to THIS position. Anything else means it could not
+    be joined — a buy recorded before the lifecycle stamp, a basket decision, a
+    pre-existing position — and `entry_rationale` is then null RATHER THAN the
+    most recent note mentioning the symbol, which after a close and re-entry
+    would be a rationale for a position that no longer exists. An unlinked
+    rationale is not evidence the position was unreasoned: call
+    `research_log(symbol=...)` and read the history before concluding that.
+    ⛔ `next_scheduled_review` is when the LOOP next expects to look, not a
+    deadline this position has met. It is rewritten to `asof + 7 days` on every
+    run, so it rolls forward and never falls due while the job is healthy.
+
     These columns are measurements, not recommendations, and row order has no
     policy meaning. `trade_pnl_at_stop` is P&L relative to entry and is not
     prospective risk. `mark_to_stop` assumes execution exactly at the stop;
@@ -191,7 +209,9 @@ def positions() -> str:
     ov = _overrides()
     out = state.holdings(v, prod.theses if prod else [], ov, _monitor_prices(),
                          float((strat.load().get("governance") or {})
-                               .get('min_fractional_order_usd', 1.0)))
+                               .get('min_fractional_order_usd', 1.0)),
+                         rationale=_entry_rationales(
+                             sorted((v.get("positions") or {}).keys())))
     # Excursion facts: what the path looked like, not just where it stands.
     # I/O lives here; the arithmetic is pure in src/excursion.py.
     try:
@@ -1285,6 +1305,38 @@ def _active_position_id(symbol: str):
         return lifecycle_journal.active_position_id(store.read_journal(), symbol), None
     except Exception as e:      # noqa: BLE001 - linkage never breaks a decision
         return None, str(e)
+
+
+def _entry_rationales(symbols) -> dict:
+    """{SYMBOL: why it is held}, joined on the OPEN lifecycle. NEVER raises.
+
+    The journal read and the lifecycle replay live here; the join itself is pure
+    in agent_env.memory.entry_rationale, and state.holdings() stays pure by
+    taking the finished mapping. Same split as every other fact in positions().
+
+    ⛔ REPORTING FAILURE IS PART OF THE CONTRACT. If the stream cannot be read
+    or replayed, every symbol comes back with an explicit `unavailable` status
+    rather than a missing key, because a silently absent rationale is
+    indistinguishable from a position nobody ever reasoned about — and the whole
+    point of this field is that a later session can tell those two apart.
+    """
+    try:
+        import lifecycle_journal                            # noqa: PLC0415
+        journal = list(store.read_journal())
+    except Exception as e:                                  # noqa: BLE001
+        return {s: {"entry_rationale": None, "rationale_missing": True,
+                    "rationale_join_status": f"unavailable: {e}"} for s in symbols}
+    decisions = [e for e in journal if e.get("event") == "agent_decision"]
+    out = {}
+    for s in symbols:
+        try:
+            pid = lifecycle_journal.active_position_id(journal, s)
+        except Exception as e:                              # noqa: BLE001
+            out[s] = {"entry_rationale": None, "rationale_missing": True,
+                      "rationale_join_status": f"unavailable: {e}"}
+            continue
+        out[s] = memory.entry_rationale(decisions, s, pid)
+    return out
 
 
 def _evidence_seen() -> dict:
