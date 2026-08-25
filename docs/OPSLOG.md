@@ -9,6 +9,118 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-25 — operator review of the open session's report: TA-ambiguous prose, and self-diagnosis driving live trades
+
+**Raised by Aaron on 2026-08-25 after reading the 10:35 open session's report in
+full. NOT YET ADDRESSED — recorded here for a later charter pass. Nothing was
+changed, enabled or disabled on the day this was written.**
+
+Source material: the session's closing summary in
+`logs/session_stream.open.jsonl` (final `result` record) and its four decisions
+in `research_store/journal.jsonl` dated 2026-08-25.
+
+---
+
+### Issue 1 — the prose is ambiguous about what a thesis actually IS, and reads like a coding agent
+
+The FCX justification is the example. The session wrote:
+
+> FCX, the only holding outside the retention band (rank 22): its thesis is
+> explicitly NOT a ranking thesis — it is a breakaway-gap breakout from the
+> June-August 56-71 base, wrong if price returns to ~71.5.
+
+Read cold, that is **unclear**: it is worded as though the position is held on a
+technical-analysis thesis (breakaway gap, base, breakout), but it does not
+actually say whether TA IS the thesis, or whether TA is only the falsifier
+attached to some other reason for owning it. The operator could not tell which,
+and that is the defect — not the position, the sentence.
+
+This matters because `prompts/charter.md` line 313 defines a thesis as "the
+reason you opened a position, written so a later session can test it: what you
+observed, and the specific thing that would prove it wrong." A reason and a
+falsifier are two different things, and the FCX text fuses them into one clause
+so neither is legible.
+
+The same register runs through the whole report: `brief() unprotected: []`,
+`terrain()`, `mae_p10`, `2.227 sigma`, "enforcement confirmed true (not merely
+`ok:true`)". These are tool names and internal field names standing in for
+plain statements about the position.
+
+**Requirement to work out later:** the report is written FOR A HUMAN READER. It
+should say in plain language why a position is held and what would end it, with
+the tool names and field names as supporting evidence rather than as the
+vocabulary. Whatever is decided must be written into the charter itself — the
+report's voice is downstream of what the charter asks for, and no automated
+check exists for prose (see the standing warning at the top of `CLAUDE.md`).
+
+---
+
+### Issue 2 (the bigger one) — the session spends its run diagnosing the system's own code, and then trades on that diagnosis
+
+This is the more serious of the two. Today's session did not merely observe
+system behaviour in passing; **it audited the level-enforcement machinery, called
+what it found a defect, and changed live risk on that basis.**
+
+The evidence, in the session's own words:
+
+1. **The KO stop widen — the only trading action of the session — was justified
+   as repairing a system defect.** The `widen_stop` decision opens: "THE DEFECT,
+   measured: KO's enforced stop sat ABOVE its own 20-day mean ... So the stop was
+   not protecting the position, it was scheduling an exit on noise." The stop was
+   moved 89.2692 → 87.75. Stated cost: risk at stop $0.159 → $0.258, i.e. 0.22%
+   → 0.36% of NAV, "$0.099 of extra downside, 0.14% of NAV." That is a real
+   increase in live risk, and its stated warrant is the agent's opinion about
+   what the system's own stop logic produced.
+
+2. **It then swept the book for the same code defect.** "I checked MNST and FCX
+   for the same defect and they don't have it" — an audit of how the enforcement
+   machinery had behaved across other positions, inside a trading session.
+
+3. **It spent part of the report adjudicating internal state.** The
+   reconciliation paragraph: "`positions()` shows `levels_in_force: false` on FCX
+   and MNST. That is *stale agent overrides from yesterday* (70.50 / 45.70) being
+   rejected in favour of **tighter** thesis stops ... It reads as a warning but is
+   not a gap." The session is deciding, unreviewed, that a system warning is a
+   false positive.
+
+**Why this is a problem and not just verbosity.** A trade justified by "the
+system's stop was wrong" is a live money decision resting on a code opinion, and
+that code opinion is checked by nothing. The agent is stateless, no human saw it
+before it acted, and the independent Codex review — the one process that would
+have formed a second view — has been switched off in
+`deploy/run_session.sh:78` since the 2026-08-19 incident (see that entry below;
+HALT itself is long gone, the review never came back with it). The last
+`codex_review` in the journal is 2026-08-20.
+
+It also inverts ownership. System correctness belongs to the operator and the
+repo. The session's mandate is trading judgment. When the session takes on
+diagnosing the machinery, two things go wrong at once: run time that should go to
+the book goes to the code, and defects get "fixed" by moving money instead of by
+changing code — which leaves the actual code untouched and the next session free
+to reach the same conclusion again.
+
+**To decide later, as open questions — deliberately NOT prescribed here:**
+
+- Where is the boundary between "this stop is in the wrong place for this
+  position" (a trading judgment, legitimately the session's) and "the stop logic
+  produced a wrong number" (a code defect, the operator's)? Both were true of KO
+  today and the report did not separate them.
+- When the session believes it has found a defect in the machinery, what is the
+  correct disposal — `open_question()`, an announcement, a journal note — instead
+  of a position change?
+- Does `widen=True` need the distinction made explicit at the call site, given
+  the charter already treats a widen as exceptional (line 144–149)?
+- Should any of this bind, or is it charter language only? Note the standing
+  lesson from 2026-08-21: rule-outs and hard guards accrete, and an over-tight
+  answer here would be the same failure in a new place.
+
+⛔ Do not "fix" either issue by adding a threshold, a gate or a rule-out. Both are
+questions about what the charter ASKS FOR, to be settled in prose by the
+principal.
+
+---
+
+
 ## 2026-08-24 — the charter told the agent to place first and set the stop after, so every buy fired a false UNPROTECTED alert
 
 **Symptom.** The 10:35 session made four buys and the operator got four red
