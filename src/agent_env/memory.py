@@ -301,6 +301,11 @@ def _level_reasons(root: Path) -> dict:
 # Rule-outs get the largest budget because they BIND and a session must see them.
 _REASON_CHARS = 350
 _RULEOUT_CHARS = 600
+# positions() carries one of these per holding, so the budget is per-symbol
+# multiplied by the whole book. Deliberately a fraction of _SYMBOL_DECISION_CHARS:
+# this is an orienting snippet, and research_log(symbol) holds the full text.
+_ENTRY_RATIONALE_CHARS = 140
+
 _MAX_QUESTIONS = 8
 _MAX_SYMBOL_DECISIONS = 8
 _SYMBOL_DECISION_CHARS = 1200
@@ -351,14 +356,13 @@ def entry_rationale(decisions: list, symbol: str, position_id) -> dict:
     Absence is a permanent, valid state for records written before that field
     existed -- so this must degrade to "unlinked", never to an error.
     """
+    # Only the keys that carry information. The unlinked case used to emit five
+    # nulls per holding, which is pure weight in a payload that has a hard size
+    # ceiling — see the budget note on the linked branch below.
     out = {"position_id": position_id, "entry_rationale": None,
-           "entry_decision_ts": None, "entry_decision_action": None,
-           "rationale_source": None, "rationale_join_status": None,
-           "rationale_missing": True}
+           "rationale_join_status": None, "rationale_missing": True}
     if not position_id:
-        out["rationale_join_status"] = (
-            "no_active_lifecycle — no open position_id for this symbol in the "
-            "journal replay, so no decision can be linked to it")
+        out["rationale_join_status"] = "no_active_lifecycle"
         return out
     try:
         mine = [d for d in (decisions or [])
@@ -368,11 +372,7 @@ def entry_rationale(decisions: list, symbol: str, position_id) -> dict:
     except Exception:                                   # noqa: BLE001 — never raises
         mine = []
     if not mine:
-        out["rationale_join_status"] = (
-            f"unlinked — no reasoned decision carries position_id {position_id}. "
-            f"The buy may predate the lifecycle stamp, or have been recorded as a "
-            f"basket. Call research_log(symbol=\"{symbol}\") to read the history "
-            f"yourself; do NOT assume the position is unreasoned.")
+        out["rationale_join_status"] = "unlinked — research_log(symbol) for history"
         return out
     mine.sort(key=lambda d: str(d.get("ts") or ""))
     # The OPENING decision is the thesis; a later trim/hold note is not.
@@ -380,14 +380,21 @@ def entry_rationale(decisions: list, symbol: str, position_id) -> dict:
              if any(k in str(d.get("action") or "").lower()
                     for k in ("open", "buy", "enter", "add"))]
     pick = (opens or mine)[0]
+    # ⛔ SHORT ON PURPOSE — positions() IS ON A HARD SIZE BUDGET. Clipping at
+    # research_log's per-symbol budget added ~17.5k characters across a
+    # thirteen-name book (27.3k -> 44.9k) and the MCP result blew the tool-output
+    # ceiling: the 2026-08-25 close session died with
+    # "result (55,144 characters) exceeds maximum allowed" on its FIRST
+    # positions() call, before it could do anything. A field that makes the tool
+    # carrying it unusable protects nothing.
+    #
+    # So this is an ORIENTING SNIPPET plus an honest pointer, not the record.
+    # research_log(symbol=...) is the full text and is one call away.
     out.update({
-        "entry_rationale": _clip(pick.get("reason"), symbol, _SYMBOL_DECISION_CHARS),
+        "entry_rationale": _clip(pick.get("reason"), symbol, _ENTRY_RATIONALE_CHARS),
         "entry_decision_ts": pick.get("ts"),
         "entry_decision_action": pick.get("action"),
-        "rationale_source": ("record_decision, joined on the currently-open "
-                             "position_id" + ("" if opens else
-                             " (no opening decision found; earliest linked "
-                             "decision shown instead)")),
+        "rationale_source": "record_decision" + ("" if opens else " (non-opening)"),
         "rationale_join_status": "linked",
         "rationale_missing": False,
     })
