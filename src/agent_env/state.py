@@ -13,6 +13,23 @@ sys.path.insert(0, str(REPO / "src"))
 import levels                                   # noqa: E402
 
 
+# positions() carries one of these per holding, so any budget here is multiplied
+# by the whole book. Long enough to carry the gist of why a level sits where it
+# does; short enough that thirteen of them cannot break the tool.
+_LEVEL_REASON_CHARS = 320
+
+
+def _clip_reason(text):
+    """Truncate one level reason, and SAY SO — never silently. Pure."""
+    if not isinstance(text, str) or len(text) <= _LEVEL_REASON_CHARS:
+        return text
+    return (text[:_LEVEL_REASON_CHARS]
+            + f"  …[CLIPPED {len(text) - _LEVEL_REASON_CHARS} chars. Full text: "
+              f"research_store/monitor/overrides.json, and the journal entry "
+              f"written beside it. Do NOT act on the clipped version — the "
+              f"condition that reverses a level is usually stated last.]")
+
+
 def _fin(x) -> bool:
     """Finite number, or False. NaN and +/-inf are floats, so an isinstance
     check alone lets them through and every later comparison silently reads
@@ -310,7 +327,21 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
                     f"targets: {_lv['effective_targets_status']}. What is watched: stop "
                     f"{_lv['effective_stop']}, targets {_lv['effective_targets']}.")
             if o.get("reason"):
-                rec["level_reason"] = o["reason"]
+                # ⛔ CLIPPED — positions() HAS A HARD OUTPUT CEILING AND THIS
+                # FIELD IS THE LARGEST THING IN IT. These are the agent's own
+                # set_levels reasons echoed back verbatim, and they are written
+                # to be thorough: after the 2026-08-25 close session gave eight
+                # positions a reasoned exit plan, `level_reason` alone was 23,837
+                # characters across the book -- 40% of the whole payload, more
+                # than every price, level and statistic combined. The tool then
+                # exceeded the MCP result limit and the NEXT session's first
+                # positions() call failed outright, before it could do anything.
+                #
+                # A reason nobody can read because it broke the tool carrying it
+                # is worse than a clipped one. Nothing is lost: the full text is
+                # in research_store/monitor/overrides.json and in the journal
+                # entry the session wrote beside it.
+                rec["level_reason"] = _clip_reason(o["reason"])
         # WHY THIS IS HELD, joined on the open lifecycle — supplied by the
         # caller (agent_env.memory.entry_rationale) because this function is
         # pure and does not read the journal. Absent mapping = field omitted,
