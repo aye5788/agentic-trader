@@ -9,6 +9,86 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-25 — the book had no exit that could bound GIVEBACK; a trailing stop ships in shadow mode
+
+**Operator-directed. Implementation plan authored by `codex`, which reversed its
+own prior position to write it. SHIPPED DISABLED — shadow mode only.**
+
+### The hole
+
+Three exits existed and none of them protected an open gain:
+
+| exit | bounds | status |
+| --- | --- | --- |
+| stop | loss from **entry** | enforced every poll |
+| target | a large move | 5.5σ — first-hit **10.7% within 10 days**; target2 has fired **zero** times ever |
+| rotation | **rank** decay | weekly; ~54% of all exits |
+| — | loss from **peak** | **did not exist** |
+
+Measured on the live book (peak return → current):
+
+```
+INTC  +24.9% -> -0.4%   gave back 101.7% of peak
+STX   +26.6% -> +2.0%   gave back  92.5%
+AMD   +13.0% -> +2.0%   gave back  84.5%
+DELL  +28.2% -> +11.3%  gave back  60.0%
+SNDK  +52.7% -> +22.7%  gave back  57.0%
+```
+
+⚠️ `giveback_pct` is percentage POINTS off the entry return, not a fraction of
+peak — misreading it understates the damage. The table above is corrected.
+
+**INTC is the proof.** It round-tripped a +24.9% gain to nothing and no mechanism
+could fire: its rank kept it in the book so rotation never touched it, its target
+sat 5.4σ away, and its stop — measured from entry, never moved — only triggers
+after the gain is already gone. Not a missed judgement call; there was no
+instrument that could express it.
+
+**And the knowledge was already in front of the agent.** `prompts/charter.md:237`
+hands every 15:15 session `peak_pct` and `giveback_pct` and states outright that
+"a stop that has not moved since entry is not neutral — it silently converts a
+winner into a loser", then adds, as it does everywhere, "these are facts, not
+instructions". Measured, named, shown before every close, and nothing could act.
+
+### What shipped
+
+- `src/trailing.py` — pure arithmetic, no I/O: `validate_trail_state`,
+  `update_peak`, `compute_trail_stop`, `effective_stop`, `trail_trigger`.
+  Activation is scaled in the name's own sigma (2.5σ), not in percent, so KO
+  (1.18%/day) and SNDK (7.38%/day) are not held to one flat trigger.
+  `effective_stop = max(thesis, agent, trail)` — a lower agent override cannot
+  loosen it, and an explicit `widen=True` cannot unwind banked gain.
+- `[monitor.trail]` in `config/strategy.toml`, `enabled = false`.
+- `scripts/market_monitor.py` — shadow pass writing `research_store/monitor/trails.json`
+  and journalling `trail_shadow` events describing the exit it WOULD take. The
+  whole block is wrapped: this process IS the stop, and a shadow feature must
+  never be able to break the real one. Peak advances on `max(session high, last)`
+  — `live_quotes` already returned `high` and the monitor discarded it; a peak
+  fed only on `last` misses a high printed between two 15s polls.
+
+Counterfactual on INTC: entry 87.77, peak 109.62 → trail 101.98, **exit locking
++16.2%** instead of −0.4%.
+
+### Why it is NOT armed
+
+The one thing a trail can cost — a name that pulls back far enough to trip it and
+then resumes — **cannot be measured from anything currently on disk**.
+`target_calibration.json` models no path-dependent exit, and it hard-codes
+`TOP_N = 10` while `book_hold = 14`. So `giveback_fraction = 0.35` is a starting
+policy, not a fitted optimum. Shadow mode for ≥10 sessions, compared against what
+the tape actually did next, is what earns arming. Arm new lifecycles first.
+
+### Rejected
+
+Pulling targets in to 3.0σ. The repo's own calibration measures expectancy rising
+monotonically with target distance (5.5σ = 0.3765σ, the best of the grid; 3.0σ =
+0.2740σ, ~27% worse) because `p_rotate` at 5.5σ is 0.542 — letting a winner run to
+rotation beats scaling out early. The correct synthesis is **keep the far targets
+AND bound the giveback**, not move the targets.
+
+---
+
+
 ## 2026-08-25 — a held name the ranking did not select arrived with no reason attached
 
 **Operator question: how do we address positions with no thesis that continue to

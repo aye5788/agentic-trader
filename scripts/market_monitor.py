@@ -41,6 +41,7 @@ except Exception:
 import strategy as strat            # noqa: E402
 import governance as gov            # noqa: E402
 import snapshot_freshness            # noqa: E402
+import trailing                      # noqa: E402  pure arithmetic, no I/O
 from research_store import read_current, store   # noqa: E402
 from adapters.moomoo import prices as mmp        # noqa: E402
 from adapters.moomoo.client import quote_ctx     # noqa: E402
@@ -69,6 +70,9 @@ ET = ZoneInfo("America/New_York")
 # 15s poll (the set is static all day — logging it each tick just floods journald).
 _LAST_DROPPED: frozenset | None = None
 _LAST_SUSPECT_ACTION: frozenset = frozenset()
+# Shadow-mode trail breaches already journalled — fire-on-CHANGE, so a breach
+# that persists across every 15s poll is recorded once, not 240 times an hour.
+_LAST_TRAIL_SHADOW: frozenset = frozenset()
 _LAST_HALTED: bool | None = None      # log kill-switch mode on transition, not every tick
 
 # Unprotected-position invariant (spec 2026-08-09 §8): dedupe the phone push to
@@ -1770,6 +1774,77 @@ def check_once(cfg, client) -> int:
             elif px >= th.targets[0] and "t1" not in fired:
                 triggers.append({"symbol": sym, "reason": "target1", "fraction": 0.5,
                                  "price": px, "level": th.targets[0]})
+
+    # ---- TRAILING STOP, SHADOW MODE (2026-08-25) -------------------------
+    # ⛔ THIS SELLS NOTHING. It advances each position's high-water mark and
+    # journals the exit a trail WOULD have taken, so ten sessions of evidence
+    # exist before anything is armed. `[monitor.trail].enabled` gates arming and
+    # ships false; until it is true this block appends NOTHING to `triggers`.
+    #
+    # ⛔ WRAPPED WHOLE, DELIBERATELY. This process IS the stop -- Robinhood has
+    # no native stop for fractional shares. A defect in a shadow feature must
+    # never be able to stop the real one from firing, so every exception here is
+    # caught and reported and the stop path above is already complete by this
+    # point. Same reasoning as the ownership filter failing OPEN.
+    try:
+        _tcfg = (m.get("trail") or {})
+        _trails = _load(MON / "trails.json", {}) or {}
+        _snap_pos = (_load(RH_POSITIONS, {}) or {}).get("positions") or {}
+        _shadow = []
+        for sym, th in held.items():
+            px = prices.get(sym)
+            if px is None or sym in suspect:
+                continue
+            _entry = (_snap_pos.get(sym) or {}).get("avg_cost")
+            if not _entry:
+                continue                      # no cost basis -> no peak to measure from
+            _st = _trails.get(sym) or {"entry_price": float(_entry),
+                                       "peak_price": float(_entry)}
+            # max(session high, last): a high printed BETWEEN two 15s polls is
+            # invisible to `last`, and a peak that misses it measures a giveback
+            # the position never had. live_quotes already returns high.
+            _q = quotes.get(sym) or {}
+            _hi = _q.get("high") if isinstance(_q, dict) else None
+            _obs = max([v for v in (_hi, px) if isinstance(v, (int, float))] or [px])
+            _st = trailing.update_peak(_st, _obs)
+            _sig = (getattr(th, "signals", None) or {}).get("sigma")
+            _hit = trailing.trail_trigger(sym, px, _st, _sig, _tcfg,
+                                          base_stop=th.stop,
+                                          agent_stop=None)
+            _lvl, _act = trailing.compute_trail_stop(
+                _st, _sig, float(_tcfg.get("activation_sigma", 2.5)),
+                float(_tcfg.get("giveback_fraction", 0.35)))
+            if _lvl is not None:
+                _st["trail_stop"] = _lvl        # persist the ratchet
+            _st["activated"] = bool(_act)
+            _trails[sym] = _st
+            if _hit and _hit.get("reason") == "trail":
+                _shadow.append(_hit)
+            elif _hit and _hit.get("reason") == "trail_state_invalid":
+                print(f"  ⚠ trail state unusable for {sym}: {_hit.get('detail')}"
+                      f" — ordinary stop still enforced")
+        _save(MON / "trails.json", _trails)
+        # Fire-on-CHANGE, matching _LAST_DROPPED/_LAST_SUSPECT_ACTION: a shadow
+        # breach persists across every 15s poll, and journalling it each time
+        # would bury the record it exists to create.
+        global _LAST_TRAIL_SHADOW
+        _cur = frozenset(h["symbol"] for h in _shadow)
+        if _shadow and _cur != _LAST_TRAIL_SHADOW:
+            for h in _shadow:
+                print(f"  [trail-shadow] {h['symbol']} would exit @ {h['price']} "
+                      f"(level {h['level']:.4f}, peak +{h['peak_gain_pct']}%, "
+                      f"locking +{h['locked_gain_pct']}%)")
+            store.append_journal({"event": "trail_shadow", "armed": False,
+                     "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                     "would_exit": _shadow})
+        _LAST_TRAIL_SHADOW = _cur
+        if _tcfg.get("enabled"):
+            # Not reachable until an operator arms it. Deliberately the LAST
+            # thing added, so an armed trail is one config flag and no new path.
+            triggers.extend(_shadow)
+    except Exception as e:                                       # noqa: BLE001
+        print(f"  ⚠ trailing shadow pass failed ({type(e).__name__}: {e}) — "
+              f"stops and targets above are UNAFFECTED")
 
     # Suspected corporate action: loud, distinct, and fire-on-CHANGE (matching
     # _LAST_DROPPED/_LAST_HALTED) so a split does not re-push every 15s all day.

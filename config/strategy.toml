@@ -140,6 +140,34 @@ enable_targets = true     # scale out at the take-profit tiers (t1 half, t2 rest
                           #   to "let winners run" and rely on rank rotation instead.
 cooldown_days  = 5        # a stopped-out name is excluded from the book this long
                           #   (stop vs. momentum-rank rebuy-churn guard)
+
+# ⛔ THE TRAILING STOP — SHIPPED DISABLED ON PURPOSE (2026-08-25). Do not flip
+# `enabled` to true because the code looks finished. The staged rollout IS the
+# design: arithmetic first (src/trailing.py, pure), then SHADOW MODE, which
+# journals `trail_shadow` events describing the exit it WOULD have taken and
+# sells nothing. Ten trading sessions of that, compared against what the tape
+# actually did next, is what earns the right to arm it — because the one thing
+# a trail can cost you is unmeasurable from here: a name that pulls back far
+# enough to trip it and then resumes. research_store/target_calibration.json
+# cannot answer that; it models no path-dependent exit.
+#
+# It exists because a winner giving itself back had NO exit that could fire.
+# See src/trailing.py for the measurement (INTC round-tripped +24.9% to zero).
+#
+# ⚠️ THE NUMBERS BELOW ARE A STARTING POLICY, NOT A PROVEN OPTIMUM. 35% is a
+# judgement about how much room a momentum name needs to breathe, not a fitted
+# parameter. Shadow mode is what turns it into evidence. Tune HERE, never in code.
+[monitor.trail]
+enabled           = false  # ⛔ shadow only. Arming is an operator decision.
+activation_sigma  = 2.5    # activate once the peak is this many daily sigmas above
+                           #   entry. Matches the static stop's scale, so an ordinary
+                           #   entry wobble cannot arm a trail. At activation the
+                           #   level locks ~1.625 sigma of gain — deliberately NOT
+                           #   breakeven, which would make every pullback an exit.
+giveback_fraction = 0.35   # how much of the peak GAIN may be handed back before the
+                           #   trail sells. Keeps (1 - this) of the run. Sized to
+                           #   leave a momentum name room while ruling out the
+                           #   80-100% givebacks measured on INTC, STX and AMD.
 executor_timeout_secs = 300  # wall clock for the headless exit executor. The SELL is
                           #   step 4 of 8 and the tail is bookkeeping, so a kill after
                           #   the sell is survivable (run_executor reads the result
