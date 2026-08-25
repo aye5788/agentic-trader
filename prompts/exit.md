@@ -64,23 +64,35 @@ PROCEDURE — follow exactly:
    already be complete from step 4; confirm it rather than writing it fresh.
    Everything after this point is bookkeeping — if you run out of time here, the
    trade is still correctly recorded.
-6. Also write those same fills to `research_store/rh/fills.json` and run
-   `.venv/bin/python scripts/record_fills.py` to journal them. Each entry needs
+6. Write those same fills to `research_store/rh/fills.json`. Each entry needs
    `quantity` — the EXECUTED SHARE COUNT from the broker's order record, not the
    dollar notional and not `amount / avg_price`. A sell without it leaves the
    ledger unable to see the position reach zero, which is exactly the event that
    closes its lifecycle.
-   This legacy exit procedure must still complete step 7 itself; unlike the
-   session MCP `record_fills` tool, this script cannot fetch or publish broker
-   state.
-7. **Reconcile.** If you sold anything: re-fetch `get_equity_positions` and
-   `get_portfolio`, and rewrite `research_store/rh/positions.json` — shares and
-   cost, NOT dollar values:
+   Do NOT run the recorder yet — step 7 supplies the broker state it publishes
+   alongside these fills, and the two must be written together.
+7. **Reconcile.** If you sold anything, re-fetch `get_equity_positions` (from the
+   cursorless first page through the page with no `next`) and `get_portfolio`,
+   and write `research_store/rh/broker_state.json`:
    ```
-   {"account_number":"<num>","account_value":<get_portfolio.total_value>,
-    "cash":<get_portfolio.cash>,"as_of":"<YYYY-MM-DD>","ts":"<now, ISO-8601 UTC>",
-    "positions":{"SYM":{"qty":<quantity>,"avg_cost":<average_buy_price>},...}}
+   {"positions":{"pages":[{"cursor":null,"response":FIRST},
+                          {"cursor":"CURSOR_FROM_FIRST_NEXT","response":SECOND}],
+                 "exhausted":true},
+    "portfolio":<raw get_portfolio output>,
+    "account_number":"<num>","liquidated":false}
    ```
+   Then run `.venv/bin/python scripts/record_fills.py` ONCE. It journals the
+   fills from step 6 AND publishes `research_store/rh/positions.json`, both
+   stamped with the SAME timestamp.
+   ⛔ **DO NOT hand-write `positions.json`.** You no longer have permission to,
+   and it is not a formatting preference: the publisher REJECTS a truncated or
+   unreadable broker read rather than coercing it, because a partial book looks
+   current and silently unprotects whatever it dropped. A hand-assembled file has
+   no such check. Passing the pages transcript is how completeness is PROVEN —
+   `exhausted:true` with each page's cursor matching the prior response's next.
+   If the script exits non-zero it REFUSED the write: the previous snapshot is
+   intact, `broker_state.json` is kept for retry, and your fills are already
+   journaled. Fix the transcript and re-run; do not work around it.
    The dashboard and equity log read this file; a stale snapshot after an exit
    shows positions that no longer exist.
    Also refresh the realized-P&L snapshot — a sell just realized a result:

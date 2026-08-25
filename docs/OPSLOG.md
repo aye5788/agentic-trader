@@ -9,6 +9,101 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-25 — the exit path's snapshot was written by a second clock: a correct positions.json read "stale after fill"
+
+**Fixed the same day. Diagnosis by the assistant, corrected and sharpened by an
+independent `codex` review before anything was changed.**
+
+### What was seen
+
+MRK hit target-1 and the monitor scaled out half — the take-profit path working
+end to end, and the first clean run since the 08-19 retry incident. But
+`positions()` then reported the account snapshot **stale after fill**:
+
+| 18:02:55 | sale filled, `exit_result.json` written, order `6a8dd8cc…` |
+| 18:03:10 | `positions.json` published — **MRK 0.020019 = the post-trim quantity** |
+| 18:03:18 | `{"event":"execution"}` appended to `journal.jsonl` |
+
+The snapshot was CORRECT — it already reflected the sale. It was flagged anyway.
+
+### Why
+
+`src/snapshot_freshness.py::status()` flags stale iff
+`snapshot_ts < newest journalled execution ts`. Two reconciliation paths existed
+with different guarantees:
+
+- **Session path** — MCP `record_fills()` computes ONE `ts` and uses it for both
+  `_write_broker_snapshot(...)` and `append_journal(...)`. Immune by construction.
+- **Exit path** — `scripts/record_fills.py` stamped its OWN `now()` for the
+  journal and *could not* publish the snapshot at all, so `prompts/exit.md`
+  step 7 told the AGENT to hand-write `positions.json` with a second `now()`.
+
+Two writers, two clocks, no shared transaction: whichever landed second decided
+the verdict. The journal timestamp never moves again, so the false "stale" stuck
+until the next session refreshed the snapshot.
+
+**This was not cosmetic.** While it stood: `market_monitor.py` **disabled its
+ownership filter** (watching every eligible thesis, held or not) and fired a
+🚨 phone push; `session.py` marks a session that recorded a fill as **FAILED**;
+`health.py`, `marks.py` and `brief()`/`positions()` all reported the book
+unreliable. A false alarm on every successful trim is also how a real one gets
+ignored.
+
+### The deeper defect
+
+`exit.md` step 7 had the agent hand-assemble `positions.json` from a literal
+template, bypassing `_write_broker_snapshot()`'s validation entirely — and
+`deploy/exit_executor_settings.json` explicitly GRANTED that write. So the
+file's own rule ("REFUSES rather than coerces", completeness proven by a
+cursor-linked pagination transcript) did not apply on the one path that runs
+unattended, on live money, after a stop. CLAUDE.md said the file was "WRITTEN
+ONLY by refresh_broker_snapshot() and record_fills()"; that had quietly become
+false.
+
+### The fix — one shared validated writer, one timestamp
+
+The exit executor cannot reach the agentic-trader MCP: `deploy/exit_mcp.json`
+mounts ONLY Robinhood, deliberately (other brokers' connectors were reachable
+before it existed). So the writer was brought to the path that could reach it:
+
+- `scripts/record_fills.py` now computes ONE `ts` and, when
+  `research_store/rh/broker_state.json` is present, publishes the snapshot
+  through **`_write_broker_snapshot()` — the same validated writer the MCP
+  uses — with that same `ts`**, before journaling the fills.
+- A refused snapshot leaves the previous file byte-identical, keeps
+  `broker_state.json` for retry, still journals the fills (execution evidence is
+  never dropped), and **exits non-zero** so the failure cannot look like success.
+- `prompts/exit.md` step 7 now supplies the pages transcript instead of
+  hand-writing the file; the `Write(positions.json)` permission was **removed**
+  from `deploy/exit_executor_settings.json`.
+
+`snapshot_freshness.py` was NOT changed: with one writer and one timestamp the
+comparison is sound. A tolerance window on clock skew was considered and
+rejected — it would have masked genuine staleness, which is the condition this
+check exists to catch.
+
+### What the independent review caught that the first diagnosis did not
+
+The assistant's initial proposal was to have the snapshot record `reflects_orders`
+(the order IDs it accounts for) and compare identities instead of clocks. `codex`
+returned **SPLIT** and was right to:
+
+- The proposal routed through `refresh_broker_snapshot()`, which **the exit path
+  cannot call at all** — the MCP is not mounted. The step was inert.
+- Ordinary no-trade refreshes pass no orders, so each would have reset
+  `reflects_orders` to `[]` and re-flagged **every** prior fill as unreconciled —
+  a permanent stale state, worse than the bug.
+- `order_id` is not guaranteed on every journalled fill repo-wide.
+- The back-compat fallback it demanded leaves genuinely stale pre-migration
+  snapshots reading fresh.
+
+Its recommendation — eliminate the hand-write and unify the writer — is what was
+implemented. Recorded because the first answer was confidently wrong in a way a
+passing selftest would never have caught, and the review is what made it right.
+
+---
+
+
 ## 2026-08-25 — operator review of the open session's report: TA-ambiguous prose, and self-diagnosis driving live trades
 
 **Raised by Aaron on 2026-08-25 after reading the 10:35 open session's report in

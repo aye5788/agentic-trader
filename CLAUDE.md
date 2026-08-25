@@ -427,6 +427,19 @@ research_store/rh/positions.json
                         session, trading or not) and record_fills() (after a
                         trade). The deleted fast loop used to write it; when it
                         went, nothing took over.
+                        ⛔ EVERY writer goes through _write_broker_snapshot(), and
+                        the one that journals the fill passes it the SAME ts, so
+                        snapshot and journal can never disagree. The EXIT path
+                        (prompts/exit.md step 7) reaches it via
+                        scripts/record_fills.py + research_store/rh/broker_state.json,
+                        because deploy/exit_mcp.json deliberately does NOT mount
+                        the agentic-trader MCP. Until 2026-08-25 that path
+                        HAND-WROTE this file from a prompt template — no
+                        validation, and a second clock, which made a correct
+                        snapshot read stale-after-fill (OPSLOG 2026-08-25, "the
+                        exit path's snapshot was written by a second clock").
+                        Do not reintroduce a hand write; the permission to do it
+                        was removed from deploy/exit_executor_settings.json.
                         ⛔ THE PUBLISHER REFUSES rather than coerces. Any
                         unreadable row, missing/negative/non-finite qty or cost,
                         duplicate symbol, or wrong account REJECTS THE WHOLE

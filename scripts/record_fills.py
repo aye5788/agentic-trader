@@ -12,7 +12,18 @@ Agent contract:
      Orders the agent SKIPPED (review rejection, unsettled-cash deferral,
      re-entry veto) go in the same array with status "skipped" and a short
      "reason" — so deferred legs are journaled, not just narrated in the report.
-  2. run:  .venv/bin/python scripts/record_fills.py
+  2. if anything EXECUTED, also write research_store/rh/broker_state.json =
+       {"positions": <cursor-linked get_equity_positions pages transcript with
+                      exhausted=true>,
+        "portfolio": <raw get_portfolio output>,
+        "account_number": "<account>", "liquidated": false}
+     This script then publishes research_store/rh/positions.json through
+     _write_broker_snapshot() — the SAME validated writer the session MCP uses —
+     stamped with the SAME timestamp as the journal entry, so the two can never
+     disagree. See publish_snapshot() for why that matters. Omit the file only
+     when nothing executed; a fill journaled without it reads as stale-after-fill
+     to the monitor, the health check and every valuation downstream.
+  3. run:  .venv/bin/python scripts/record_fills.py
 
 `quantity` is REQUIRED on anything that actually executed (added 2026-08-09).
 It is the EXECUTED SHARE COUNT from the broker's order record — not the dollar
@@ -43,6 +54,41 @@ from notify import push           # noqa: E402
 
 FILLS = REPO / "research_store" / "rh" / "fills.json"
 REENTRY_DECISIONS = REPO / "research_store" / "rh" / "reentry_decisions.json"
+BROKER_STATE = REPO / "research_store" / "rh" / "broker_state.json"
+
+
+def publish_snapshot(state: dict, ts: str) -> dict:
+    """Publish positions.json through the SAME validated writer the MCP uses.
+
+    ⛔ ONE TIMESTAMP, ONE WRITER. This exists because freshness was inferred by
+    comparing two clocks. `src/snapshot_freshness.py` flags the snapshot stale
+    iff `snapshot_ts < newest journalled execution ts`, and the exit path used to
+    satisfy those two writes from two different programs: this script stamped its
+    own now() for the journal, while the agent hand-wrote positions.json with a
+    now() of its own. Whichever landed second decided the verdict.
+
+    On 2026-08-25 the snapshot landed 8 seconds BEFORE the journal entry it
+    already reflected (MRK 0.020019 = the post-trim quantity), so a correct
+    snapshot was branded "not authoritative" until the next session — which
+    disables the monitor's ownership filter (market_monitor.py), fires a phone
+    push, and makes session.py record a successful trading session as FAILED.
+    A tolerance window would only have hidden it; the timestamps were never the
+    question. The question is whether one writer published both facts together.
+
+    Passing `ts` in means the caller's journal entry and this snapshot cannot
+    disagree, which is what `record_fills()` in src/agent_env/server.py has
+    always done and what this path could not do, because the agentic-trader MCP
+    is deliberately NOT mounted for the exit executor (deploy/exit_mcp.json).
+    Validation is NOT reimplemented here: a partial or unreadable broker read
+    must reject the whole write, and only _write_broker_snapshot knows that.
+    """
+    from agent_env.server import _write_broker_snapshot   # noqa: PLC0415 (heavy; only when used)
+    return _write_broker_snapshot(
+        state.get("positions"), state.get("portfolio"), ts,
+        liquidated=bool(state.get("liquidated", False)),
+        declared_account=str(state.get("account_number") or ""),
+        orders=state.get("orders") or (),
+    )
 
 
 def main() -> None:
@@ -51,9 +97,37 @@ def main() -> None:
     fills = json.loads(FILLS.read_text())
     if not isinstance(fills, list):
         sys.exit("fills.json must be a JSON array of fill objects")
+    # ONE timestamp for the snapshot AND the journal entry below.
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # Reconcile broker state FIRST, under that same ts. Absent file = journal
+    # only, exactly as before (other callers pass no broker state), but say so:
+    # an execution recorded without a matching snapshot is the stale-after-fill
+    # condition the monitor and health check are built to catch.
+    snapshot = None
+    if BROKER_STATE.exists():
+        try:
+            snapshot = publish_snapshot(json.loads(BROKER_STATE.read_text()), ts)
+        except Exception as e:                                   # noqa: BLE001
+            snapshot = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if snapshot.get("ok"):
+            # Consumed so a later run cannot republish a stale broker read.
+            BROKER_STATE.unlink(missing_ok=True)
+            print(f"published positions.json @ {ts} "
+                  f"({snapshot.get('positions')} positions)")
+        else:
+            # REFUSED. Left on disk deliberately: the read is still there to be
+            # corrected and retried, and the previous snapshot is untouched.
+            print(f"⚠ positions.json NOT refreshed — {snapshot.get('error')}\n"
+                  f"  {BROKER_STATE} kept for retry; the fills below are still "
+                  f"journaled (execution evidence is never dropped).")
+    else:
+        print("⚠ no broker_state.json — fills will be journaled but positions.json "
+              "is NOT refreshed, which reads as stale-after-fill downstream.")
+
     entry = {
         "event": "execution",
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ts": ts,
         "n": len(fills),
         "fills": fills,
     }
@@ -81,6 +155,11 @@ def main() -> None:
           + (f" + {len(entry.get('reentry_decisions', []))} re-entry decisions" if entry.get("reentry_decisions") else "")
           + f" -> {store.JOURNAL}")
     _push_summary(fills, entry.get("reentry_decisions"))
+    # Journaling succeeded; reconciliation may not have. Exit non-zero so a
+    # refused snapshot is a FAILED step the caller can see, never a silent one.
+    if snapshot is not None and not snapshot.get("ok"):
+        sys.exit(f"fills journaled, but positions.json was NOT refreshed: "
+                 f"{snapshot.get('error')}")
 
 
 # Skip reasons the system handles by itself and re-plans next run. These are
