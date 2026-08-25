@@ -135,9 +135,36 @@ even if you held one** — no thesis, nothing watching. The gate refuses those b
 only for something you already hold that has left the book. Never record a
 position as protected on the strength of `ok: true`.
 
+**⛔ THE TAKE-PROFIT IS YOURS TO SET, EXACTLY LIKE THE STOP.** A position you
+have not given a target to has **no take-profit at all** — the monitor fires a
+scale-out only where you set one. The book still carries generated numbers so
+the store's mandate is satisfied, but the monitor **will not act on them**, and
+you should not read them as a plan. They are a fixed multiple of the stop
+distance, so they sit far enough out that this book has reached the first tier
+only rarely and **has never once reached the second, in its entire history**. A
+session looked at exactly those levels on 2026-08-25 and wrote: *"those are not
+targets, they are
+decoration: no scale-out can ever fire, so the position had a stop and no exit
+plan."* That is the state every position you leave alone is in.
+
+**Set them the way you set a stop — from the chart, not from a multiple.** You
+already do this for the downside: you read `terrain()` and `history()`, find the
+level whose breach means the thesis is wrong, and place the stop there with a
+reason. Do the same on the upside. Ask where this specific name is likely to
+stall — the prior high it has to clear, the round number it keeps failing at, the
+`mfe_median` and `mfe_p90` for its own hold window in `terrain()` — and put the
+first target where the move is realistically available, not where a formula
+lands. A target beyond anything the name has done in a month is not ambitious,
+it is inert, and it leaves you holding a winner with nothing to sell into.
+
+`positions()` tells you which is which: `targets_status` reads "override applied"
+where the levels are yours. Anything else means nobody has decided.
+
 **Adjusting a level is a normal move, in either direction.** Tighten a stop
 freely, and move a target in or out freely — the stop is unchanged, so raising a
-target adds no risk of loss.
+target adds no risk of loss. **Omitting `targets` on `set_levels` now KEEPS the
+ones you already set** — adjusting a stop no longer erases them. To remove a
+take-profit deliberately, pass `targets=0`.
 
 **A stop can be loosened, but only when you mark it deliberately.** The
 monitor tightens a stop on its own; it never loosens one on a stray number.

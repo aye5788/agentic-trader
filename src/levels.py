@@ -165,18 +165,23 @@ def resolve(thesis_stop, thesis_targets, override, price=None,
     # agent something was refused when nothing was asked.
     if isinstance(ov_targets, list) and ov_targets:
         if not th_t:
-            if _standalone and all(_finite(o) for o in ov_targets):
-                # Standalone watch: arm_standalone carries the agent's targets
-                # through verbatim, so they ARE in force. Reporting them ignored
-                # showed `targets: []` on a position the monitor was watching
-                # with those exact take-profits.
+            # ⛔ MIRRORS market_monitor.apply_overrides. With no thesis targets
+            # the agent's list IS the take-profit -- it is the only one that
+            # exists -- so it is applied whether or not the stop is standalone.
+            # Reporting it "ignored" while the monitor enforced it would be the
+            # display/enforcer divergence this module exists to remove, and it
+            # became reachable the moment the loop stopped generating targets
+            # (2026-08-25): every position would have shown targets: [] with the
+            # agent's own levels silently discarded.
+            if all(_finite(o) for o in ov_targets):
                 out.update(effective_targets=[float(o) for o in ov_targets],
                            effective_targets_source="override",
-                           effective_targets_status=("override applied: no thesis, "
-                                                     "watched on your own targets"))
+                           effective_targets_status=("override applied: these are "
+                                                     "YOUR take-profits — the book "
+                                                     "supplies none"))
             else:
                 out["effective_targets_status"] = (
-                    "override ignored: the thesis carries no targets")
+                    "override REJECTED: a target is not a finite number")
         elif len(ov_targets) != len(th_t):
             out["effective_targets_status"] = (
                 f"override REJECTED: {len(ov_targets)} target(s) supplied but the "

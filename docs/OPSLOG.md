@@ -9,6 +9,50 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-25 — the monitor no longer takes profit on a level nobody decided
+
+**Principal's instruction, same day and same thread as the `set_levels` erasure
+below: "the agent decides — if code is dictating profit levels I WAS MISLED."**
+
+The loop generates take-profits as a fixed multiple of the stop distance. Those
+levels are first-hit ~10.7% <!-- historical --> within ten days and the second
+tier has fired **zero** times in the system's history — so they are not a plan,
+and selling real money into one is code deciding when to take profit.
+
+**The monitor now fires a scale-out ONLY where the agent set the target.** The
+loop still WRITES targets, because `research_store/validate.py` requires a
+weighted position to carry them and stripping that is a change to the store's
+validation mandate — the thing that builds the book nightly, whose failure mode
+is "no product, nothing watched". So the generated numbers remain as an inert
+default the monitor will not act on, rather than being removed from a validated
+contract at the end of a long day.
+
+Two enforcement changes were REQUIRED first, or this would have silently made
+agent targets unsettable — both `apply_overrides` (the enforcer) and
+`levels.resolve` (the display) demanded pre-existing thesis targets before they
+would accept the agent's. With no thesis targets the agent's list is now taken
+verbatim; where thesis targets exist the count must still match. The two were
+changed together deliberately: they are documented as provably equal, and a
+divergence between what `positions()` shows and what the monitor enforces is the
+exact defect `src/levels.py` exists to prevent.
+
+`brief()` now reports **`no_take_profit`** beside `unprotected` — the same class
+of fact, something believed handled that is not. On the live book it lists AMD,
+DELL, FTNT, INTC, JNJ, MU, SNDK, STX; the monitor will fire a target only for
+FCX, KO, MNST, MRK, PANW. The two lists were verified to agree and partition the
+book.
+
+`prompts/charter.md` now states that the take-profit is the agent's to set
+exactly like the stop, and tells it to derive one from the chart — the prior high,
+the level the name keeps failing at, `mfe_median`/`mfe_p90` for its own hold
+window — rather than from a multiple. ⚠️ Config-derived figures were deliberately
+kept OUT of that text: the charter is rendered from config and a literal
+threshold in it is a defect (`check_charter_no_literals`), so the prose describes
+the property and cites only measured history, marked `<!-- historical -->`.
+
+---
+
+
 ## 2026-08-25 — adjusting a stop ERASED the agent's take-profits and handed profit-taking back to the loop
 
 **Operator finding. The principal's standing position is that the AGENT decides

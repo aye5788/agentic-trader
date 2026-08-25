@@ -738,8 +738,23 @@ def apply_overrides(held: dict, overrides: dict, prices: dict | None = None) -> 
             # no safety argument for blocking it, and blocking it is why nothing
             # in this book has ever reached a take-profit. Pulling a target in
             # needs no permission either -- it only ever reduces exposure.
+            # ⛔ `t.targets` USED TO BE REQUIRED TRUTHY HERE, which meant the
+            # agent could only ever REPLACE targets the loop had already
+            # generated -- never supply them where the loop had none. Once the
+            # loop stopped generating take-profits (2026-08-25, so that profit
+            # levels are the agent's judgement rather than a 5.5-sigma formula
+            # nothing ever reached), that condition would have made an
+            # agent-set target permanently unenforceable: silently dropped
+            # here, while positions() showed it as set. Exactly the
+            # display/enforcer divergence src/levels.py exists to prevent.
+            #
+            # So: with NO thesis targets, the agent's list is taken verbatim --
+            # it is the only take-profit that exists. With thesis targets
+            # present, the count must still match, because a partial list on a
+            # two-tier thesis is ambiguous about which tier was meant.
             ot = ov.get("targets")
-            if (isinstance(ot, list) and t.targets and len(ot) == len(t.targets)
+            if (isinstance(ot, list) and ot
+                    and (not t.targets or len(ot) == len(t.targets))
                     and all(isinstance(o, (int, float)) and math.isfinite(o)
                             for o in ot)):
                 t.targets = [float(o) for o in ot]
@@ -1767,7 +1782,23 @@ def check_once(cfg, client) -> int:
         if m.get("enable_stops", True) and px <= th.stop and "stop" not in fired:
             triggers.append({"symbol": sym, "reason": "stop", "fraction": 1.0,
                              "price": px, "level": th.stop})
-        elif m.get("enable_targets") and th.targets:
+        # ⛔ ONLY THE AGENT'S TAKE-PROFITS FIRE (2026-08-25, principal's call).
+        # The loop still WRITES targets -- the store's [risk] mandate requires a
+        # weighted position to carry them (research_store/validate.py) -- but
+        # they are generated geometry, not a view: 2.2R and 4.0R off the stop,
+        # i.e. ~5.5 and ~10 sigma. The repo's own calibration puts first-hit at
+        # 10.7% within ten days, and `target2` has fired ZERO times in the
+        # system's entire history. Selling real money at a level nothing
+        # decided, which is unreachable anyway, is code dictating profit-taking.
+        #
+        # So the loop's numbers are now a DEFAULT THE MONITOR WILL NOT ACT ON,
+        # and a take-profit fires only where the agent set one -- the same way
+        # a stop is the agent's, reasoned from the chart. A position with no
+        # agent target simply has no take-profit; that is a legal, visible
+        # state (`positions().targets_status`), not a silent one.
+        elif (m.get("enable_targets") and th.targets
+              and isinstance((_ov.get(sym) or {}).get("targets"), list)
+              and (_ov.get(sym) or {}).get("targets")):
             if px >= th.targets[-1] and "t2" not in fired:
                 triggers.append({"symbol": sym, "reason": "target2", "fraction": 1.0,
                                  "price": px, "level": th.targets[-1]})

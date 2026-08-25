@@ -2226,6 +2226,15 @@ def brief() -> str:
         "positions": held,
         "snapshot_freshness": _staleness(v),
         "unprotected": [s for s, h in held.items() if not h["watched"]],
+        # ⛔ POSITIONS WITH NO TAKE-PROFIT YOU DECIDED. The monitor fires a
+        # scale-out ONLY on an agent-set target; the loop's generated numbers
+        # are a default it will not act on. So a name listed here has a stop and
+        # NO EXIT PLAN — it can run up and give it all back with nothing to sell
+        # into, which is what happened to INTC (+24.9% -> flat) <!-- historical -->.
+        # Reported beside `unprotected` because it is the same class of fact:
+        # something the agent believes is handled and is not.
+        "no_take_profit": [s for s, h in held.items()
+                           if "override applied" not in str(h.get("targets_status") or "")],
         "candidates": json.loads(top.to_json(orient="index")),
         "rank_diff": rank_diff,
         "regime": regime,
