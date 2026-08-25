@@ -560,7 +560,7 @@ def history(symbol: str, days: int = 60) -> str:
 
 @mcp.tool()
 def set_levels(symbol: str, stop: float,
-               targets: float | list[float] | None = 0.0,
+               targets: float | list[float] | str | None = "keep",
                reason: str = "", widen: bool = False) -> str:
     """Set YOUR stop and take-profit(s) for a position. `reason` is required.
 
@@ -579,6 +579,20 @@ def set_levels(symbol: str, stop: float,
     `targets` accepts a single number or a list -- pass ALL of a multi-target
     thesis's targets together. `positions()` shows you the current list; a
     thesis with two targets requires two here, or the whole set is ignored.
+
+    ⛔ OMIT `targets` AND YOUR EXISTING ONES ARE KEPT. The default is "keep":
+    adjusting a stop no longer disturbs take-profits you already set. To remove
+    them deliberately, pass `targets=0` (a stop with no take-profit is legal).
+    Until 2026-08-25 the default was 0 -- so tightening a stop silently ERASED
+    your targets, and the monitor fell back to the loop's formula levels, which
+    sit ~5.5 and ~10 sigma out and have essentially never been reached. That is
+    how PANW's 378/392 became 401.62/443.11 without anyone deciding it.
+
+    ⚠️ WHICH MEANS: IF YOU NEVER SET TARGETS, CODE IS SETTING THEM. A position
+    you have not given take-profits to is running the loop's default geometry,
+    not your judgement. `positions()` distinguishes them -- `targets_status`
+    reads "override applied" for yours. The loop supplies those defaults so the
+    monitor always has SOMETHING to watch; they are a fallback, not a view.
 
     `widen=True` is how you LOOSEN a stop deliberately -- the one exception to
     "stricter only". Use it when an inherited stop sits inside the name's own
@@ -620,7 +634,17 @@ def set_levels(symbol: str, stop: float,
     # all); this widened check is defense-in-depth for any caller that still
     # does -- every stringy/zero/blank spelling degrades to "no target",
     # never to a malformed one that aborts the whole write.
-    if (targets in (0, 0.0, None, "")
+    # ⛔ THE DEFAULT MUST NOT DESTROY TARGETS. It used to be 0.0 — "no target" —
+    # so adjusting ONLY a stop wiped the agent's take-profits and levels.resolve
+    # fell back to the loop's 5.5-sigma/10-sigma formula. Profit-taking reverted
+    # to code by default, which is the opposite of who is supposed to decide it.
+    # PANW's 378/392 (set 08-20) was found back at the formula's 401.62/443.11
+    # on 08-25 by the session itself. "keep" is now the default and preserves
+    # whatever is already stored; clearing still works, it just has to be asked
+    # for. See decide.KEEP_TARGETS.
+    if isinstance(targets, str) and targets.strip().lower() in ("keep", "__keep__"):
+        _targets = decide.KEEP_TARGETS
+    elif (targets in (0, 0.0, None, "")
             or (isinstance(targets, str) and targets.strip() in ("", "0", "0.0"))):
         _targets = None
     elif isinstance(targets, (list, tuple)):

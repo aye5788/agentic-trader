@@ -9,6 +9,64 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-25 — adjusting a stop ERASED the agent's take-profits and handed profit-taking back to the loop
+
+**Operator finding. The principal's standing position is that the AGENT decides
+the book; discovering that code was setting profit levels by default is what
+prompted this.**
+
+### The chain
+
+```
+set_levels(sym, stop, reason=...)      targets defaulted to 0.0
+  -> server normalises 0.0 to None     "no target"
+  -> merge_levels writes "targets": []  (the entry is REPLACED wholesale)
+  -> levels.resolve(): "an EMPTY list is not an override" -> thesis targets
+  -> monitor enforces the LOOP's formula: ~5.5 sigma and ~10 sigma
+```
+
+So the most ordinary call in the system — tightening a stop — silently deleted
+whatever take-profits the agent had reasoned out, and profit-taking reverted to
+generated geometry. **The destructive path was the DEFAULT**, reached by omitting
+an argument.
+
+### It was caught by the agent, not by a test
+
+PANW was set to 378/392 on 2026-08-20. On 08-25 the session read its own levels
+back and wrote:
+
+> "The enforced targets read [401.6177, 443.1139] — the inherited ~5.5-sigma
+> formula levels, NOT the 378/392 repair recorded on 2026-08-20. Something
+> regressed them. … Those are not targets, they are decoration: no scale-out can
+> ever fire, so the position had a stop and no exit plan."
+
+Every selftest passed throughout. Nothing in the repo asserts that a level
+survives the next call.
+
+### The fix
+
+`targets` now defaults to `"keep"` (`decide.KEEP_TARGETS`) and preserves what is
+already stored. Clearing is still legal and still supported — it just has to be
+ASKED for (`targets=0`), never defaulted into. Explicit `0`/`None`/`""` clear; a
+number or list replaces; omission preserves.
+
+### ⚠️ WHAT THIS DOES NOT FIX, AND IS THE BIGGER HALF
+
+As of this entry **8 of 13 positions carry loop-formula targets, not the agent's**:
+AMD, DELL, FTNT, INTC, JNJ, MU, SNDK, STX. Only FCX, KO, MNST, MRK and PANW have
+agent-set take-profits. The formula levels sit ~5.5 sigma out, are first-hit
+10.7% within ten days, and `target2` has fired ZERO times in the system's
+history — so those eight positions effectively have a stop and no exit plan,
+which is exactly what the session said about PANW.
+
+The code no longer erases a decision. It cannot supply one. Putting real targets
+on those eight is a trading judgement and belongs to the agent, not to this fix.
+`set_levels`' docstring now says so outright: *"if you never set targets, code is
+setting them."*
+
+---
+
+
 ## 2026-08-25 — the book had no exit that could bound GIVEBACK; a trailing stop ships in shadow mode
 
 **Operator-directed. Implementation plan authored by `codex`, which reversed its

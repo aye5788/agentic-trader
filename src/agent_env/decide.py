@@ -17,6 +17,13 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
 
+# Sentinel for "the caller did not mention targets". Distinct from None, which
+# is an explicit "this position has no take-profit" and must stay meaningful.
+# The default has to be non-destructive: a stop adjustment is the most ordinary
+# call there is, and it was silently handing profit-taking back to the loop.
+KEEP_TARGETS = "__keep__"
+
+
 def merge_levels(existing: dict, symbol: str, stop, targets, reason: str, ts: str,
                  widen: bool = False) -> dict:
     """Return a NEW overrides dict with `symbol` set. Never mutates `existing`.
@@ -53,7 +60,26 @@ def merge_levels(existing: dict, symbol: str, stop, targets, reason: str, ts: st
     # `targets` accepts None, a single number, or a list matching the thesis's
     # target count. The list form is the one that matters: every live thesis
     # carries two, and the single form was refused by the monitor every time.
-    if targets is None:
+    if targets is KEEP_TARGETS:
+        # ⛔ OMITTING TARGETS MUST NOT DESTROY THEM. This entry is REPLACED
+        # wholesale below, so before 2026-08-25 a call that adjusted only the
+        # stop wrote `targets: []` -- and levels.resolve() reads an empty list
+        # as "no override" and falls back to the THESIS targets, i.e. the
+        # 5.5-sigma/10-sigma formula the loop generates. The agent's own
+        # take-profits were therefore erased by the routine act of tightening a
+        # stop, and profit-taking silently reverted to code.
+        #
+        # It happened and was caught by the agent, not by a test: PANW was set
+        # to 378/392 on 2026-08-20, and on 08-25 the session read the enforced
+        # targets back as [401.6177, 443.1139] and wrote "the inherited
+        # ~5.5-sigma formula levels, NOT the 378/392 repair... Something
+        # regressed them." That is this line.
+        #
+        # Clearing targets is still possible and still legal -- it just has to
+        # be ASKED FOR now (targets=0/None/""), never defaulted into.
+        ts_list = list((existing or {}).get(str(symbol).strip().upper(), {})
+                       .get("targets") or [])
+    elif targets is None:
         ts_list = []
     elif isinstance(targets, (list, tuple)):
         ts_list = list(targets)
