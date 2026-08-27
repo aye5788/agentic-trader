@@ -157,26 +157,65 @@ def _looks_like_common_stock(ticker: str) -> bool:
     return bool(re.fullmatch(r"[A-Z]{1,5}", ticker)) and ticker not in NON_EQUITY
 
 
-def classify(proposal, pond_count, params) -> dict:
-    """Decide auto-apply vs. hold-for-human. HOLD on any anomaly/judgment case."""
+def classify(proposal, pond_count, params, coverage=None) -> dict:
+    """Decide APPLY vs. change nothing. -> {"decision", "reasons", "report"}.
+
+    ⛔ THERE IS NO LONGER A "WAIT FOR A HUMAN" OUTCOME, AND THAT IS THE POINT.
+    The two outcomes are AUTO_APPLY and NO_CHANGE, and NO_CHANGE is reachable
+    ONLY from a data-integrity failure, which self-clears the moment the feed is
+    healthy again. Nothing here can enter a state that a person has to come and
+    reset.
+
+    Why this changed (2026-08-27): the previous version returned HOLD from five
+    conditions, three of which regenerated themselves every week, so AUTO_APPLY
+    was in practice unreachable and the screen emailed a proposal that could
+    never become a universe. config/universe.csv went unchanged from 2026-07-08
+    to 2026-08-27 while every scheduled job reported healthy.
+
+      - `auto_apply_max_changes` (a churn ceiling) was justified in code as
+        "possible data glitch". It is a PROXY, and a bad one: after weeks of a
+        frozen pool a large diff is expected drift, not corruption. The direct
+        test now exists — see `coverage` below — so the proxy is gone rather
+        than merely widened. A wider threshold would have been the same defect
+        with a bigger number.
+      - `flagged_seeds` blocked the whole screen because ONE conviction name had
+        drifted down the ranks. That is a report, not a fault: propose_membership
+        surfaces stale seeds and never drops them. It no longer blocks the other
+        149 names from rotating.
+      - `non_equity_kept` blocked on incumbents that the equity predicate could
+        not VERIFY, which is not the same claim as "is a fund" — see the caller.
+        It is likewise reported, not blocking.
+
+    WHAT STILL REFUSES, and why each is about a mechanism rather than a taste:
+      - `coverage["missing"]`: the feed did not account for every pond name.
+        Ranking an incomplete panel silently de-lists whatever is absent.
+      - short pond: fewer usable names than the target the screen must fill.
+      - an add that fails the name-shape/denylist backstop.
+    Each of those is a fact about the DATA, and each is true again next run only
+    if the data is still broken.
+    """
     reasons = []
-    changes = len(proposal["add"]) + len(proposal["drop_fills"])
-    if changes > params["auto_apply_max_changes"]:
-        reasons.append(f"{changes} changes > {params['auto_apply_max_changes']} (possible data glitch)")
-    if proposal["flagged_seeds"]:
-        reasons.append("stale seed(s) up for decision: " + ", ".join(proposal["flagged_seeds"]))
+    missing = list((coverage or {}).get("missing") or [])
+    if missing:
+        head = ", ".join(missing[:8]) + ("…" if len(missing) > 8 else "")
+        reasons.append(
+            f"feed incomplete: {len(missing)} pond name(s) neither returned nor "
+            f"reported unquotable ({head}) — ranking an incomplete panel would "
+            f"silently drop tradable names")
     if pond_count < params["target_size"]:
         reasons.append(f"pond only {pond_count} names (< target {params['target_size']}) — data may be broken")
     bad = [t for t in proposal["add"] if not _looks_like_common_stock(t)]
     if bad:
         reasons.append("add(s) failed sanity: " + ", ".join(bad))
-    # A fund already IN the universe is a live whitelist entry, so it is a
-    # decision for a human, not something to auto-apply around.
-    stuck = proposal.get("non_equity_kept") or []
-    if stuck:
-        reasons.append("existing member(s) are not common stock and remain in "
-                       "the whitelist: " + ", ".join(stuck))
-    return {"decision": "HOLD" if reasons else "AUTO_APPLY", "reasons": reasons}
+    # Reported, never blocking. Acting on either is a portfolio judgement that
+    # belongs to a session, not a condition that freezes pool maintenance.
+    report = {}
+    if proposal["flagged_seeds"]:
+        report["flagged_seeds"] = list(proposal["flagged_seeds"])
+    if proposal.get("non_equity_kept"):
+        report["unverified_incumbents"] = list(proposal["non_equity_kept"])
+    return {"decision": "NO_CHANGE" if reasons else "AUTO_APPLY",
+            "reasons": reasons, "report": report}
 
 
 def update_seed_watch(watch: dict, seed_ranks: dict, max_history: int) -> dict:
@@ -190,9 +229,27 @@ def update_seed_watch(watch: dict, seed_ranks: dict, max_history: int) -> dict:
 
 def flag_stale_seeds(watch: dict, params) -> list:
     """A seed is stale if its momentum rank has been worse than stale_seed_rank_floor
-    for stale_seed_weeks consecutive weeks."""
+    for stale_seed_weeks consecutive weeks.
+
+    ⛔ A MISSING READING IS NOT A BAD READING. Only NUMERIC entries count. The
+    accrual in scripts/slow_loop.py used to convert an INELIGIBLE seed — one the
+    momentum filter did not rank at all — into the literal rank 9999, which is
+    above any sane floor, so a name that was merely not trending accrued
+    staleness every single week. In a cross-sectional momentum book most of the
+    universe is untrending at any moment, so this flagged blue chips (MSFT,
+    NFLX, ORCL, T, CMCSA, NKE were all flagged on 2026-08-21) and, because a
+    flagged seed then forced HOLD, it froze the entire screen.
+
+    Staleness must mean "was ranked, and ranked badly" — which is what
+    [universe_maintenance] in config/strategy.toml has always claimed it means.
+    A seed with no reading has produced no evidence either way.
+    """
     floor = params["stale_seed_rank_floor"]
     weeks = params["stale_seed_weeks"]
-    flagged = [t for t, hist in watch.items()
-               if len(hist) >= weeks and all(r > floor for r in hist[-weeks:])]
+    flagged = []
+    for t, hist in watch.items():
+        vals = [r for r in (hist or [])
+                if isinstance(r, (int, float)) and not isinstance(r, bool)]
+        if len(vals) >= weeks and all(r > floor for r in vals[-weeks:]):
+            flagged.append(t)
     return sorted(flagged)

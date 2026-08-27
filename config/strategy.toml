@@ -314,7 +314,14 @@ add_rank_max           = 150          # non-incumbent eligible to add while rank
 add_dvol_floor_usd     = 50_000_000   # hard min turnover for an ADD (junk gate)
 screen_top_n           = 400          # market-cap screen depth for the pond
 screen_min_mktcap      = 2_000_000_000
-auto_apply_max_changes = 5            # > this many changes ⇒ HOLD for review
+# ⛔ auto_apply_max_changes REMOVED 2026-08-27. It was a churn ceiling (5)
+# justified in code as a data-glitch detector, and it was the wrong instrument:
+# after weeks of a frozen pool a large diff is expected drift, and a genuinely
+# corrupt feed can produce a SMALL diff. It was widened to nothing and deleted
+# rather than raised, because a bigger threshold is the same defect with a
+# bigger number. The direct test replaced it: snapshot_turnover() now reports
+# per-name coverage and classify() refuses when any pond name is neither
+# returned nor reported unquotable. See universe_maint.classify.
 stale_seed_rank_floor  = 100          # seed in bottom third (of 150) counts toward stale
 stale_seed_weeks       = 8            # consecutive WEEKS flagged ⇒ surface for decision.
                                       #   ⚠️ Until 2026-08-20 the slow loop accrued this

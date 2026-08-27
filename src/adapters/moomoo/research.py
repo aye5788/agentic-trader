@@ -17,21 +17,40 @@ def _bare(code: str) -> str:
     return code.split(".", 1)[1] if "." in code else code
 
 
-def snapshot_turnover(tickers, ctx=None) -> dict:
+def snapshot_turnover(tickers, ctx=None, report=None) -> dict:
     """{bare_ticker: turnover ($-volume)} via get_market_snapshot, batched <=400.
     turnover is a single-session figure; NaN/missing -> 0.0. Resilient to unquotable
     tickers: a batch that moomoo rejects (e.g. a delisted name) is bisected so the
-    good tickers still resolve and only the bad ones are skipped."""
+    good tickers still resolve and only the bad ones are skipped.
+
+    ⛔ COVERAGE IS EVIDENCE THE CALLER MUST BE ABLE TO CHECK. A partial response is
+    WELL-FORMED: every row it does return is valid, so no exception fires and the
+    result simply omits names. The universe screen ranks on this dict and then
+    rewrites config/universe.csv — which is the order-gate whitelist — so a silent
+    omission is a silent de-listing of tradable names, and a short pond can still
+    clear a length check by accident. Pass `report` (a dict) to get the accounting:
+    requested / returned / unquotable / missing. `missing` is the set that neither
+    came back NOR was explicitly identified as unquotable — i.e. unexplained
+    absence, which is the only honest signal that the feed was incomplete.
+    """
     own = ctx is None
     q = ctx or quote_ctx()
     out = {}
+    skipped = []
     try:
         codes = [_us(t) for t in tickers]
         for i in range(0, len(codes), 400):
-            _snap_chunk(q, codes[i:i + 400], out)
+            _snap_chunk(q, codes[i:i + 400], out, skipped)
     finally:
         if own:
             q.close()
+    if report is not None:
+        requested = [_bare(_us(t)) for t in tickers]
+        unq = set(skipped)
+        report.update(requested=sorted(set(requested)),
+                      returned=sorted(out),
+                      unquotable=sorted(unq),
+                      missing=sorted(set(requested) - set(out) - unq))
     return out
 
 
@@ -76,7 +95,7 @@ def _snap_call(q, codes):
         _last_snap[0] = time.monotonic()
 
 
-def _snap_chunk(q, codes, out) -> None:
+def _snap_chunk(q, codes, out, skipped=None) -> None:
     """Snapshot `codes` into `out`. A batch moomoo rejects is bisected to isolate the
     offending code(s). A single code that fails with a *ticker-unavailable* error is
     skipped; any OTHER single-code failure is RAISED so it surfaces loudly rather
@@ -108,11 +127,15 @@ def _snap_chunk(q, codes, out) -> None:
             f"(OpenD is shared with moomoo-vol-desk — is it running a big pull?): {df}")
     if len(codes) == 1:
         if any(m in str(df).lower() for m in _UNQUOTABLE_MARKERS):
-            return  # genuinely unquotable single ticker — skip it
+            # Genuinely unquotable single ticker — skip it, but RECORD it. An
+            # unrecorded skip is indistinguishable from a dropped good name.
+            if skipped is not None:
+                skipped.append(_bare(codes[0]))
+            return
         raise RuntimeError(f"snapshot failed for {codes[0]} (non-ticker error): {df}")
     mid = len(codes) // 2
-    _snap_chunk(q, codes[:mid], out)
-    _snap_chunk(q, codes[mid:], out)
+    _snap_chunk(q, codes[:mid], out, skipped)
+    _snap_chunk(q, codes[mid:], out, skipped)
 
 
 def screen_top_marketcap(n: int = 400, min_mktcap: float = 2e9, ctx=None) -> list:

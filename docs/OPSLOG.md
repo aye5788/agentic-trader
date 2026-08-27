@@ -9,6 +9,99 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-27 — the universe screen could never apply, and the human gate hid it
+
+`config/universe.csv` had not changed since 2026-07-08. The weekly screen was
+firing correctly — Friday 2026-08-21 17:00, its first run after the cadence
+went quarterly→weekly on 08-20 — and it emailed a proposal every week. The
+proposal could never become a universe.
+
+`classify()` returned HOLD from five conditions. Three regenerated themselves,
+so AUTO_APPLY was unreachable in practice:
+
+- **The staleness sentinel.** `slow_loop.py` recorded rank `9999` for a seed the
+  momentum filter did not rank, commented "worst-rank ⇒ counts as stale". That
+  conflates *ranked and ranked badly* with *not ranked at all*. In a
+  cross-sectional momentum book most of the universe is untrending at any
+  moment, so untrending blue chips accrued staleness weekly: on 08-21 the
+  flagged set included MSFT, NFLX, ORCL, T, CMCSA and NKE, every one of them
+  all-`9999` across all 16 stored readings. A flagged seed forced HOLD.
+- **The probe set was not the judged set.** `is_equity()` is fail-closed on an
+  unprobed ticker — correct for the add path, since `universe.csv` IS the
+  order-gate whitelist. But `propose_membership` reused that predicate over
+  *seeds*, which are protected from the rank and so can sit outside the probed
+  top-`add_rank_max` slice. The predicate answered "did I probe this?" and the
+  caller read "is this an equity?". That is why the 08-21 proposal declared
+  Ford, Nike, Comcast, Conagra and Nokia not to be common stock. Also HOLD.
+- **A churn ceiling** (`auto_apply_max_changes = 5`) standing in for a
+  data-glitch detector. After six frozen weeks 18 changes is drift, not
+  corruption — and a genuinely corrupt feed can produce a *small* diff.
+
+Every scheduled job reported healthy throughout, because every job did run. The
+selftest asserted `flagged seed → HOLD` and `too many changes → HOLD`: it
+encoded the defect, so it went green every week while the file could not change.
+
+**Fixed.** There is no "wait for a human" outcome any more. `classify()` returns
+AUTO_APPLY or NO_CHANGE, and NO_CHANGE is reachable only from a fact about the
+DATA — each self-clearing on the next healthy run:
+
+- `snapshot_turnover()` now reports per-name coverage (requested / returned /
+  unquotable / **missing**), and `_snap_chunk` records the tickers it
+  deliberately skips. A partial snapshot is well-formed, so nothing raises and
+  a truncated pond can still pass a length check; unexplained *absence* is the
+  only honest signal, and it is what replaced the churn ceiling. The ceiling was
+  deleted rather than widened — a bigger threshold is the same defect with a
+  bigger number.
+- The probe set is now candidates ∪ seeds, so the equity verdict is about the
+  instrument rather than about the probe.
+- An ineligible seed records **no reading**; `flag_stale_seeds` counts numeric
+  readings only. Stale seeds and unverified incumbents are now *reported*, never
+  blocking.
+- `_validate_before_write()` is the last gate before the whitelist: row count,
+  duplicates, name shape, and a **live re-probe of every add**, on both the
+  auto-apply and `--apply` paths. `--apply` previously rebuilt rows from a stored
+  JSON that was never re-checked. A held name leaving the universe is announced,
+  not refused — a sell is never whitelisted, so the position stays exitable, but
+  `fetch_prices` takes its symbol list from this file and the price column stops.
+
+**Two things the dry run caught that a fixture would not have.** First,
+`_validate_before_write` initially applied the add-time name-shape test
+(`[A-Z]{1,5}`) to every row — which rejects **BRK.B**, an incumbent since
+inception, so it would have refused every write including the next scheduled
+one. That is Defect B in miniature: an add-path predicate reused over
+incumbents. Incumbents are now tested against the denylist only. It surfaced by
+running the gate against the real `config/universe.csv`, not a fixture.
+
+Second, the forced pre-market dry run returned AUTO_APPLY while proposing to
+drop **FTNT and MNST, both held** — ranked on a partial session. Coverage proves
+every name returned a number; it does not prove the number covers a complete
+session. `--force` therefore now computes and shows but never writes: the
+partial/settled boundary is already defined once in
+`fetch_prices._drop_unsettled_session()` (16:15 ET), and restating it here would
+put the same rule in two languages again. The SCHEDULED Friday 17:00 post-close
+run is unaffected and stays fully unattended.
+
+`seed_watch.json` was CLEARED (backup `.pre-2026-08-27.bak`). Stripping the
+`9999`s left 495 readings that were accrued *nightly* before the 08-20 gating
+fix, so "8 weeks" meant ~1.6 against them; mixed-cadence history makes the flag
+meaningless. It rebuilds one reading per Friday and can flag nothing for 8
+weeks, which is the honest answer.
+
+**Also today:** the pool was rotated manually from the held 08-21 proposal —
+commit `5a8743f`, +9 (ASML BABA BSX DE MCK NEM ROST SKHY TSM) −9 (CAH CEG CIEN
+D MCHP NXPI ON PGR SHW). `SKHY` is SK hynix ADR, confirmed against Robinhood's
+instrument search; moomoo's market-cap figure for it is not a reliable identity
+test on its own. All 13 held names were verified present in the new universe.
+
+The independent reviewer (Codex) was run twice: once on the design, where it
+returned SPLIT and supplied the two CRITICAL findings above (final-write
+validation, snapshot completeness), and once on the rotation procedure, where it
+returned AFFIRM for applying the stored 08-21 list rather than recomputing
+pre-market.
+
+---
+
+
 ## 2026-08-25 — the monitor no longer takes profit on a level nobody decided
 
 **Principal's instruction, same day and same thread as the `set_levels` erasure

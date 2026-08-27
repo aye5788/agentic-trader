@@ -865,11 +865,24 @@ def main() -> None:
         uni_rows = _um.read_universe(str(REPO / "config" / "universe.csv"))
         seeds = {r["ticker"] for r in uni_rows if r["source"] == "seed"}
 
+        # ⛔ AN INELIGIBLE SEED RECORDS NOTHING. It used to record the literal
+        # rank 9999 with the comment "worst-rank => counts as stale", which
+        # conflated two different facts: "ranked, and ranked badly" (evidence of
+        # staleness) and "not ranked at all" (no evidence either way). In a
+        # cross-sectional momentum book most of the universe is ineligible at any
+        # moment, so every untrending seed accrued staleness every week —
+        # MSFT, NFLX, ORCL, T, CMCSA and NKE were all flagged as "stale seeds" on
+        # 2026-08-21 — and a flagged seed then froze the entire universe screen.
+        # Skipping leaves the seed's history untouched, which is what "no reading
+        # this week" honestly means. See universe_maint.flag_stale_seeds.
         def _rk(sym):
             r = book_scored.loc[sym, "rank"]
-            return int(r) if r == r else 9999  # NaN (ineligible seed) => worst-rank ⇒ counts as stale
+            return int(r) if r == r else None      # None => no reading, not a bad one
 
-        seed_ranks = {s: _rk(s) for s in names if s in seeds and s in book_scored.index}
+        seed_ranks = {s: v for s, v in
+                      ((s, _rk(s)) for s in names
+                       if s in seeds and s in book_scored.index)
+                      if v is not None}
         watch_path = REPO / "research_store" / "universe" / "seed_watch.json"
         watch_path.parent.mkdir(parents=True, exist_ok=True)
         watch = _json.loads(watch_path.read_text()) if watch_path.exists() else {}

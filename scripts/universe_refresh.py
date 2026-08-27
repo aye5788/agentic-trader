@@ -103,22 +103,54 @@ def _selftest() -> None:
           "equities-only adds (denylist, market-cap test, and no adds when "
           "the probe cannot verify)")
 
-    cp = {"target_size": 150, "auto_apply_max_changes": 5}
+    # ⛔ THESE ASSERTIONS USED TO PIN THE DEFECT IN PLACE. Until 2026-08-27 the
+    # two below marked *** asserted that a large change set and a flagged seed
+    # each produced HOLD. Both were true of the code and both were wrong about
+    # the world, so the suite went green every week while config/universe.csv
+    # could not change at all. A test that encodes the bug is worse than no test.
+    cp = {"target_size": 150}
     # routine → AUTO_APPLY
     small = {"add": ["NEW"], "drop_fills": ["OLD"], "flagged_seeds": []}
     assert um.classify(small, 400, cp)["decision"] == "AUTO_APPLY"
-    # too many changes → HOLD
+    # *** a LARGE change set is drift, not a glitch → still applies.
     big = {"add": ["A", "B", "C", "D"], "drop_fills": ["E", "F", "G"], "flagged_seeds": []}
-    assert um.classify(big, 400, cp)["decision"] == "HOLD"
-    # flagged seed → HOLD
+    assert um.classify(big, 400, cp)["decision"] == "AUTO_APPLY"
+    # *** a flagged seed is REPORTED, never blocking.
     seed = {"add": [], "drop_fills": [], "flagged_seeds": ["MU"]}
-    assert um.classify(seed, 400, cp)["decision"] == "HOLD"
-    # short pond (broken data) → HOLD
-    assert um.classify(small, 100, cp)["decision"] == "HOLD"
-    # non-common-stock add (leveraged/odd ticker) → HOLD
+    d = um.classify(seed, 400, cp)
+    assert d["decision"] == "AUTO_APPLY", d
+    assert d["report"]["flagged_seeds"] == ["MU"], d
+    # an incumbent the probe could not verify is likewise reported, not blocking
+    unv = {"add": [], "drop_fills": [], "flagged_seeds": [],
+           "non_equity_kept": ["NOK"]}
+    d = um.classify(unv, 400, cp)
+    assert d["decision"] == "AUTO_APPLY", d
+    assert d["report"]["unverified_incumbents"] == ["NOK"], d
+
+    # --- what STILL refuses: facts about the DATA, all self-clearing ----------
+    # short pond (broken data)
+    assert um.classify(small, 100, cp)["decision"] == "NO_CHANGE"
+    # non-common-stock add (leveraged/odd ticker)
     bad = {"add": ["SOXL"], "drop_fills": [], "flagged_seeds": []}
-    assert um.classify(bad, 400, cp)["decision"] == "HOLD"
-    print("universe_maint selftest OK: classify")
+    assert um.classify(bad, 400, cp)["decision"] == "NO_CHANGE"
+    # ⛔ THE CHECK THAT REPLACED THE CHURN CEILING: an incomplete feed. A partial
+    # snapshot is well-formed and can still yield a full-length pond, so length
+    # alone cannot detect it -- only unexplained ABSENCE can.
+    d = um.classify(small, 400, cp, coverage={"missing": ["AAPL", "MSFT"]})
+    assert d["decision"] == "NO_CHANGE", d
+    assert "feed incomplete" in " ".join(d["reasons"]), d
+    # a name the feed explicitly reported unquotable is EXPLAINED, not missing
+    d = um.classify(small, 400, cp,
+                    coverage={"missing": [], "unquotable": ["DEAD"]})
+    assert d["decision"] == "AUTO_APPLY", d
+    # ⛔ NO INPUT PRODUCES A "WAIT FOR A HUMAN" OUTCOME ANY MORE.
+    for probe in (small, big, seed, unv, bad):
+        for pond in (100, 400):
+            for cov in ({}, {"missing": ["X"]}):
+                assert um.classify(probe, pond, cp, coverage=cov)["decision"] \
+                    in ("AUTO_APPLY", "NO_CHANGE")
+    print("universe_maint selftest OK: classify (applies or changes nothing; "
+          "never waits on a human)")
 
     w = {}
     w = um.update_seed_watch(w, {"MU": 120, "AAPL": 5}, max_history=3)
@@ -126,6 +158,14 @@ def _selftest() -> None:
     assert w["MU"] == [120, 130] and w["AAPL"] == [5, 4], w
     sp = {"stale_seed_rank_floor": 100, "stale_seed_weeks": 2}
     assert um.flag_stale_seeds(w, sp) == ["MU"], um.flag_stale_seeds(w, sp)  # MU bottom-third 2x; AAPL not
+    # ⛔ REGRESSION, 2026-08-27: an INELIGIBLE seed must not accrue staleness.
+    # scripts/slow_loop.py recorded rank 9999 for a name the momentum filter did
+    # not rank; 9999 > any floor, so a merely-untrending blue chip was flagged
+    # every week and a flagged seed froze the whole screen. Non-numeric readings
+    # carry no evidence and must be ignored.
+    assert um.flag_stale_seeds({"Z": [None, None, None]}, sp) == [], "None is not a bad rank"
+    assert um.flag_stale_seeds({"Z": [5, None]}, sp) == [], "one good reading, one absent"
+    assert um.flag_stale_seeds({"Z": [200, 300]}, sp) == ["Z"], "genuinely ranked badly"
     # history cap
     w2 = um.update_seed_watch({"X": [1, 2, 3]}, {"X": 4}, max_history=3)
     assert w2["X"] == [2, 3, 4], w2
@@ -165,14 +205,99 @@ def _render_md(proposal, decision, asof) -> str:
     L = [f"# Universe proposal {asof}", "",
          f"**Decision:** {decision['decision']}"]
     if decision["reasons"]:
-        L += ["", "**Held because:**"] + [f"- {r}" for r in decision["reasons"]]
+        L += ["", "**Changed nothing because:** (self-clears — no action required)"] \
+             + [f"- {r}" for r in decision["reasons"]]
     rej = proposal.get("rejected_non_equity") or []
     if rej:
         L += ["", "**Rejected (not common stock):** " + ", ".join(rej)]
     L += ["", f"**Adds ({len(proposal['add'])}):** " + (", ".join(proposal["add"]) or "none"),
           f"**Drops — fills ({len(proposal['drop_fills'])}):** " + (", ".join(proposal["drop_fills"]) or "none"),
-          f"**Flagged seeds (your decision):** " + (", ".join(proposal["flagged_seeds"]) or "none")]
+          f"**Flagged seeds (reported, not blocking):** " + (", ".join(proposal["flagged_seeds"]) or "none")]
     return "\n".join(L)
+
+
+def _validate_before_write(rows, adds, cfg) -> None:
+    """⛔ THE LAST GATE BEFORE THE ORDER-GATE WHITELIST. Raises to refuse the write.
+
+    config/universe.csv IS the buy whitelist (src/governance.py ->
+    scripts/hooks/pretooluse_order_gate.py). Validating at PROPOSAL time is not
+    enough: `--apply` rebuilds rows from a stored JSON that may be days old and
+    was never re-checked, and since 2026-08-27 the screen applies unattended, so
+    no human reads the diff before it lands. Whatever is true of these rows must
+    be established HERE, immediately before the bytes are written.
+
+    Structural checks are unconditional. The equity re-probe is the one that
+    matters: a fund reaching this file makes itself buyable.
+    """
+    params = cfg["universe_maintenance"]
+    tickers = [r["ticker"] for r in rows]
+    if len(tickers) != params["target_size"]:
+        raise SystemExit(f"REFUSE WRITE: {len(tickers)} rows, expected "
+                         f"{params['target_size']}")
+    dupes = sorted({t for t in tickers if tickers.count(t) > 1})
+    if dupes:
+        raise SystemExit(f"REFUSE WRITE: duplicate ticker(s): {', '.join(dupes)}")
+    blank = [t for t in tickers if not t or not t.strip()]
+    if blank:
+        raise SystemExit(f"REFUSE WRITE: {len(blank)} blank ticker(s)")
+    # ⛔ THE SHAPE TEST IS AN ADD-TIME TEST AND MUST NOT BE APPLIED TO INCUMBENTS.
+    # `_looks_like_common_stock` is `[A-Z]{1,5}` plus the denylist, so it rejects
+    # BRK.B — a legitimate member of this universe since inception. Applying it
+    # to every row refused EVERY write, which is Defect B again in miniature: an
+    # add-path predicate reused over incumbents answers a different question than
+    # the caller thinks. Caught 2026-08-27 by running the gate against the real
+    # config/universe.csv rather than a fixture. Incumbents are tested against
+    # the DENYLIST only — the thing that actually must never be in this file.
+    shape_bad = [t for t in adds if not um._looks_like_common_stock(t)]
+    if shape_bad:
+        raise SystemExit("REFUSE WRITE: add(s) fail name-shape/denylist: "
+                         + ", ".join(shape_bad))
+    listed_funds = sorted({t for t in tickers if t in um.NON_EQUITY})
+    if listed_funds:
+        raise SystemExit("REFUSE WRITE: known fund/leveraged product in the "
+                         "universe: " + ", ".join(listed_funds))
+
+    # Re-probe every ADD against the live feed. Absent/zero market cap, or an
+    # unreachable probe, refuses the whole write rather than admitting the name.
+    if adds:
+        from adapters.moomoo import research as mm   # lazy: system-python only
+        try:
+            ctx = mm.quote_ctx()
+            try:
+                got = mm.snapshot_fields(ctx, list(adds))
+            finally:
+                ctx.close()
+        except Exception as e:                                     # noqa: BLE001
+            raise SystemExit(f"REFUSE WRITE: equity re-probe unavailable "
+                             f"({type(e).__name__}: {e}) — cannot verify "
+                             f"{len(adds)} add(s) against the live feed")
+        unverified = []
+        for t in adds:
+            row = got.get(t) or {}
+            mv = row.get("total_market_val")
+            ok = (isinstance(mv, (int, float)) and not isinstance(mv, bool)
+                  and float(mv) == float(mv) and float(mv) > 0)
+            if not ok:
+                unverified.append(t)
+        if unverified:
+            raise SystemExit("REFUSE WRITE: add(s) not verifiable as common "
+                             "stock at write time: " + ", ".join(unverified))
+        print(f"  write gate: {len(adds)} add(s) re-verified against the live feed")
+
+    # A held name leaving the universe is NOT refused -- a sell is never gated by
+    # the whitelist, so the position stays exitable. It is announced because
+    # scripts/fetch_prices.py takes its symbol list from this file, so the name's
+    # price column stops updating and the stop watcher falls back to coarser
+    # marks (src/marks.py). Loud, not blocking.
+    try:
+        pos = json.loads((REPO / "research_store" / "rh" / "positions.json").read_text())
+        leaving = sorted(set(pos.get("positions") or {}) - set(tickers))
+        if leaving:
+            print(f"  ⚠️ HELD name(s) leaving the universe: {', '.join(leaving)} "
+                  f"— still sellable (sells are not whitelisted), but their price "
+                  f"columns will stop updating in research_store/prices/")
+    except Exception:
+        pass
 
 
 def apply_proposal(proposal, asof, cfg) -> None:
@@ -180,6 +305,7 @@ def apply_proposal(proposal, asof, cfg) -> None:
     rows = [dict(r) for r in proposal["result"]]
     for r in rows:
         r["as_of"] = asof
+    _validate_before_write(rows, proposal.get("add") or [], cfg)
     um.write_universe(str(UNI), rows)
     subprocess.run(["git", "add", str(UNI)], cwd=str(REPO), check=True)
     msg = (f"chore(universe): refresh {asof} "
@@ -198,8 +324,9 @@ def apply_from_file(asof, cfg) -> None:
     result += [{"ticker": t, "source": "screen", "sector": "", "exchange": "",
                 "flag": "", "as_of": ""} for t in data["add"]]
     apply_proposal({"result": result, "add": data["add"], "drop_fills": data["drop_fills"]}, asof, cfg)
-    # Clear the dashboard "pending review" banner: this held proposal is now applied,
-    # so flip its stored status off HOLD (the panel only surfaces HOLD proposals).
+    # Mark the stored artifact APPLIED so the dashboard panel stops surfacing it.
+    # Kept for artifacts written BEFORE 2026-08-27, which can still carry HOLD;
+    # the screen no longer produces that decision.
     data["decision"]["decision"] = "APPLIED"
     data["applied_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     (PROP_DIR / f"{asof}.json").write_text(json.dumps(data, indent=2))
@@ -216,7 +343,16 @@ def run(asof: str, dry: bool) -> dict:
     seed_flags = um.flag_stale_seeds(watch, params)
 
     pond = mm.candidate_pond(incumbents, str(POOL), params)
-    turnovers = mm.snapshot_turnover(pond)
+    # ⛔ COVERAGE, NOT LENGTH. `len(ranked)` counts names that came back with a
+    # positive turnover; it cannot tell a complete 150 from a truncated 400. A
+    # partial snapshot is well-formed, so nothing raises and the missing names
+    # simply rank nowhere -- and this function then rewrites the order-gate
+    # whitelist. Ask the feed to account for every name it was given.
+    coverage = {}
+    turnovers = mm.snapshot_turnover(pond, report=coverage)
+    if coverage.get("missing"):
+        print(f"  feed incomplete: {len(coverage['missing'])} of "
+              f"{len(coverage['requested'])} pond names unaccounted for")
     ranked = um.rank_pond(turnovers)
 
     # ⛔ EQUITIES ONLY. The pond is moomoo's market-cap screen (documented as
@@ -239,9 +375,10 @@ def run(asof: str, dry: bool) -> dict:
     #      DROPPED incumbent — so a candidate it would consider was never
     #      probed. The probed set must be the considered set.
     # Both fixed below, and the honest failure mode is now: probe unavailable ->
-    # NO ADDS AT ALL and the proposal HOLDs for a human. A weekly screen that
-    # adds nothing for one week is a non-event; one that adds a fund to the
-    # order-gate whitelist is not.
+    # NO ADDS AT ALL and the run reports NO_CHANGE (2026-08-27: it used to say
+    # "HOLDs for a human"; there is no such outcome any more — NO_CHANGE clears
+    # itself on the next healthy run). A weekly screen that adds nothing for one
+    # week is a non-event; one that adds a fund to the order-gate whitelist is not.
     def _equity_probe(tickers):
         """-> (mcap_by_ticker, ok). ok=False means the probe is untrustworthy."""
         mcap, ok = {}, True
@@ -267,8 +404,16 @@ def run(asof: str, dry: bool) -> dict:
         return mcap, ok
 
     # Probe EVERY name propose_membership could add: anything ranked within
-    # add_rank_max, incumbent or not (a dropped incumbent is re-addable).
-    cand = ranked[:params["add_rank_max"]]
+    # add_rank_max, incumbent or not (a dropped incumbent is re-addable) --
+    # ⛔ PLUS EVERY SEED. propose_membership applies this same predicate to
+    # incumbents to compute `non_equity_kept`, and seeds are protected from the
+    # rank, so a seed can sit far outside the top-`add_rank_max` slice. Probing
+    # only the addable slice meant `is_equity` answered "did I probe this?" and
+    # the caller read it as "is this an equity?" -- which is why the 2026-08-21
+    # screen reported Ford, Nike, Comcast, Conagra and Nokia as "not common
+    # stock" and refused to apply. THE PROBED SET MUST BE THE JUDGED SET.
+    seeds_now = [r["ticker"] for r in current if r["source"] == "seed"]
+    cand = list(dict.fromkeys(ranked[:params["add_rank_max"]] + seeds_now))
     mcaps, probe_ok = _equity_probe(cand) if cand else ({}, True)
 
     def is_equity(t: str) -> bool:
@@ -286,9 +431,12 @@ def run(asof: str, dry: bool) -> dict:
                                      params, is_equity=is_equity)
     if proposal.get("rejected_non_equity"):
         print(f"  rejected as non-equity: {', '.join(proposal['rejected_non_equity'])}")
-    decision = um.classify(proposal, len(ranked), params)
+    decision = um.classify(proposal, len(ranked), params, coverage=coverage)
     if not probe_ok:
-        decision["decision"] = "HOLD"
+        # Self-clearing, like every other refusal here: no adds were produced,
+        # so there is nothing to apply, and a healthy probe next run applies
+        # normally. This is NOT a request for a human.
+        decision["decision"] = "NO_CHANGE"
         decision["reasons"] = list(decision["reasons"]) + [
             "equity probe unavailable/incomplete — adds suppressed this run "
             "(a fund must never be added on the name-shape check alone)"]
@@ -322,8 +470,11 @@ def run(asof: str, dry: bool) -> dict:
              f"−{','.join(proposal['drop_fills']) or 'none'}  +{','.join(proposal['add']) or 'none'} (committed)",
              tags="recycle")
     else:
-        push("Universe proposal needs review",
-             f"HOLD: {'; '.join(decision['reasons'])}\nApprove in a Claude session.",
+        # NO_CHANGE is a data-integrity outcome, not a request for approval.
+        # It self-clears; the operator is told so it is not mistaken for silence.
+        push("Universe screen changed nothing",
+             f"NO_CHANGE: {'; '.join(decision['reasons'])}\n"
+             f"Self-clears when the feed is healthy; no action required.",
              tags="warning")
         try:
             import os
@@ -337,7 +488,9 @@ def run(asof: str, dry: bool) -> dict:
                 sn = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(sn)
                 html = "<pre>" + md.replace("<", "&lt;") + "</pre>"
-                sn._send_resend(api_key, sender, to, f"Universe proposal {asof} — needs review", html)
+                sn._send_resend(api_key, sender, to,
+                                f"Universe screen {asof} — changed nothing "
+                                f"(self-clearing, no action needed)", html)
                 print("held proposal emailed via resend")
             else:
                 print("proposal email skipped (RESEND_API_KEY/NEWSLETTER_TO/FROM not set)")
@@ -349,13 +502,15 @@ def run(asof: str, dry: bool) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--run", action="store_true", help="run the refresh (auto-apply or hold)")
+    ap.add_argument("--run", action="store_true",
+                    help="run the refresh (applies, or reports NO_CHANGE)")
     ap.add_argument("--force", action="store_true",
                     help="run even when today is not the configured screen_day")
     ap.add_argument("--dry-run", action="store_true", help="compute + write proposal, change nothing")
     ap.add_argument("--asof", default=None, help="YYYY-MM-DD stamp (default: today UTC)")
     ap.add_argument("--apply", metavar="ASOF", default=None,
-                    help="apply a previously held proposal by its YYYY-MM-DD id")
+                    help="apply a stored proposal by its YYYY-MM-DD id (re-validated "
+                         "against the live feed before the write)")
     args = ap.parse_args()
     if args.selftest:
         _selftest()
@@ -375,6 +530,30 @@ def main() -> None:
             want = (cfg.get("universe_maintenance") or {}).get("screen_day", "friday")
             print(f"not the screen day (today={today:%A}, screen_day={want}) — "
                   f"nothing done. Use --force to override, or --dry-run to look.")
+            return
+        # ⛔ --force MAY NOT WRITE (2026-08-27). The screen ranks the pond on
+        # `snapshot_turnover`, a SINGLE-SESSION dollar-volume figure. The
+        # scheduled run is Friday 17:00 ET, after the close, so its session is
+        # complete. --force exists to run OFF-cadence — which is exactly when
+        # the session may be partial, and a partial session is not a broken
+        # feed: every name returns a number, so the coverage gate passes and the
+        # ranking is quietly wrong. Measured 2026-08-27 07:49 ET pre-market: a
+        # forced dry run proposed dropping FTNT and MNST, both held, purely on
+        # pre-market turnover.
+        #
+        # The boundary between a partial and a settled session is already
+        # defined ONCE in this repo — fetch_prices._drop_unsettled_session()
+        # (16:15 ET, plus the non-trading-day test). Restating it here would put
+        # the same rule in two languages again, which is the defect that made
+        # the cadence unreadable until 2026-08-20. So --force is scoped instead:
+        # it can compute and show, never write. The SCHEDULED path is unaffected
+        # and remains fully unattended.
+        if args.run and args.force and not args.dry_run:
+            print("--force computes but does not write: off-cadence runs can rank "
+                  "on a PARTIAL session, which every completeness check passes.\n"
+                  "Use --force --dry-run to look, let the scheduled post-close run "
+                  "apply, or --apply <ASOF> to write a proposal that was computed "
+                  "from a settled session (it is re-validated before the write).")
             return
         asof = args.asof or datetime.now(timezone.utc).date().isoformat()
         run(asof, dry=args.dry_run)

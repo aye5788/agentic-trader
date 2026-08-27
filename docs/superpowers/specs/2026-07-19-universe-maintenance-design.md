@@ -1,5 +1,14 @@
 # Universe Maintenance — Design Spec
 
+> ⛔ **SUPERSEDED IN PART, 2026-08-27.** The `HOLD_FOR_REVIEW` outcome and the
+> human-gated apply described below NO LONGER EXIST. Three of the five HOLD
+> conditions regenerated themselves every week, so the screen could not apply
+> and `config/universe.csv` was frozen 2026-07-08 → 2026-08-27 while every
+> check read green. The outcomes are now AUTO_APPLY and NO_CHANGE, the latter
+> reachable only from a data-integrity failure that self-clears. See
+> `docs/OPSLOG.md` 2026-08-27 and `universe_maint.classify`.
+
+
 **Date:** 2026-07-19
 **Status:** Approved design, pre-implementation
 **Author:** Aaron + Claude (brainstorming session)

@@ -69,7 +69,15 @@ def _tail_jsonl(path, n):
 
 
 def _pending_universe_proposal():
-    """Latest HOLD universe-maintenance proposal, if any (read-only review surface)."""
+    """Latest universe screen that CHANGED NOTHING, if any (read-only surface).
+
+    Was "latest HOLD proposal". HOLD no longer exists: the screen applies or it
+    reports a data-integrity failure as NO_CHANGE (universe_maint.classify,
+    2026-08-27). Left matching only "HOLD", this panel would have been dead code
+    that silently never fired -- so it now surfaces the outcome that can occur.
+    NO_CHANGE needs no human action; it self-clears when the feed recovers. It is
+    shown so a run of empty weeks is visible rather than silent.
+    """
     pd = RS / "universe" / "proposals"
     if not pd.exists():
         return None
@@ -77,7 +85,7 @@ def _pending_universe_proposal():
     if not files:
         return None
     d = _read_json(files[-1], {})
-    if d.get("decision", {}).get("decision") == "HOLD":
+    if d.get("decision", {}).get("decision") in ("NO_CHANGE", "HOLD"):
         return d
     return None
 

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # WEEKLY universe liquidity refresh (Piece 1). Runs under /usr/bin/python3 because
-# the moomoo SDK lives there. Auto-applies routine changes; HOLDs + alerts on
-# seed-drops/anomalies. Never touches the live trading path — it rescreens the
-# CANDIDATE POOL the agent selects from, it does not trade.
+# the moomoo SDK lives there. APPLIES the rescreen unattended; the only outcome
+# that changes nothing is a data-integrity failure (incomplete feed / short
+# pond / unverifiable add), which self-clears on the next healthy run. There
+# is NO human approval step any more — see universe_maint.classify. Never
+# touches the live trading path: it rescreens the CANDIDATE POOL the agent
+# selects from, it does not trade.
 #
 # ⚠️ CADENCE CHANGED 2026-08-20: quarterly -> WEEKLY, Fridays.
 # The old schedule was `0 19 1-7 1,4,7,10 *` here in cron PLUS a
