@@ -206,20 +206,22 @@ feed_alert_cooldown_mins = 30  # min gap between feed-down pushes; a genuine mul
 alert_only     = false    # true = detect+journal breaches but place NO sells
                           #   (also forced alert-only whenever live_approved=false)
 
-# --- Post-take-profit re-entry review (the agent overlay's one live surface) --
-# Without this, a target hit is blindly rebought next morning (fixed slot
-# weights + no cooldown). With it, the rebuy goes to JUDGMENT: the fast-loop
-# agent may re-enter full, re-enter half, or skip — veto/downsize ONLY, never
-# more than the mechanical plan wanted (docs/DESIGN.md: agent overlay = OFF
-# switch). One rule stays pure code: the knife guard below.
+# --- Session re-entry judgement reference (DOCUMENTATION ONLY) ---------------
+# ⛔ NOTHING READS THIS TABLE AND NO CODE ENFORCES IT. Both consumers are gone:
+# the fast loop that applied the knife guard was deleted 2026-08-14, and the
+# monitor's post-take-profit re-entry review (add_reentry_review ->
+# research_store/monitor/reentry_review.json) was deleted 2026-08-30 after being
+# found to be a live WRITE with no reader anywhere — the fast loop had been its
+# only consumer. A retirement that leaves the mechanism in place reads as live
+# to the next reader, so the machinery went rather than being flagged off.
+#
+# The key below survives ONLY because CLAUDE.md, docs/STRATEGY.md and
+# docs/DESIGN.md all cite it as the session's documented default. It is a number
+# for a human or an agent to read, not an input to any rule.
 [reentry]
-enabled         = true    # false = revert to blind mechanical rebuy
-knife_guard_pct = 0.04    # ⚠️ NO LONGER A HARD BLOCK — enforced in fast_loop.py,
-                          #   deleted 2026-08-14. Now a documented default for the
-                          #   session's judgement. Was: no rebuy if price fell
-                          #   more than this below the take-profit exit fill
-review_days     = 5       # judgment window; after this the name rebuys normally
-allow_half      = true    # the downsize option in the agent's menu
+knife_guard_pct = 0.04    # documentation-only default for the session's
+                          #   judgement. Was: no rebuy if price fell more than
+                          #   this below the take-profit exit fill.
 
 # --- Governance guardrails (Layer 5) — the last gate before any live order ---
 # The [risk] mandate validates the research PRODUCT on write; these validate
