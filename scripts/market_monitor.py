@@ -42,6 +42,7 @@ import strategy as strat            # noqa: E402
 import governance as gov            # noqa: E402
 import snapshot_freshness            # noqa: E402
 import trailing                      # noqa: E402  pure arithmetic, no I/O
+import lifecycle_journal             # noqa: E402  pure fold, no I/O of its own
 from research_store import read_current, store   # noqa: E402
 from adapters.moomoo import prices as mmp        # noqa: E402
 from adapters.moomoo.client import quote_ctx     # noqa: E402
@@ -58,7 +59,6 @@ MON = REPO / "research_store" / "monitor"
 STATE = MON / "state.json"
 QUOTES = MON / "quotes.json"
 COOLDOWN = MON / "cooldown.json"
-REENTRY = MON / "reentry_review.json"
 EXIT_REQ = MON / "exit_request.json"
 EXIT_RES = MON / "exit_result.json"
 WAKES = MON / "wakes.json"
@@ -1031,6 +1031,29 @@ def _save(path, obj):
     path.write_text(json.dumps(obj, indent=2))
 
 
+def _active_lifecycle_state():
+    """Lifecycle identity for this pass, or None when it is unusable.
+
+    ⛔ WHY THE TRAIL NEEDS THIS AT ALL. Trail state used to be keyed by SYMBOL,
+    so a name that closed and was re-entered inherited the CLOSED position's
+    entry and peak. Measured 2026-08-30: FTNT was sold at target1/target2 on
+    08-27 and re-entered on 08-28 at 163.95, while trails.json still carried
+    entry 152.71 / peak 172.80 — a trail stop of 165.77 derived from a giveback
+    the live position never had. Every shadow poll that day said it would exit.
+    A position_id cannot be inherited that way: a trim keeps it, a close and
+    re-open mint a new one.
+
+    Read once per pass, never cached: the journal is the authority and a cache
+    would reintroduce exactly the staleness this exists to remove.
+    """
+    try:
+        return lifecycle_journal.replay(store.read_journal())
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  ⚠ lifecycle replay failed ({type(e).__name__}: {e}) — "
+              f"trailing state will not be updated")
+        return None
+
+
 class QuoteFeedError(Exception):
     """The moomoo quote poll failed. Raised (not swallowed) so the main loop can
     rebuild the OpenD context and, if the feed stays down, exit for a clean restart.
@@ -1140,16 +1163,6 @@ def drop_wakes_for(symbol: str) -> list:
     except Exception as e:                                    # noqa: BLE001
         print(f"  could not retire wakes on {symbol}: {type(e).__name__}: {e}")
         return []
-
-
-def add_reentry_review(symbol: str, tier: str, exit_price: float, days: int):
-    """A take-profit fired and sold — flag the name so the fast loop routes its
-    otherwise-automatic rebuy through the agent's re-entry judgment ([reentry])."""
-    rv = _load(REENTRY, {})
-    rv[symbol] = {"tier": tier, "exit_price": exit_price,
-                  "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                  "expires": (_now_et() + timedelta(days=days)).date().isoformat()}
-    _save(REENTRY, rv)
 
 
 #: The exit executor's MCP tool surface, stated here rather than inherited.
@@ -1822,39 +1835,104 @@ def check_once(cfg, client) -> int:
         _trails = _load(MON / "trails.json", {}) or {}
         _snap_pos = (_load(RH_POSITIONS, {}) or {}).get("positions") or {}
         _shadow = []
-        for sym, th in held.items():
-            px = prices.get(sym)
-            if px is None or sym in suspect:
-                continue
-            _entry = (_snap_pos.get(sym) or {}).get("avg_cost")
-            if not _entry:
-                continue                      # no cost basis -> no peak to measure from
-            _st = _trails.get(sym) or {"entry_price": float(_entry),
-                                       "peak_price": float(_entry)}
-            # max(session high, last): a high printed BETWEEN two 15s polls is
-            # invisible to `last`, and a peak that misses it measures a giveback
-            # the position never had. live_quotes already returns high.
-            _q = quotes.get(sym) or {}
-            _hi = _q.get("high") if isinstance(_q, dict) else None
-            _obs = max([v for v in (_hi, px) if isinstance(v, (int, float))] or [px])
-            _st = trailing.update_peak(_st, _obs)
-            _sig = (getattr(th, "signals", None) or {}).get("sigma")
-            _hit = trailing.trail_trigger(sym, px, _st, _sig, _tcfg,
-                                          base_stop=th.stop,
-                                          agent_stop=None)
-            _lvl, _act = trailing.compute_trail_stop(
-                _st, _sig, float(_tcfg.get("activation_sigma", 2.5)),
-                float(_tcfg.get("giveback_fraction", 0.35)))
-            if _lvl is not None:
-                _st["trail_stop"] = _lvl        # persist the ratchet
-            _st["activated"] = bool(_act)
-            _trails[sym] = _st
-            if _hit and _hit.get("reason") == "trail":
-                _shadow.append(_hit)
-            elif _hit and _hit.get("reason") == "trail_state_invalid":
-                print(f"  ⚠ trail state unusable for {sym}: {_hit.get('detail')}"
-                      f" — ordinary stop still enforced")
-        _save(MON / "trails.json", _trails)
+
+        # ⛔ KEYED BY LIFECYCLE position_id, NEVER BY SYMBOL. See
+        # _active_lifecycle_state(): a symbol key lets a re-entry inherit the
+        # CLOSED position's entry and peak, which is exactly what happened to
+        # FTNT on 2026-08-28. A trim keeps its id; a close and re-open mint a
+        # new one, so the new position starts from its own cost.
+        #
+        # ⛔ AND IT FAILS CLOSED, NOT OPEN. positions.json is a CACHE and has
+        # gone two days stale before (2026-08-14). Pruning on a stale or empty
+        # read would delete live trail state; reusing rows against it would
+        # measure a giveback from the wrong position. So when ownership or
+        # identity is not trustworthy this pass does NOTHING -- it does not
+        # prune, does not update, and leaves the file byte-identical. The
+        # ordinary stop and targets are already resolved above and are
+        # unaffected either way.
+        _snapshot_syms = set()
+        _snapshot_valid = (owned is not None and isinstance(_snap_pos, dict)
+                           and bool(_snap_pos))
+        if _snapshot_valid:
+            for _raw_sym, _row in _snap_pos.items():
+                if not isinstance(_row, dict):
+                    _snapshot_valid = False
+                    break
+                try:
+                    _qty = float(_row.get("qty"))
+                except (TypeError, ValueError):
+                    _snapshot_valid = False
+                    break
+                if not math.isfinite(_qty) or _qty <= 0:
+                    _snapshot_valid = False
+                    break
+                _snapshot_syms.add(str(_raw_sym).strip().upper())
+
+        _life = _active_lifecycle_state() if _snapshot_valid else None
+
+        if not _snapshot_valid:
+            print("  ⚠ trailing pass skipped — ownership snapshot is stale, "
+                  "empty, or malformed")
+        elif _life is None:
+            print("  ⚠ trailing pass skipped — lifecycle identity unavailable")
+        else:
+            _ignored_syms = {str(ref).split(":", 2)[1]
+                             for ref in (_life.get("ignored") or [])
+                             if len(str(ref).split(":", 2)) >= 2}
+            _ids = {}
+            for _sym in _snapshot_syms:
+                _current = (_life.get("active") or {}).get(_sym)
+                if _current and _sym not in _ignored_syms:
+                    _pid = _current.get("position_id")
+                    if _pid:
+                        _ids[_sym] = str(_pid)
+
+            if set(_ids) != _snapshot_syms:
+                print("  ⚠ trailing pass skipped — incomplete lifecycle identity")
+            else:
+                # Retire rows whose lifecycle is no longer open. Safe ONLY here,
+                # under a snapshot and a replay that both verified above.
+                _live_ids = set(_ids.values())
+                _trails = {pid: row for pid, row in _trails.items()
+                           if pid in _live_ids and isinstance(row, dict)}
+
+                for sym, th in held.items():
+                    _pid = _ids.get(sym)
+                    if not _pid:
+                        continue
+                    px = prices.get(sym)
+                    if px is None or sym in suspect:
+                        continue
+                    _entry = (_snap_pos.get(sym) or {}).get("avg_cost")
+                    if not _entry:
+                        continue              # no cost basis -> no peak to measure from
+                    _st = _trails.get(_pid) or {"entry_price": float(_entry),
+                                                "peak_price": float(_entry)}
+                    # max(session high, last): a high printed BETWEEN two 15s polls
+                    # is invisible to `last`, and a peak that misses it measures a
+                    # giveback the position never had. live_quotes returns high.
+                    _q = quotes.get(sym) or {}
+                    _hi = _q.get("high") if isinstance(_q, dict) else None
+                    _obs = max([v for v in (_hi, px) if isinstance(v, (int, float))]
+                               or [px])
+                    _st = trailing.update_peak(_st, _obs)
+                    _sig = (getattr(th, "signals", None) or {}).get("sigma")
+                    _hit = trailing.trail_trigger(sym, px, _st, _sig, _tcfg,
+                                                  base_stop=th.stop,
+                                                  agent_stop=None)
+                    _lvl, _act = trailing.compute_trail_stop(
+                        _st, _sig, float(_tcfg.get("activation_sigma", 2.5)),
+                        float(_tcfg.get("giveback_fraction", 0.35)))
+                    if _lvl is not None:
+                        _st["trail_stop"] = _lvl        # persist the ratchet
+                    _st["activated"] = bool(_act)
+                    _trails[_pid] = _st
+                    if _hit and _hit.get("reason") == "trail":
+                        _shadow.append(_hit)
+                    elif _hit and _hit.get("reason") == "trail_state_invalid":
+                        print(f"  ⚠ trail state unusable for {sym}: "
+                              f"{_hit.get('detail')} — ordinary stop still enforced")
+                _save(MON / "trails.json", _trails)
         # Fire-on-CHANGE, matching _LAST_DROPPED/_LAST_SUSPECT_ACTION: a shadow
         # breach persists across every 15s poll, and journalling it each time
         # would bury the record it exists to create.
@@ -2085,7 +2163,6 @@ def check_once(cfg, client) -> int:
 
     # mark fired + cooldown the stops we acted on
     fired_key = {"stop": "stop", "target1": "t1", "target2": "t2"}
-    reentry = cfg.get("reentry", {})
     for t in act:
         if t["symbol"] in sold:
             st["fired"].setdefault(t["symbol"], []).append(fired_key[t["reason"]])
@@ -2097,9 +2174,6 @@ def check_once(cfg, client) -> int:
                 drop_wakes_for(t["symbol"])
             if t["reason"] == "stop" and armed:
                 add_cooldown(t["symbol"], m.get("cooldown_days", 5))
-            elif t["reason"].startswith("target") and armed and reentry.get("enabled"):
-                add_reentry_review(t["symbol"], t["reason"], t["price"],
-                                   int(reentry.get("review_days", 5)))
     _save(STATE, st)
     return len(act)
 
