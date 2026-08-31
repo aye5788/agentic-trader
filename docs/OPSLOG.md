@@ -672,8 +672,17 @@ passing selftest would never have caught, and the review is what made it right.
 ## 2026-08-25 — operator review of the open session's report: TA-ambiguous prose, and self-diagnosis driving live trades
 
 **Raised by Aaron on 2026-08-25 after reading the 10:35 open session's report in
-full. NOT YET ADDRESSED — recorded here for a later charter pass. Nothing was
-changed, enabled or disabled on the day this was written.**
+full. Nothing was changed, enabled or disabled on the day this was written.**
+
+**⛔ ISSUE 2 SETTLED 2026-08-31 BY THE PRINCIPAL, AFTER IT RECURRED.** This sat
+as an open question for six days — deferred to "a later charter pass" that never
+happened — and on 08-31 the open session did it again and worse: it REVERSED A
+DECIDED SELL of FCX on a drawdown halt that did not exist, then re-sold seven
+minutes later. The open questions below are no longer open. Aaron's ruling: the
+session's purpose is to TRADE, not to code or debug; it is to be told so
+directly rather than have the boundary inferred. Written into
+`prompts/charter.md` → THE DIVISION OF LABOUR as an explicit prohibition, with a
+pointer from THE JOB. Do not re-open these as questions.
 
 Source material: the session's closing summary in
 `logs/session_stream.open.jsonl` (final `result` record) and its four decisions
