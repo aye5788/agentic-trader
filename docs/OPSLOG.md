@@ -9,6 +9,120 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-31 — the Sunday rebuild had been deleting the agent's stops for two weeks
+
+Found while auditing the dashboard against the code it renders. Nothing was lost
+and nothing was mispriced, but the book spent every Monday less protected than
+the agent had left it on Friday, and no one had decided that.
+
+**What happened.** `scripts/slow_loop.py` unlinked
+`research_store/monitor/overrides.json` on every Sunday rebuild, per the
+2026-07-14 intraday-risk-management spec §7 ("overrides are intra-week ... the
+weekly rebuild clears that week's overrides"). That rule was written for
+`scripts/risk_review.py`, which wrote the overrides at 15:45 and was **retired
+into the sessions on 2026-08-13**. Its sibling expiry mechanism — the timed
+pruner — died with it and was noticed. This one was not.
+
+`overrides.json` stopped being a risk-review overlay on 08-13. It is where the
+agent's own `set_levels` decisions live. So the wipe contradicted the no-expiry
+decision (principal, 2026-08-17) recorded in `decide.merge_levels`
+("protection could vanish on a schedule nobody chose"), in
+`market_monitor.apply_overrides`, in `src/level_rules.py`, in
+`agent_env/server.py` — and, bindingly, in `prompts/charter.md:179`, which tells
+the agent in its own instructions: *"A level you set outlives the position.
+Levels never expire."* The file it names was being deleted every Sunday night.
+
+**Measured cost.** The wipe ran Sun 08-30 20:00:43 and took the levels on all 12
+held positions, loosening 11 stops (LITE −6.4%, LRCX −5.4%, FCX −5.0%, MU −3.5%)
+and pushing every take-profit substantially further out. It had run every Sunday
+before that. On Mon 08-25 the session re-set levels on eight positions under the
+heading "FIRST DECIDED EXIT PLAN ON THIS POSITION" — re-deriving work the
+previous week had already done and which this line had erased. The agent is
+stateless and could not see why its take-profits kept reverting to formula
+geometry; it read the reversion as a regression and said so.
+
+**How it was found, and the false start.** The dashboard audit reported that the
+holdings table showed the book's stops while the monitor enforced the agent's.
+That diagnosis was WRONG in its mechanism: `overrides.json` did not exist, so
+`state.holdings()` returned the same book stops the page already showed. What
+the audit had actually measured was the current book against a Friday
+`enforcement.json` written from the *previous* book. Chasing that discrepancy is
+what surfaced the deletion — `enforcement.json` records
+`override_applied: true` for all 12 with distinct effective stops, which is only
+reachable if the file existed at that poll.
+
+**Recovery.** Levels restored from `enforcement.json` — the monitor's own record
+of what it was enforcing at its last poll before the wipe — written through
+`decide.write_levels()`, never by hand. FTNT required its `widen` flag or
+`apply_overrides` would have refused it as "not stricter" and silently reverted
+it. Verified by feeding the restored file to the real `apply_overrides` against
+the current book: **12 applied, 0 refused**. No stop sat at or above spot, so
+nothing fired at the open.
+
+**Fixes.** The Sunday unlink is deleted (`63599a7`), with the reasoning left in
+its place so it is not reinstated from the old spec. `deferred_intents.json` went
+with it: `risk_review` was its only writer, so it was deleting a file nothing had
+created since 08-13. Nothing in the repo deletes `overrides.json` any more — the
+only removal left is `clear_levels()`, one symbol at a time, which is how the
+charter says a level ends.
+
+**The general lesson, which is the same one as the ETF sleeve.** Retiring a
+producer does not retire the machinery that serviced it. `risk_review` was
+retired on 08-13 and *two* mechanisms outlived it; one was caught, one ran for
+two more weeks against live money. When a component is retired, grep for every
+job that reads or clears its artifacts before calling it done.
+
+---
+
+## 2026-08-31 — dashboard rebuilt against the code it actually renders
+
+Same session. The dashboard had drifted behind roughly six weeks of system
+changes; every item below is a defect found by reading the page against the
+current code, not a redesign.
+
+- **A quarter of the book was invisible.** The holdings table walked
+  `prod.theses` and skipped `target_weight <= 0`, dropping every protective-only
+  thesis (rank ≥ 200). FCX, KO and MRK were held and absent — $14.38 of $59.20
+  invested. Now reads through `state.holdings()`, the same merge the agent's
+  `positions()` tool uses, so the page cannot diverge from the agent or monitor.
+- **Stops shown were the book's, not the enforced ones.** Same fix.
+- **The drawdown bar mixed two criteria** — the mandate's value against
+  governance's limit. It read "−13.1% / 25%" (green) where the mandate criterion
+  is −13.1% / 20% (amber, two-thirds consumed). Both now shown against their own
+  limits. The governance figure uses `drawdown_breach()`, never `gates()`, which
+  writes: a page that ratcheted a live gate on every render would be the defect
+  the PreToolUse hook exists to avoid. Verified byte-identical state after
+  repeated renders.
+- **The cooldown row listed 11 names when the gate restricted one.** Nothing
+  prunes `cooldown.json`. Five of the phantoms were positions being held.
+  Filtered through `governance.cooldown_until()`, the gate's own rule.
+- **The "plan vs. actual" card had been frozen since 08-14** — `order_plan.json`
+  was the deleted fast loop's artifact — and rendered "BLOCKED LITE" above a
+  table showing LITE held. Deleted at the principal's instruction. A latent bug
+  went with it: the execution half rendered only inside `if(plan)`, so removing
+  the plan alone would have blanked a working panel.
+- **The activity feed was mostly blank rows.** `agent_decision` is 201 of the
+  last 400 journal events and had no branch. Timestamps were blank for a third
+  of events because the journal writes time under four different keys. Now a
+  table covering all 17 event types.
+- **Stale copy, now config-derived:** "70 / 30 book & sleeve" (no sleeve since
+  08-20), "Robinhood cash" (limited_margin since 08-18), the hardcoded strategy
+  name and account mask. The constant "Type" column (always STOCK) became STATE.
+- **Newly surfaced:** the `SHADOW` flag (denies every order while the page read
+  LIVE), binding rule-outs (invisible throughout the August episode that made six
+  top-14 names unbuyable), the independent reviewer's verdict, and buying power.
+
+**On verification.** `node` is on the box, so the page's own JavaScript was
+executed against the live payload and against one real journal event of each of
+the 17 types. That caught four bugs written during this work that reading would
+not have: three "[object Object]" renders where the journal holds a structure and
+the code assumed a scalar, and — worst — `esc`/`clip` declared as `const` inside
+the feed section while the holdings table above them used them, a temporal
+dead-zone `ReferenceError` that took the **entire page** down on first render.
+Static review had passed all four.
+
+---
+
 ## 2026-08-30 — a new position is unwatched until the snapshot republishes, and PANW's targets regressed
 
 Week of 08-24. Nothing was lost and no order was blocked, but four things in
