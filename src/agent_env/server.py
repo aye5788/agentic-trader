@@ -144,7 +144,26 @@ def _staleness(v: dict) -> dict | None:
     hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
     gap = int(_np.busday_count(dt.date(), datetime.now(timezone.utc).date()))
     if gap <= SNAPSHOT_STALE_BUSDAYS:
-        return None
+        # ⛔ FRESH IS NOT THE SAME AS TRUE, AND THIS USED TO RETURN None HERE —
+        # i.e. "nothing to report". Age is a calendar fact; the question that
+        # matters is whether anything has checked this against the broker since.
+        #
+        # 2026-08-31: the snapshot was ONE trading day old, parsed perfectly, and
+        # was short a $30 deposit — 30% of NAV. busday_count said 1, the limit is
+        # 1, so this returned None and the agent was told its picture was
+        # current. It planned against a NAV of 71.31 against a true 101.51.
+        #
+        # So say what is actually known: how old, and that nothing has verified
+        # it. `stale: False` keeps every existing consumer's behaviour — this is
+        # NOT a warning and must not read as one — but the agent can no longer
+        # infer "recent" means "confirmed".
+        return {"age": f"{hours:.1f}h ({gap} trading day(s))", "as_of": str(raw),
+                "stale": False,
+                "note": ("Within the age limit, which is NOT confirmation. This "
+                         "is the last snapshot written, not a live read: cash can "
+                         "move at the broker between sessions and nothing here "
+                         "would show it. refresh_broker_snapshot() reports what "
+                         "changed — reconcile before sizing anything.")}
     return {"age": f"{hours:.1f}h ({gap} trading days)", "as_of": str(raw),
             "stale": True,
             "warning": (f"⚠️ THIS SNAPSHOT IS {gap} TRADING DAYS OLD (limit "
@@ -1190,6 +1209,37 @@ def _write_broker_snapshot(broker_positions, portfolio, ts: str,
                 snap[key] = _num(v, f"portfolio.{key}")
 
         path = RH_POSITIONS
+        # ⛔ WHAT CHANGED WHILE NOBODY WAS LOOKING. This overwrote the previous
+        # snapshot without ever reading it, so the difference between our picture
+        # and the broker's was computed by nothing and reported to no one.
+        #
+        # On 2026-08-31 a $30 deposit — 30% of NAV — sat at the broker unseen.
+        # The session read a NAV of 71.31 against a true 101.51, planned against
+        # it, and only found out because the drawdown gate tripped on the
+        # mismatch and it went looking. A smaller deposit would not have tripped
+        # anything and the session would have sized the whole book against a
+        # number that was wrong by a third.
+        #
+        # Age cannot catch this: the file was one trading day old and parsed
+        # perfectly. Only comparing against the broker can. The comparison is
+        # free — the old file is right here, about to be replaced.
+        _prev = {}
+        try:
+            _prev = json.loads(path.read_text()) if path.exists() else {}
+        except Exception:                           # noqa: BLE001 — never block a publish
+            _prev = {}
+
+        def _delta(field):
+            try:
+                a, b = _prev.get(field), snap.get(field)
+                if a is None or b is None:
+                    return None
+                d = round(float(b) - float(a), 2)
+                return d if abs(d) >= 0.01 else 0.0
+            except (TypeError, ValueError):
+                return None
+
+        _cash_d, _value_d = _delta("cash"), _delta("account_value")
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(snap, indent=2, allow_nan=False) + "\n")
         os.replace(tmp, path)
@@ -1199,6 +1249,22 @@ def _write_broker_snapshot(broker_positions, portfolio, ts: str,
         # time. If it ran first, an event could describe a publish that never
         # happened, and there would be nothing to retry against.
         published = {"ok": True, "ts": ts, "positions": len(positions)}
+        # REPORTED, NEVER CLASSIFIED. A cash change this session's own fills do
+        # not explain is an external flow — a deposit, a withdrawal, a dividend —
+        # and which one it is is not ours to decide. Say what moved and let the
+        # reader account for it. `null` means the previous snapshot did not carry
+        # the field, which is not the same as "nothing moved".
+        published["previous_ts"] = _prev.get("ts")
+        published["cash_delta"] = _cash_d
+        published["account_value_delta"] = _value_d
+        if _cash_d:
+            published["UNEXPLAINED_CASH"] = (
+                f"cash moved {_cash_d:+.2f} since the snapshot of "
+                f"{_prev.get('ts') or 'unknown'}. If your own fills this session "
+                "do not account for it, this is an EXTERNAL FLOW (deposit, "
+                "withdrawal or dividend). It is not performance: say so in "
+                "record_decision, and tell the operator, so the equity curve is "
+                "not read as a gain that was never earned.")
         published["lifecycle"] = _record_lifecycle(positions, ts, orders, acct)
         return published
     except Exception as e:  # noqa: BLE001 - return loudly through the MCP tool
@@ -1249,9 +1315,25 @@ def _expected_account() -> str:
 def refresh_broker_snapshot(broker_positions: str, portfolio: str,
                             liquidated: bool = False,
                             account_number: str = "") -> str:
-    """Publish the broker's CURRENT account state. Call this before you finish.
+    """Publish the broker's CURRENT account state. Call this FIRST, and again
+    before you finish.
 
-    ⛔ EVERY SESSION, WHETHER OR NOT YOU TRADED. Read get_equity_positions from
+    ⛔ FIRST, BEFORE YOU SIZE ANYTHING. This used to say only "before you
+    finish", so a session read a snapshot that could be days old, planned and
+    sized the whole book against it, and reconciled afterwards. On 2026-08-31
+    that snapshot was short a $30 deposit — 30% of NAV — and the session only
+    found out because the drawdown gate tripped on the mismatch. A smaller
+    deposit trips nothing.
+
+    It returns `cash_delta` and `account_value_delta` against the snapshot it
+    replaced. A cash move your own fills do not explain is an EXTERNAL FLOW and
+    is not performance — say so.
+
+    ⛔ IF IT REFUSES, SAY SO AND CARRY ON. A refusal here must never stop the
+    session trading: that turns a bad read into an outage. Work from the stale
+    snapshot, knowing it is stale, and record that you did.
+
+    ⛔ AND AGAIN AT THE END, WHETHER OR NOT YOU TRADED. Read get_equity_positions from
     the cursorless first page through the page with no `next`, then pass this
     JSON as broker_positions (response is each tool's raw output)::
 
