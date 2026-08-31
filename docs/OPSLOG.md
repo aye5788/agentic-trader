@@ -9,6 +9,74 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-30 — a new position is unwatched until the snapshot republishes, and PANW's targets regressed
+
+Week of 08-24. Nothing was lost and no order was blocked, but four things in
+the week's record are worth a maintainer's attention.
+
+**1. The set_levels race on freshly opened positions.** Five occurrences, all
+the same shape: the levels write lands, and the monitor refuses to arm it —
+`override REJECTED: no usable live price to check it against -- the guard fails
+closed`, or `no thesis and no live price yet`. MRK, KO, MNST and FCX on 08-24,
+then FTNT's re-entry on 08-28. Every one resolved on an *identical* re-call once
+the broker snapshot had republished with the symbol present, so the blocker is
+data availability, not a verdict; re-sending unchanged parameters is the correct
+response and is not retrying a refusal with variation.
+
+FCX took three attempts and gave the clearest diagnostic: its mark came back as
+exactly 77.59 — the `avg_cost` fallback — while all twelve other positions
+marked live at 14:59:37, and `quote()` had it at 77.5794 at the same moment. So
+the price exists at the source; this is propagation lag into the monitor's own
+price panel for a symbol the account has never held before.
+
+The window matters. Between the fill and the successful re-write the position is
+*unprotected* — and on FTNT the consequence was concrete rather than theoretical:
+the first write was refused, so the monitor went on enforcing the loop's formula
+stop of 161.722 (0.531 sigma from the mark, inside the name's own 5-day median
+adverse excursion) until the post-fill re-write replaced it with the intended
+153.00. The gap is narrow but it is real, and it is currently closed by the
+session noticing and re-calling rather than by anything structural.
+
+**2. A standing structural claim was wrong, and is now corrected.** The open
+question of 2026-08-17 asserts: *"A SESSION CANNOT PROTECT A POSITION IT OPENS —
+set_levels succeeds and the monitor still ignores the name, because enforcement
+requires a THESIS and only the slow_loop book build makes one."* 08-24 produced
+four independent counterexamples. MRK, KO, MNST and FCX were all opened intraday
+with `momentum_rank`, `thesis_as_of`, `book_stop` and `eligibility_state` all
+null, and all four ended the session watched with enforced levels. Enforcement
+does not require a thesis. What it requires is the symbol in the snapshot and a
+usable live price — which is item 1, and which self-clears.
+
+**3. PANW's targets regressed, unexplained.** On 08-26 the enforced targets read
+`[401.6177, 443.1139]` — the inherited ~5.5-sigma formula levels, **not** the
+378/392 repair recorded on 2026-08-20. Something reverted them between those
+dates and no session recorded doing it. Measured from 339.42 on sigma 2.6279%/day,
+401.62 is 6.97 sigma and 443.11 is 11.6 sigma against a 20-day `mfe_p90` of
+8.193: levels no scale-out could ever have reached, i.e. the position had a stop
+and no exit plan for six days. The repair was re-applied and then worked — the
+t2 full exit fired at 378.9781 against level 378.0 on 08-27. **Root cause not
+identified.** Worth finding, because a silent revert to formula geometry is
+invisible in every health check: the levels are present and `enforced:true`,
+they are simply the wrong ones.
+
+**4. Rule-out audit.** Two rule-outs were superseded because they rested on
+complex-concentration thresholds that appear nowhere in `config/mandate.toml`
+(LITE, AMAT — LITE was then bought on 08-27). Two were affirmed and the
+distinction recorded deliberately: WDC on a tape fact about the instrument (it
+gapped through its stop by −17.4% overnight, the exact failure mode an RTH-only
+software stop cannot cover, with no structure beneath it for a replacement),
+and MRVL on a dated binary whose `until=2026-08-28` expires on its own terms
+without intervention. The `until` field working unassisted is the intended
+behaviour and is noted here as a positive result.
+
+**Milestone, for the record.** 2026-08-27 18:02:13Z: MRK fired the first
+take-profit this system has ever executed (`target1`, 50%, price 156.52 through
+level 156.5). The open question of 2026-08-13 recorded `hit_target = 0` across
+18 closed round trips, every one ending at a stop or a rebalance. Five scale-out
+or target exits fired this week across MRK, FTNT and PANW. That open question is
+closed.
+
+
 ## 2026-08-27 — the universe screen could never apply, and the human gate hid it
 
 `config/universe.csv` had not changed since 2026-07-08. The weekly screen was
