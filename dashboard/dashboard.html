@@ -190,11 +190,11 @@ const rows=document.getElementById("rows");
   const tr=el("tr");
   const pnl=h.pnl==null?"—":`<span style="color:var(--${h.pnl>=0?'pos':'neg'})">${h.pnl>=0?'+':''}${(h.pnl*100).toFixed(1)}%</span>`;
   tr.innerHTML=`<td><span class="tkr">${h.ticker}</span></td>
-    <td class="mono">${fmt(h.weight*100)}%</td>
+    <td class="mono">${h.weight==null?"&mdash;":fmt(h.weight*100)+"%"}${h.weight_is_target?'<span class="sub">target</span>':""}</td>
     <td class="mono">$${fmt(h.value)}</td>
     <td class="mono">${pnl}</td>
     <td class="mono">${fmt(h.entry)}</td>
-    <td class="mono">${fmt(h.stop)}</td>
+    <td class="mono">${fmt(h.stop)}${(h.book_stop!=null&&h.book_stop!=h.stop)?`<span class="sub">book ${fmt(h.book_stop)}</span>`:""}${h.watched===false?'<span class="sub" style="color:var(--neg)">UNWATCHED</span>':""}</td>
     <td class="mono">${(h.targets&&h.targets.length)?h.targets.map(t=>fmt(t)).join(" / "):"—"}</td>
     <td class="rr">${h.rr!=null?fmt(h.rr):"—"}</td>
     <td><div class="mo"><div class="bar"><i style="width:${Math.round((h.score||0)*100)}%"></i></div><span>${h.score!=null?Number(h.score).toFixed(2):"—"}</span></div></td>

@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO / "src"))
 import health                                         # noqa: E402
 import marks                                          # noqa: E402
 import strategy as strat                              # noqa: E402
+from agent_env import state                           # noqa: E402
 from research_store import read_current               # noqa: E402
 from research_store.validate import reward_risk       # noqa: E402
 
@@ -113,31 +114,81 @@ def build_data() -> dict:
     prod = read_current()
     valued = marks.load() or {"positions": {}, "invested": 0.0, "cash": 0.0,
                               "account_value": 0.0, "marked_at": None}
-    positions = valued["positions"]
     acct_value = valued["account_value"]
     invested = valued["invested"]
 
-    holdings = []
-    if prod:
-        for t in sorted(prod.theses, key=lambda x: x.rank):
-            if t.target_weight <= 0:
-                continue
-            p = positions.get(t.symbol) or {}
-            mv = p.get("value", 0.0)
-            rr = reward_risk(t)
-            holdings.append({
-                # rank >= 100 was the ETF sleeve's band; the sleeve is deleted
-                # (2026-08-20) and ranks >= 200 are now protective-only theses.
-                "ticker": t.symbol, "type": "stock",
-                "weight": round(t.target_weight, 4), "value": round(mv, 2),
-                "qty": p.get("qty"), "avg_cost": p.get("avg_cost"),
-                "last": p.get("mark"), "pnl": p.get("pnl"),
-                "entry": round(sum(t.entry_zone) / 2, 2) if t.entry_zone else None,
-                "stop": t.stop, "targets": t.targets or [],
-                "rr": round(rr, 2) if rr else None,
-                "score": t.signals.get("score"), "state": "held" if mv > 0 else "pending",
-                "thesis": t.thesis,
-            })
+    # ⛔ THE ROWS ARE WHAT WE HOLD, AND THE LEVELS ARE WHAT THE MONITOR ENFORCES.
+    # Until 2026-08-31 this walked prod.theses and skipped `target_weight <= 0`,
+    # which dropped every PROTECTIVE-ONLY thesis (rank >= 200) — FCX, KO and MRK
+    # were held and absent from the page, $14.40 of $59.20 invested, a quarter of
+    # the book invisible on the one screen that exists to show it. It also printed
+    # `t.stop`, the slow loop's geometry, while the agent's set_levels overrides
+    # were what would actually fire.
+    #
+    # state.holdings() is the ONE merge of positions and levels — the same
+    # function the agent's own positions() tool reads — so this page cannot
+    # diverge from what the agent and the monitor see. Its `stop`/`targets` are
+    # the ENFORCED values, with the book's kept alongside as `book_stop`.
+    #
+    # Arguments mirror agent_env/server.py:210, including the monitor's OWN
+    # quotes.json rather than the position mark: marks fall back to snapshot
+    # price or even cost basis (src/marks.py), and resolving an override against
+    # cost basis is exactly how display and enforcement came apart before.
+    ov = _read_json(RS / "monitor" / "overrides.json", {})
+    mprices = (_read_json(RS / "monitor" / "quotes.json", {}) or {}).get("prices") or {}
+    theses = prod.theses if prod else []
+    by_sym = {t.symbol: t for t in theses}
+    enforced = state.holdings(
+        valued, theses, ov, mprices,
+        float((cfg.get("governance") or {}).get("min_fractional_order_usd", 1.0)))
+
+    def _row(sym, t, h, held):
+        # R:R stays THESIS geometry (entry-zone mid), unchanged: it describes the
+        # setup the ranking proposed, not the position. Re-basing it on avg_cost
+        # would silently change what the column means.
+        rr = reward_risk(t) if t is not None else None
+        return {
+            "ticker": sym, "type": "stock",
+            # A held row carries its ACTUAL share of NAV. A protective thesis has
+            # target_weight 0.0 and would otherwise render "0.00%" beside a real
+            # position. A pending row has no actual weight, so it shows the TARGET
+            # and is flagged, so the two are never read as the same number.
+            "weight": (h.get("weight_pct_nav") if held else round(t.target_weight, 4)),
+            "weight_is_target": not held,
+            "value": round((h.get("value") or 0.0) if held else 0.0, 2),
+            "qty": h.get("qty") if held else None,
+            "avg_cost": h.get("avg_cost") if held else None,
+            "last": h.get("mark") if held else None,
+            "pnl": h.get("pnl") if held else None,
+            "entry": (round(sum(t.entry_zone) / 2, 2)
+                      if t is not None and t.entry_zone else None),
+            # enforced; book_stop is set only when an override is in force, so a
+            # divergence between what fires and what the loop proposed is visible
+            "stop": h.get("stop") if held else (t.stop if t is not None else None),
+            "targets": (list(h.get("targets") or []) if held
+                        else list((t.targets if t is not None else []) or [])),
+            "book_stop": h.get("book_stop") if held else None,
+            "set_by_agent": bool(h.get("set_by_agent")) if held else False,
+            # False = the monitor is NOT watching this position. It must be
+            # visible: an unprotected holding is the one thing this page exists
+            # to surface. None for a pending row — nothing is held to watch.
+            "watched": bool(h.get("watched")) if held else None,
+            "rr": round(rr, 2) if rr else None,
+            "score": (t.signals.get("score") if t is not None else None),
+            "state": "held" if held else "pending",
+            "thesis": (t.thesis if t is not None else None),
+        }
+
+    holdings = [_row(s, by_sym.get(s), h, True) for s, h in enforced.items()]
+    # book names selected but not yet held: no position, so no enforced level —
+    # their stop/targets are the book's by nature, not by omission.
+    holdings += [_row(t.symbol, t, {}, False) for t in theses
+                 if t.target_weight > 0 and t.symbol not in enforced]
+    # Preserve the page's existing order (book slot). A held name with no thesis
+    # sorts last rather than raising — that is the unprotected case, and it must
+    # still render.
+    holdings.sort(key=lambda r: (by_sym[r["ticker"]].rank
+                                 if r["ticker"] in by_sym else 9_999))
 
     # plan vs. actual: the last computed order plan + the last execution event
     plan = _read_json(RS / "rh" / "order_plan.json", {})
