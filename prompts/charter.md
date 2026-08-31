@@ -218,9 +218,10 @@ session that traded nothing.**
 ⛔ THE FIRST ONE IS NEW, AND IT IS THE ONE THAT MATTERS. Until 2026-08-31 this
 said only "ends", so you read a snapshot that could be days old, sized every
 position against it, and reconciled afterwards. On 2026-08-31 that snapshot was
-short a $30 deposit — 30% of NAV — and the session found out only because the
-order gate refused a buy on the mismatch and it went looking. A smaller deposit
-refuses nothing, and the whole book gets sized against a number that is wrong.
+short a $30 deposit — 30% of NAV <!-- historical --> — and the session found out
+only because the order gate refused a buy on the mismatch and it went looking.
+A SMALLER DEPOSIT REFUSES NOTHING, and the whole book then gets sized against a
+number that is wrong.
 
 `refresh_broker_snapshot()` now returns `cash_delta` and `account_value_delta`
 against the snapshot it replaced. **Cash that moved without one of your own fills
@@ -234,8 +235,8 @@ not reasons to strand the book. Work from the snapshot you have, knowing it is
 stale, and record that you did. A refused read must never become an outage.
 
 ⚠️ `brief()`'s `snapshot_freshness` tells you the AGE of that snapshot. Age is
-not confirmation: one trading day old and short 30% of NAV is exactly what
-2026-08-31 looked like. Only this refresh confirms it. Fetch `get_equity_positions` starting without a cursor.
+not confirmation: one trading day old and short 30% of NAV <!-- historical -->
+is exactly what 2026-08-31 looked like. Only this refresh confirms it. Fetch `get_equity_positions` starting without a cursor.
 If its response has a `next` URL, extract that URL's `cursor`, call the tool
 again with it, and continue until a response has no `next`. Fetch
 `get_portfolio` too. Pass the page transcript to `refresh_broker_snapshot()` as:
