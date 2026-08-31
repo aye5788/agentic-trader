@@ -301,29 +301,93 @@ document.getElementById("regimeRows").innerHTML=
    <div class="row"><span class="k">VIX ceiling</span><span class="v">${r.vix||'—'}</span></div>
    <div class="row"><span class="k">Notes</span><span class="v" style="color:var(--faint);font-weight:400">${r.notes||''}</span></div>`;
 
-// activity feed
+// ---- activity feed -------------------------------------------------------
+// ⛔ THIS FEED WAS MOSTLY BLANK ROWS. It branched on four event types
+// (execution, exit_signal, product/write, outcome) and fell through to a
+// generic row for everything else -- printing the raw event name with an empty
+// description. `agent_decision` is now 201 of the last 400 journal events, i.e.
+// the majority of the feed and the ONLY record of what the session actually
+// decided and why, and it had no branch at all.
+//
+// Timestamps were blank for a third of events because the journal carries the
+// time under four different keys depending on the writer: `ts`, `observed_at`
+// (position lifecycle), `at` (outcomes, signal panel) and `as_of` (product,
+// date only). The old code read `a.ts` alone.
+const esc=t=>String(t==null?"":t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const clip=(t,n)=>{t=String(t==null?"":t).replace(/\s+/g," ").trim();return esc(t.length>n?t.slice(0,n-1)+"…":t);};
+const money=v=>v==null?"":"$"+fmt(v);
+// side/qty/price of one fill, tolerating the several shapes the journal uses
+const fillTxt=f=>`${(f.side||"").toUpperCase()} ${f.symbol} ${money(f.amount!=null?f.amount:f.quantity_or_amount)}`
+  +(f.avg_price?` @ ${fmt(f.avg_price)}`:"");
+
+// event -> [cssClass, icon, title(a), detail(a)]. One entry per event type the
+// journal actually writes; anything unlisted still renders, with its name.
+const EV={
+  agent_decision:["info","◆",a=>`${String(a.action||"decision").replace(/_/g," ").toUpperCase()}${a.symbol?" — "+esc(a.symbol):""}`,
+                            a=>clip(a.reason,190)],
+  execution:     ["ok","✓",a=>`Filled — ${a.n||(a.fills||a.placed||[]).length} order(s)`,
+                            a=>(a.fills||a.placed||[]).map(fillTxt).join(" · ")
+                               +(a.halt_reason?" — "+clip(a.halt_reason,80):"")],
+  exit_signal:   ["warn","⚠",a=>(a.triggers||[]).map(x=>String(x.reason||"exit").toUpperCase()+" "+x.symbol).join(", ")||"Exit signal",
+                            a=>(a.triggers||[]).map(x=>`${x.symbol} @ ${x.price} (level ${x.level}, sell ${Math.round((x.fraction||1)*100)}%)`).join(" · ")
+                               +` — ${a.launched?"executed":(a.armed?"armed":"alert-only")}${a.halted?" · HALTED":""}`],
+  product:       ["info","✎",()=>"Book written",
+                            a=>`${a.theses||"?"} theses · ${a.held||0} held · regime ${(a.regime&&a.regime.status)||a.regime||"?"}`],
+  announcement:  ["info","📣",a=>clip(a.headline,70)||"Announcement",a=>clip(a.detail,170)],
+  gate_announcement:["warn","⛔",a=>`Gate — ${String(a.side||"").toUpperCase()} ${esc(a.symbol)} ${money(a.amount)}`,
+                            a=>clip(a.reason,170)],
+  position_opened:["ok","▲",a=>`Opened — ${esc(a.symbol)}`,
+                            a=>`${a.opening_quantity||"?"} @ ${fmt(a.opening_price)}${a.origin?" · "+esc(a.origin):""}`],
+  position_closed:["ok","▼",a=>`Closed — ${esc(a.symbol)}`,
+                            a=>`${a.exit_reason?esc(a.exit_reason)+" ":""}@ ${fmt(a.exit_price)}`
+                               +(a.realized_pnl_pct!=null?` · ${(a.realized_pnl_pct*100).toFixed(1)}%`:"")
+                               +(a.holding_days!=null?` · ${a.holding_days}d held`:"")],
+  position_event:["info","◑",a=>`${String(a.kind||"position event").replace(/_/g," ")} — ${esc(a.symbol)}`,
+                            a=>`${a.quantity||"?"} @ ${fmt(a.price)} · qty ${a.qty_before}→${a.qty_after}`],
+  // `outcome` is an OBJECT (exit_reason/exit_price/pnl_pct/holding_days), not a
+  // string — clipping it printed "[object Object]". String form still handled.
+  outcome:       ["info","◷",a=>`Outcome — ${esc(a.symbol)}`,
+                            a=>{if(typeof a.outcome==="string")return clip(a.outcome,170);
+                                const o=(a.outcome&&typeof a.outcome==="object")?a.outcome:{};
+                                return `${o.exit_reason?esc(o.exit_reason)+" ":""}@ ${fmt(o.exit_price)}`
+                                  +(o.pnl_pct!=null?` · ${(o.pnl_pct*100).toFixed(1)}%`:"")
+                                  +(o.holding_days!=null?` · ${o.holding_days}d held`:"");}],
+  partial_outcome:["info","◐",a=>`Partial — ${esc(a.symbol)}`,
+                            a=>`${a.exit_reason?esc(a.exit_reason)+" ":""}${Math.round((a.fraction||0)*100)}% @ ${fmt(a.exit_price)}`
+                               +(a.pnl_pct!=null?` · ${(a.pnl_pct*100).toFixed(1)}%`:"")],
+  codex_review:  ["info","⚖",a=>`Review — ${String(a.stance||"").toUpperCase()||"verdict"}`,
+                            a=>clip(a.headline||a.strongest_disagreement,190)],
+  // orders_intended/applied/rejected are LISTS of order dicts, not counts —
+  // interpolating them printed "[object Object],[object Object]". (risk_review
+  // was retired into the sessions 2026-08-13; these are historical rows only.)
+  risk_review:   ["info","🛡",()=>"Risk review",
+                            a=>`${(a.orders_intended||[]).length} intended · ${(a.applied||[]).length} applied`
+                               +` · ${(a.rejected||[]).length} rejected${a.armed?"":" · alert-only"}`],
+  trail_shadow:  ["info","〜",()=>"Trail (shadow)",
+                            a=>`${(a.would_exit||[]).length} would exit${a.armed?"":" · not armed"}`],
+  wake_fired:    ["warn","⏰",a=>`Wake — ${esc(a.symbol)}`,
+                            a=>`${esc(a.direction)} ${a.level} (price ${a.price})${a.armed?"":" · not armed"} — ${clip(a.reason,90)}`],
+  // `names` is a DICT keyed by symbol, not a list — .length on it is undefined
+  // and rendered "[object Object] names". Both shapes handled.
+  signal_panel:  ["info","▦",()=>"Signal panel",
+                            a=>`${a.names?(Array.isArray(a.names)?a.names.length:Object.keys(a.names).length):"?"} names`
+                               +((a.gaps&&a.gaps.length)?" · gaps: "+clip(a.gaps.join(", "),60):"")
+                               +(a.opend_ok===false?" · OpenD DOWN":"")],
+  correction:    ["warn","✎",a=>`Correction — ${esc(a.symbol)}`,a=>clip(a.reason,170)],
+};
 const feed=document.getElementById("feed");
 const acts=DATA.activity||[];
 if(!acts.length){feed.innerHTML=`<div class="empty">No journal events yet.</div>`;}
 acts.forEach(a=>{
-  let cls="info",ic="•",t=a.event||"event",d="";
-  if(a.event==="execution"){cls="ok";ic="✓";
-    const fl=a.fills||a.placed||[];
-    t=`Filled — ${a.n||fl.length} order(s)`;
-    d=fl.map(f=>`${(f.side||'').toUpperCase()} ${f.symbol} $${f.amount||f.quantity_or_amount||''}`
-      +(f.avg_price?` @ ${Number(f.avg_price).toFixed(2)}`:'')).join(" · ");
-    if((a.reentry_decisions||[]).length)
-      d+=(d?" · ":"")+a.reentry_decisions.map(r=>`⚖ ${r.symbol}:${r.decision}`).join(" ");
-    if(a.halt_reason){cls="warn";ic="⚠";d+=(d?" — ":"")+a.halt_reason.slice(0,90);}}
-  else if(a.event==="exit_signal"){cls="warn";ic="⚠";
-    t=`${((a.triggers||[])[0]||{}).reason ? (a.triggers||[]).map(x=>x.reason.toUpperCase()+" "+x.symbol).join(", ") : 'exit signal'}`;
-    d=(a.triggers||[]).map(x=>`${x.symbol} @ ${x.price} (level ${x.level}, sell ${Math.round((x.fraction||1)*100)}%)`).join(" · ")
-      +` — ${a.armed?'executed':'alert-only'}`;}
-  else if(a.event==="product"||a.event==="write"){cls="info";ic="✎";t="Book written";
-    d=`${a.theses||''} theses · regime ${(a.regime&&a.regime.status)||a.regime||''}`
-      +((a.regime&&a.regime.vix)?` · vix ${a.regime.vix.split(' ')[0]}`:'');}
-  else if(a.event==="outcome"){cls="info";ic="◷";t=`Outcome — ${a.symbol||''}`;}
-  const ts=(a.ts||"").replace('T',' ').slice(5,16);
+  const spec=EV[a.event];
+  let cls="info",ic="•",t=String(a.event||"event").replace(/_/g," "),d="";
+  if(spec){cls=spec[0];ic=spec[1];
+    // a broken renderer must not blank the whole feed — fall back to the name
+    try{t=spec[2](a);}catch(e){}
+    try{d=spec[3](a)||"";}catch(e){d="";}}
+  // the journal writes the time under four different keys; as_of is date-only
+  const raw=a.ts||a.observed_at||a.at||a.as_of||"";
+  const ts=String(raw).length>10?String(raw).replace("T"," ").slice(5,16):String(raw);
   feed.appendChild(el("div","ev "+cls,`<div class="ic">${ic}</div><div class="bd"><div class="t">${t}</div><div class="d">${d}</div></div><div class="ts">${ts}</div>`));
 });
 
