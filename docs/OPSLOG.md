@@ -9,6 +9,57 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-31 — the dashboard was reporting a gain where there was a loss
+
+Follow-up to the rebuild below, on the principal's instruction that the page be
+an honest reflection. Three claims were not true, and the first was the number a
+reader looks at first.
+
+**"+11.2% since 2026-07-09" was not a return.** The header rendered
+`last/first - 1` over `equity.jsonl`, which records value/invested/cash and NO
+external cash flow. A **confirmed $20.00 deposit** landed on 2026-07-12 — visible
+in the series as 62.51 → 79.68 in one day, +27%, on a book that cannot move that
+far. Net of the contribution the account is **down 20.0%** over the same window.
+The page showed a 31-point gain where there was a loss, in the flattering
+direction.
+
+`scripts/letter_facts.py` had already solved this for the investor letter — its
+docstring says so outright, *"so a deposit is never narrated as performance"* —
+and `_flows_since()` is the repo's only reader of `flows.jsonl`. Reused rather
+than reimplemented, so the letter and the dashboard can never disagree about what
+a contribution is. The deposit is disclosed beside the figure and marked on the
+equity curve, where it had been the largest step on the chart.
+
+**R:R was a constant.** Entry, Stop, Targets and R:R sat side by side sourced from
+different places — Stop/Targets enforced, Entry the thesis zone mid, R:R
+`reward_risk(thesis)`. Because the slow loop builds every thesis to clear R:R ≥ 2,
+the column read **2.2 for all twelve holdings**, implying every position offered
+2.2:1 from here. Measured off the real rows: STX 0.63, FTNT 0.78, LITE 0.56,
+KO 0.57, AMD 0.92, INTC 0.95 — every one below 1:1. R:R is now computed from the
+levels the row displays, so a reader can verify it; asserted 0 mismatches across
+all 17 rows against an independent recomputation.
+
+**"Entry" showed a price never traded.** Held rows printed the thesis entry-zone
+mid — MU displayed 932.86 against 833.91 actually paid. Held rows now show average
+cost; pending rows keep the planned zone and are labelled. Where the stop sits at
+or above cost, being stopped out books a profit: there is no risk to divide by, so
+those rows read "locked" rather than a negative ratio that would look like a fault.
+
+Four further labels claimed more than the page could support: the rule-out panel
+concluded "every universe name is buyable" while knowing nothing about cooldowns,
+the whitelist, HALT_ENTRIES, SHADOW or buying power; "17 names · live" for 12 held
+and 5 targeted; "37 days" on a close-to-close chart sitting under a live mark; and
+"auto-refreshes on reload", which it does not do.
+
+**Note for whoever reads this next.** Every one of these was a number that had
+been *correct when written* and was falsified by a later change — a deposit, a
+levels system, a geometry generator that standardised R:R. None was caught by a
+check, because none of them can be: they are all cases of a display and a system
+drifting apart. The only defence that worked was recomputing each displayed number
+from its source and comparing.
+
+---
+
 ## 2026-08-31 — the Sunday rebuild had been deleting the agent's stops for two weeks
 
 Found while auditing the dashboard against the code it renders. Nothing was lost
