@@ -138,6 +138,12 @@
       <section class="card"><div class="hd"><h2>Scheduled jobs</h2><span class="meta" id="healthMeta"></span></div>
         <div class="rows" id="healthRows"></div>
       </section>
+      <section class="card"><div class="hd"><h2>Rule-outs</h2><span class="meta" id="roMeta"></span></div>
+        <div class="rows" id="roRows"></div>
+      </section>
+      <section class="card"><div class="hd"><h2>Independent review</h2><span class="meta" id="revMeta"></span></div>
+        <div class="rows" id="revRows"></div>
+      </section>
       <section class="card"><div class="hd"><h2>Recent activity</h2><span class="meta">journal</span></div>
         <div class="feed" id="feed"></div>
       </section>
@@ -151,6 +157,12 @@
 const DATA = __DASHBOARD_DATA__;
 const fmt=(n,d=2)=>(n==null?"—":Number(n).toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d}));
 const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;};
+// ⛔ TOP-LEVEL ON PURPOSE. These are `const` (temporal dead zone, not
+// hoisted) and are used by the holdings table and the rule-outs card, both
+// of which run BEFORE the activity feed where they used to be declared.
+// Declared late, the first row render threw and took the whole page down.
+const esc=t=>String(t==null?"":t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const clip=(t,n)=>{t=String(t==null?"":t).replace(/\s+/g," ").trim();return esc(t.length>n?t.slice(0,n-1)+"…":t);};
 
 // header
 document.getElementById("acctName").textContent=DATA.account.nickname||"Agentic";
@@ -188,6 +200,12 @@ pills.push(DATA.flags.kill_switch
 // exits must be placed by hand. HALT_ENTRIES is the lesser flag: no new
 // buys, but stop/take-profit exits stay armed and keep firing normally. Two
 // different pills so the two are never mistaken for one another at a glance.
+// ⛔ SHADOW refuses EVERY order while the loop keeps running. Without this the
+// header could read LIVE + KILL-SWITCH CLEAR while nothing could be placed.
+// Only rendered when set: a permanent "SHADOW CLEAR" pill would dilute the row
+// of flags that matter, and its absence is the normal state.
+if(DATA.flags.shadow)
+  pills.push(`<span class="pill off"><span class="dot"></span>SHADOW — ALL ORDERS DENIED</span>`);
 pills.push(DATA.flags.halt_entries
   ?`<span class="pill warn"><span class="dot"></span>HALT-ENTRIES ON</span>`
   :`<span class="pill"><span class="dot"></span>HALT-ENTRIES CLEAR</span>`);
@@ -199,7 +217,11 @@ const rows=document.getElementById("rows");
 (DATA.holdings||[]).forEach(h=>{
   const tr=el("tr");
   const pnl=h.pnl==null?"—":`<span style="color:var(--${h.pnl>=0?'pos':'neg'})">${h.pnl>=0?'+':''}${(h.pnl*100).toFixed(1)}%</span>`;
-  tr.innerHTML=`<td><span class="tkr">${h.ticker}</span></td>
+  // A pending row that is RULED OUT is not "not bought yet", it is "cannot be
+  // bought". The two were indistinguishable: AMAT and WDC sat here as pending,
+  // no reason given, while the order gate refused every buy on them.
+  const ro=h.ruled_out?`<span class="sub" style="color:var(--warn)" title="${esc(h.ruled_out_reason)}">RULED OUT — buys refused</span>`:"";
+  tr.innerHTML=`<td><span class="tkr">${h.ticker}</span>${ro}</td>
     <td class="mono">${h.weight==null?"&mdash;":fmt(h.weight*100)+"%"}${h.weight_is_target?'<span class="sub">target</span>':""}</td>
     <td class="mono">$${fmt(h.value)}</td>
     <td class="mono">${pnl}</td>
@@ -278,6 +300,7 @@ document.getElementById("guardRows").innerHTML=
    <div class="row"><span class="k">Live trading</span><span class="v" style="color:var(--${DATA.flags.live_approved?'pos':'warn'})">${DATA.flags.live_approved?'ARMED':'PAUSED'}</span></div>
    <div class="row"><span class="k">Kill-switch</span><span class="v" style="color:var(--${DATA.flags.kill_switch?'neg':'pos'})">${DATA.flags.kill_switch?'ENGAGED — places nothing, stops NOT firing':'clear'}</span></div>
    <div class="row"><span class="k">Halt-entries</span><span class="v" style="color:var(--${DATA.flags.halt_entries?'warn':'pos'})">${DATA.flags.halt_entries?'ENGAGED — no new buys, stops still armed':'clear'}</span></div>
+   <div class="row"><span class="k">Shadow mode<span class="sub">research_store/SHADOW &middot; gate refuses every order</span></span><span class="v" style="color:var(--${DATA.flags.shadow?'neg':'pos'})">${DATA.flags.shadow?'ENGAGED — nothing can be placed':'clear'}</span></div>
    <div class="row"><span class="k">Cooldown (stopped-out)<span class="sub">active only &middot; expired entries are not shown</span></span><span class="v">${(g.cooldown&&g.cooldown.length)?g.cooldown.map(c=>c.symbol+' \u2192 '+c.until).join(', '):'none'}</span></div>
    <div class="row"><span class="k">Realized P&amp;L (30d)</span><span class="v">${DATA.realized?`<span style="color:var(--${(DATA.realized.total||0)>=0?'pos':'neg'})">$${fmt(DATA.realized.total)}</span> · ${DATA.realized.days?DATA.realized.days.reduce((a,x)=>a+(x.trades||0),0):0} closes`:'— (no exits yet)'}</span></div>`;
 
@@ -311,6 +334,37 @@ document.getElementById("regimeRows").innerHTML=
    <div class="row"><span class="k">VIX ceiling</span><span class="v">${r.vix||'—'}</span></div>
    <div class="row"><span class="k">Notes</span><span class="v" style="color:var(--faint);font-weight:400">${r.notes||''}</span></div>`;
 
+// ---- rule-outs: binding BUY exclusions the order gate will enforce ---------
+// Shown because these accumulate silently and bind every later session. In
+// August they compounded into a theme cap that exists nowhere in the mandate
+// and were invisible on this page throughout.
+const ros=DATA.rule_outs||[];
+document.getElementById("roMeta").textContent=ros.length?`${ros.length} binding`:"none";
+document.getElementById("roRows").innerHTML=ros.length
+  ? ros.map(r=>prow(esc(r.symbol),
+      `<span style="font-weight:400">${clip(r.reason,110)}</span>`
+      +(r.until?`<span class="sub">until ${esc(r.until)}</span>`:'<span class="sub">no expiry</span>'),
+      "warn")).join("")
+  : `<div class="empty">No binding rule-outs — every universe name is buyable.</div>`;
+
+// ---- the independent reviewer's last verdict ------------------------------
+// ADVISORY. Not a veto, and it never reaches the agent
+// (session.py:SHOW_REVIEW_TO_AGENT is off) — it is here for the human judging
+// reviewer against agent. Its own `day` is shown so a stale verdict reads stale.
+const rev=DATA.review;
+if(!rev){document.getElementById("revMeta").textContent="";
+  document.getElementById("revRows").innerHTML=`<div class="empty">No review recorded yet.</div>`;}
+else{
+  document.getElementById("revMeta").textContent=`${esc(rev.day||"")} · ${rev.reviewed_decisions||0} decisions`;
+  const st=String(rev.stance||"").toUpperCase();
+  const col=st==="DISSENT"?"neg":st==="SPLIT"?"warn":st==="ENDORSE"?"pos":"dim";
+  document.getElementById("revRows").innerHTML=
+    prow("Stance",st||"—",col)
+    +prow("Headline",`<span style="font-weight:400">${clip(rev.headline,150)}</span>`)
+    +(rev.strongest_disagreement?prow("Strongest objection",
+        `<span style="font-weight:400">${clip(rev.strongest_disagreement,150)}</span>`,"warn"):"");
+}
+
 // ---- activity feed -------------------------------------------------------
 // ⛔ THIS FEED WAS MOSTLY BLANK ROWS. It branched on four event types
 // (execution, exit_signal, product/write, outcome) and fell through to a
@@ -323,8 +377,6 @@ document.getElementById("regimeRows").innerHTML=
 // time under four different keys depending on the writer: `ts`, `observed_at`
 // (position lifecycle), `at` (outcomes, signal panel) and `as_of` (product,
 // date only). The old code read `a.ts` alone.
-const esc=t=>String(t==null?"":t).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const clip=(t,n)=>{t=String(t==null?"":t).replace(/\s+/g," ").trim();return esc(t.length>n?t.slice(0,n-1)+"…":t);};
 const money=v=>v==null?"":"$"+fmt(v);
 // side/qty/price of one fill, tolerating the several shapes the journal uses
 const fillTxt=f=>`${(f.side||"").toUpperCase()} ${f.symbol} ${money(f.amount!=null?f.amount:f.quantity_or_amount)}`

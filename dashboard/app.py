@@ -20,6 +20,7 @@ import governance as gov                              # noqa: E402
 import mandate                                        # noqa: E402
 import marks                                          # noqa: E402
 import strategy as strat                              # noqa: E402
+from agent_env import memory                          # noqa: E402
 from agent_env import state                           # noqa: E402
 from research_store import read_current               # noqa: E402
 from research_store.validate import reward_risk       # noqa: E402
@@ -136,6 +137,22 @@ def build_data() -> dict:
     # quotes.json rather than the position mark: marks fall back to snapshot
     # price or even cost basis (src/marks.py), and resolving an override against
     # cost basis is exactly how display and enforcement came apart before.
+    # ⛔ WHAT THE ORDER GATE WILL ACTUALLY REFUSE. memory.binding_rule_outs() is
+    # the function the PreToolUse hook calls (pretooluse_order_gate.py:454), so
+    # this reports the gate's own answer rather than a second reading of the
+    # file: only status "ruled_out", latest entry per symbol, unexpired.
+    #
+    # WHY THIS IS ON THE PAGE AT ALL. Rule-outs are binding BUY exclusions that
+    # a session writes and every later session inherits as fact. In August they
+    # silently accumulated into a theme cap that exists nowhere in the mandate —
+    # six of the top fourteen ranked names became unbuyable, cash ran from 3% to
+    # 29% of NAV, and no human ever decided any of it (CLAUDE.md, 2026-08-21).
+    # They were invisible here throughout. A standing exclusion nobody can see
+    # is how that happens again.
+    try:
+        _ruled = memory.binding_rule_outs(RS)
+    except Exception:                                 # noqa: BLE001 — page > panel
+        _ruled = {}
     ov = _read_json(RS / "monitor" / "overrides.json", {})
     mprices = (_read_json(RS / "monitor" / "quotes.json", {}) or {}).get("prices") or {}
     theses = prod.theses if prod else []
@@ -178,6 +195,12 @@ def build_data() -> dict:
             "rr": round(rr, 2) if rr else None,
             "score": (t.signals.get("score") if t is not None else None),
             "state": "held" if held else "pending",
+            # a PENDING row that is ruled out is not "not bought yet" — it is
+            # "cannot be bought", and the two looked identical here. AMAT and
+            # WDC sat in this table as pending, with no reason given, while the
+            # gate refused every buy on them.
+            "ruled_out": bool(_ruled.get(sym)),
+            "ruled_out_reason": (_ruled.get(sym) or {}).get("reason"),
             "thesis": (t.thesis if t is not None else None),
         }
 
@@ -286,6 +309,13 @@ def build_data() -> dict:
         "regime": regime,
         "flags": {"live_approved": bool(cfg.get("proof", {}).get("live_approved")),
                   "kill_switch": (RS / "HALT").exists(),
+                  # ⛔ research_store/SHADOW makes the order gate refuse EVERY
+                  # order (pretooluse_order_gate.py:202) while the loop keeps
+                  # running — the phased-rollout switch. Unsurfaced, the page
+                  # would read LIVE / kill-switch CLEAR while nothing could be
+                  # placed at all. Same class as the HALT_ENTRIES gap closed in
+                  # cf6329c.
+                  "shadow": (RS / "SHADOW").exists(),
                   # a forgotten HALT_ENTRIES silently stops the book growing —
                   # it has to be visible somewhere standing, not just in a log
                   "halt_entries": (RS / "HALT_ENTRIES").exists(),
@@ -329,6 +359,15 @@ def build_data() -> dict:
             "cooldown": [{"symbol": _s, "until": _u} for _s, _u in
                          sorted((k, gov.cooldown_until(k)) for k in cooldown)
                          if _u]},
+        "rule_outs": [{"symbol": k,
+                       "reason": (v or {}).get("reason"),
+                       "until": (v or {}).get("until")}
+                      for k, v in sorted(_ruled.items())],
+        # The independent reviewer's verdict. DATA-ONLY and advisory: it is not a
+        # veto, it never reached the agent (session.py:SHOW_REVIEW_TO_AGENT is
+        # off), and it is shown here for the human who is judging reviewer vs
+        # agent. `day` is its own, so a stale verdict reads as stale.
+        "review": _read_json(RS / "reviews" / "latest.json", None),
         "realized": _read_json(RS / "rh" / "realized.json", None),
         "health": _health_rows(),
         "pending": _pending_universe_proposal(),
