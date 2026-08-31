@@ -1402,7 +1402,12 @@ EXIT_MUST_WRITE = (
                                                  # reads to learn a sale fired
     "research_store/rh/fills.json",
     "research_store/rh/exit_closes.json",
-    "research_store/rh/positions.json",
+    # ⛔ positions.json IS NOT HERE, and must not be re-added. The exit path's
+    # direct hand-write was deliberately REMOVED on 2026-08-25: it bypassed
+    # _write_broker_snapshot()'s validation and used a second clock, which made a
+    # correct snapshot read stale-after-fill. The exit path now reaches that file
+    # through scripts/record_fills.py + broker_state.json. Asserting a permission
+    # the design deliberately withdrew is a check that can never pass.
     "research_store/rh/realized.json",
     "research_store/rh/orders_dump.json",
     # prompts/exit.md requires this one too; omitting it meant a partial
@@ -1478,25 +1483,59 @@ def check_exit_path_can_record(root: pathlib.Path) -> list[str]:
 
     It asserts BOTH directions — a required write that is denied is a defect, and
     a protected file that became writable is a bigger one.
+
+    ⛔ IT CHECKS THE FILE EACH PROCESS ACTUALLY RUNS UNDER, which it did not
+    until 2026-08-31. The write side was asserted against loop_settings.json
+    because that IS where the executor ran when this was written. On 2026-08-23
+    (`2a05148`, "Isolate and bind the exit executor") it was moved to its own
+    contract — scripts/market_monitor.py spawns it with
+    `--settings deploy/exit_executor_settings.json` — and this check was not
+    repointed. It kept passing only because loop_settings.json still carried the
+    now-vestigial allows; when those were correctly removed on 2026-08-30
+    (`af89c05`) it began reporting a defect that did not exist.
+
+    That false positive could not self-clear and could not be fixed by the
+    auto-fix loop: the only edit that would quiet it is granting the TRADING
+    SESSION write access to the exit executor's result file, which is the exact
+    capability-widening the split into two settings files exists to prevent. The
+    loop therefore re-filed the same finding every day and correctly refused to
+    act on it.
+
+      write side      -> deploy/exit_executor_settings.json (the executor)
+      must-not side   -> BOTH files. "The monitor's control state is not writable
+                         from here" is true of the executor and the sessions
+                         alike, and asserting it against only one left the other
+                         free to acquire it.
     """
     out = []
-    path = root / "deploy" / "loop_settings.json"
-    if not path.is_file():
-        return ["deploy/loop_settings.json: missing — the loops (and the exit "
-                "executor) would run under the permissive interactive settings"]
+    ex_path = root / "deploy" / "exit_executor_settings.json"
+    loop_path = root / "deploy" / "loop_settings.json"
+    for p, who in ((ex_path, "stop-exit executor"), (loop_path, "trading sessions")):
+        if not p.is_file():
+            out.append(f"deploy/{p.name}: missing — the {who} would run under the "
+                       "permissive interactive settings")
+    if out:
+        return out
     try:
-        rules = (json.loads(path.read_text()).get("permissions") or {})
+        ex_rules = (json.loads(ex_path.read_text()).get("permissions") or {})
+        rules = (json.loads(loop_path.read_text()).get("permissions") or {})
     except Exception as e:                                    # noqa: BLE001
-        return [f"deploy/loop_settings.json: unreadable ({type(e).__name__})"]
+        return [f"exit/loop settings unreadable ({type(e).__name__})"]
 
     for f in EXIT_MUST_WRITE:
-        v = _perm_verdict(rules, f)
+        v = _perm_verdict(ex_rules, f)
         if v != "allow":
             out.append(
-                f"deploy/loop_settings.json: the stop-exit executor CANNOT write "
-                f"{f} ({v}) — a stop that fires will place its order and then be "
-                f"unable to record it, so the monitor reads the outcome as "
-                f"unknown (2026-08-20 RTX)")
+                f"deploy/exit_executor_settings.json: the stop-exit executor "
+                f"CANNOT write {f} ({v}) — a stop that fires will place its order "
+                f"and then be unable to record it, so the monitor reads the "
+                f"outcome as unknown (2026-08-20 RTX)")
+    for f in EXIT_MUST_NOT_WRITE:
+        if _perm_verdict(ex_rules, f) == "allow":
+            out.append(
+                f"deploy/exit_executor_settings.json: {f} is WRITABLE by the exit "
+                f"executor — it is the monitor's own control state and the "
+                f"executor must never write it")
     for f in EXIT_MUST_NOT_WRITE:
         if _perm_verdict(rules, f) == "allow":
             out.append(
@@ -1507,15 +1546,22 @@ def check_exit_path_can_record(root: pathlib.Path) -> list[str]:
     # The broad `research_store/**` allow means any file added to that directory
     # in future is writable unless somebody remembers to add two deny rules --
     # the same "remembering is not a mechanism" failure that produced the
-    # original incident. exit_result.json is the one deliberate exception.
+    # original incident.
+    #
+    # ⛔ THERE IS NO LONGER AN EXCEPTION, and the exemption that used to sit here
+    # was removed on 2026-08-31. exit_result.json was skipped because
+    # loop_settings.json once ALLOWED it — back when the exit executor ran under
+    # this same file. It no longer does (deploy/exit_executor_settings.json), and
+    # loop_settings.json now denies the whole monitor directory, so the file the
+    # exemption protected is correctly denied and the exemption only hid it.
+    # Dropping it makes this strictly stronger: if the TRADING SESSION is ever
+    # granted write access to the executor's result file, this now says so.
     mon = root / "research_store" / "monitor"
     if mon.is_dir():
         for f in sorted(mon.iterdir()):
             if not f.is_file() or f.name.startswith("."):
                 continue
             rel = f"research_store/monitor/{f.name}"
-            if rel in EXIT_MUST_WRITE:
-                continue
             if _perm_verdict(rules, rel) != "deny":
                 out.append(
                     f"deploy/loop_settings.json: {rel} exists but is NOT denied "
