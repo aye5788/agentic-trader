@@ -61,8 +61,6 @@
   tbody tr:hover{background:var(--surface-2)}
   .tkr{font-family:var(--mono);font-weight:600;font-size:13px}
   .sub{display:block;font-size:10.5px;color:var(--faint);font-weight:400}
-  .tag{font-size:10px;font-weight:600;letter-spacing:.04em;padding:2px 7px;border-radius:5px;background:var(--surface-2);color:var(--dim)}
-  .tag.etf{color:var(--accent);background:var(--accent-soft)}
   .rr{font-family:var(--mono);color:var(--pos);font-weight:600}
   .mo{display:flex;align-items:center;gap:8px;justify-content:flex-end}
   .mo .bar{width:52px;height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden}
@@ -99,7 +97,7 @@
 <div class="wrap">
   <header class="top">
     <div class="acct">
-      <span class="eyebrow">Momentum book · Robinhood cash</span>
+      <span class="eyebrow" id="eyebrow"></span>
       <div class="name"><h1 id="acctName">Agentic</h1><span class="num mono" id="acctNum">••••4924</span></div>
       <div class="value" id="acctValue">—</div>
       <div class="delta" id="acctDelta"></div>
@@ -122,7 +120,7 @@
       <div class="hd"><h2>Holdings</h2><span class="meta" id="holdMeta"></span></div>
       <div class="tablewrap">
         <table><thead><tr>
-          <th>Ticker</th><th>Wt</th><th>Value</th><th>P&amp;L</th><th>Entry</th><th>Stop</th><th>Targets</th><th>R:R</th><th>Momentum</th><th>Type</th>
+          <th>Ticker</th><th>Wt</th><th>Value</th><th>P&amp;L</th><th>Entry</th><th>Stop</th><th>Targets</th><th>R:R</th><th>Momentum</th><th>State</th>
         </tr></thead><tbody id="rows"></tbody></table>
       </div>
     </main>
@@ -145,7 +143,7 @@
       </section>
     </aside>
   </div>
-  <footer><div>dual-momentum-v1 · equities only, options off · deterministic signal</div>
+  <footer><div id="footStrat"></div>
     <div id="gen"></div></footer>
 </div>
 
@@ -158,8 +156,20 @@ const el=(t,c,h)=>{const e=document.createElement(t);if(c)e.className=c;if(h!=nu
 document.getElementById("acctName").textContent=DATA.account.nickname||"Agentic";
 document.getElementById("acctNum").textContent=DATA.account.masked||"";
 document.getElementById("acctValue").textContent="$"+fmt(DATA.account.value);
+const S=DATA.strategy||{};
+// every strategy label below is config-derived (config/strategy.toml [meta],
+// [risk], [portfolio]) so it cannot drift from the running system the way the
+// hardcoded "70 / 30 book & sleeve" and "Robinhood cash" did.
+document.getElementById("eyebrow").textContent=
+  [S.name,S.instrument].filter(Boolean).join(" · ")||"Momentum book";
+document.getElementById("footStrat").textContent=
+  [S.name,S.edge&&(S.edge+" edge"),S.instrument&&(S.instrument+" only, options off"),
+   "deterministic signal"].filter(Boolean).join(" · ");
+// buying_power, not just cash: under limited margin it is what an order is
+// actually checked against, and the two can differ.
 document.getElementById("acctDelta").innerHTML=
-  `invested $${fmt(DATA.account.invested)} · cash $${fmt(DATA.account.cash)}`;
+  `invested $${fmt(DATA.account.invested)} · cash $${fmt(DATA.account.cash)}`
+  +(DATA.account.buying_power!=null?` · buying power $${fmt(DATA.account.buying_power)}`:"");
 const eq=(DATA.equity||[]).filter(p=>p.value!=null);
 if(eq.length>1){const first=eq[0].value,last=eq[eq.length-1].value,pct=first?(last/first-1)*100:0;
   document.getElementById("acctDelta").innerHTML+=
@@ -198,7 +208,7 @@ const rows=document.getElementById("rows");
     <td class="mono">${(h.targets&&h.targets.length)?h.targets.map(t=>fmt(t)).join(" / "):"—"}</td>
     <td class="rr">${h.rr!=null?fmt(h.rr):"—"}</td>
     <td><div class="mo"><div class="bar"><i style="width:${Math.round((h.score||0)*100)}%"></i></div><span>${h.score!=null?Number(h.score).toFixed(2):"—"}</span></div></td>
-    <td><span class="tag ${h.type==='etf'?'etf':''}">${(h.type||'stock').toUpperCase()}</span></td>`;
+    <td><span class="st ${h.state}">${(h.state||'').toUpperCase()}</span></td>`;
   rows.appendChild(tr);
 });
 document.getElementById("holdMeta").textContent=`${(DATA.holdings||[]).length} names · ${DATA.holdings&&DATA.holdings.some(h=>h.state==='held')?'live':'target'}`;
@@ -393,7 +403,8 @@ acts.forEach(a=>{
 
 // equity curve
 const eqMeta=document.getElementById("equityMeta"),note=document.getElementById("chartNote");
-eqMeta.textContent="70 / 30 book & sleeve · weekly rebalance";
+eqMeta.textContent=[S.max_holdings&&("top-"+S.max_holdings),
+  S.rebalance&&(S.rebalance+" rebuild")].filter(Boolean).join(" · ")||"daily close";
 const series=eq.map(p=>p.value);
 if(series.length<2){note.textContent="collecting — live history begins now";}
 else{note.textContent=`${series.length} days`;}

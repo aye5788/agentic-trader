@@ -150,7 +150,7 @@ def build_data() -> dict:
         # would silently change what the column means.
         rr = reward_risk(t) if t is not None else None
         return {
-            "ticker": sym, "type": "stock",
+            "ticker": sym,
             # A held row carries its ACTUAL share of NAV. A protective thesis has
             # target_weight 0.0 and would otherwise render "0.00%" beside a real
             # position. A pending row has no actual weight, so it shows the TARGET
@@ -251,16 +251,38 @@ def build_data() -> dict:
         _gov_breached, _gov_dd = gov.drawdown_breach(acct_value, cfg)
     except Exception:                                 # noqa: BLE001
         _gov_breached, _gov_dd = None, None
+    _acct_no = _read_json(RS / "rh" / "positions.json", {}).get("account_number")
     cooldown = _read_json(RS / "monitor" / "cooldown.json", {})
     mstate = _read_json(RS / "monitor" / "state.json", {})
 
     g = cfg["governance"]
     regime = (prod.regime if prod and prod.regime else {"status": "unknown"})
     return {
-        "account": {"nickname": "Agentic", "masked": "••••4924",
+        # ⛔ DERIVED, NOT HARDCODED. This read "••••4924" as a literal. It
+        # happened to be right, which is the problem: a pinned account number
+        # that silently stops matching the account being traded is exactly the
+        # failure _expected_account() exists to catch, and a hardcoded display
+        # cannot participate in that. Falls back to the literal only when the
+        # snapshot carries no account_number at all.
+        "account": {"nickname": "Agentic",
+                    "masked": ("••••" + str(_acct_no)[-4:]) if _acct_no else "••••????",
+                    "buying_power": valued.get("buying_power"),
                     "value": round(acct_value, 2), "invested": round(invested, 2),
                     "cash": valued["cash"], "marked_at": valued["marked_at"]},
         "asof": prod.as_of if prod else None,
+        # ⛔ EVERY STRATEGY LABEL ON THE PAGE COMES FROM HERE. The template used
+        # to hardcode "70 / 30 book & sleeve · weekly rebalance" (the sleeve was
+        # deleted 2026-08-20 and there is no 70/30 split), "Robinhood cash" (the
+        # account became limited_margin on 2026-08-18) and "dual-momentum-v1".
+        # Static copy describing a live system is a defect with a delay on it;
+        # config/strategy.toml is the single source of truth, so read it.
+        "strategy": {
+            "name": (cfg.get("meta") or {}).get("name"),
+            "edge": (cfg.get("meta") or {}).get("edge"),
+            "instrument": (cfg.get("meta") or {}).get("instrument"),
+            "max_holdings": (cfg.get("risk") or {}).get("max_holdings"),
+            "rebalance": (cfg.get("portfolio") or {}).get("rebalance"),
+        },
         "regime": regime,
         "flags": {"live_approved": bool(cfg.get("proof", {}).get("live_approved")),
                   "kill_switch": (RS / "HALT").exists(),
