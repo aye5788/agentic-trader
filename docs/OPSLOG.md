@@ -9,6 +9,151 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-08-31 — the class behind all of it: "broken" and "empty" are the same value
+
+Third attempt at this class, and the first one grounded in a measurement rather
+than a design. Written up in full because the previous two attempts were recorded
+as fixes and were not.
+
+### The diagnosis
+
+**The system cannot tell "there is nothing here" from "I could not read it."**
+Both arrive as `{}` or `None`, because essentially every reader is
+`except Exception: return default`. A corrupt file therefore becomes an ordinary
+empty state, the caller proceeds on a fallback it does not know it is using, and
+nothing anywhere reports it.
+
+Measured, not reasoned: `overrides.json` was made unreadable and traced through
+the system. All 12 held positions reverted from their agent-set stops to the
+loop's looser thesis stops (MU 843.00 → 813.259, LITE 810.85 → 758.60), CRWD
+lost its stop entirely, every `set_by_agent` flag cleared — and the monitor,
+`positions()` and the dashboard all reported it without complaint.
+
+**The part that killed the previous approach:** all three AGREED, and all three
+were CORRECT. The protection really had gone. No cross-check between surfaces can
+find that, because there is no disagreement to find. An independent review
+(codex, SPLIT) made the same point about the proposal that preceded this one:
+*"two implementations can agree on the same stale input or shared bug, so equality
+does not establish that either result is true."* It also showed several proposed
+checks were tautological — the dashboard already CALLS `state.holdings()`, so
+comparing them tests nothing.
+
+The same cause accounts for the Sunday overrides wipe, the cooldown panel reading
+"nothing restricted", a missing `positions.json` reporting `ok` in health
+(2026-08-18), and a truncated broker page reading as a complete smaller book
+(2026-08-16).
+
+### What was built
+
+1. **`market_monitor`** — an unreadable `overrides.json` is no longer an empty
+   one. The fallback is unchanged and still fail-safe (thesis stops stay in
+   force); it is simply no longer silent. Fire-on-transition, so no 15s spam.
+2. **`src/marks.py`** — both read sites distinguish absent from unreadable and
+   record it in `read_errors`. Fallback byte-identical, which is what made it
+   safe under ~25 consumers. No I/O, no push: this module sits on the order
+   gate's critical path.
+3. **`health.unreadable_artifacts`** — parses the seven artifacts where being
+   wrong costs money or protection. **Absent is deliberately not a finding.**
+   Reaches the phone with no change to `health_check.py` (status is alertable)
+   and renders red on the dashboard (two lines added to its status map).
+4. **`health.py` py3.10 compatibility** — see the separate entry below.
+
+### The limit, stated plainly
+
+This closes **broken and missing**. It does nothing for **stale but valid**, which
+is a different problem and was handled separately (below). And a number can have
+perfect provenance while the logic producing it is wrong — only replay against an
+independent derivation catches that, which exists today for stop levels only
+(`tests/fixtures/levels_2026-08-18.json`, hand-written so it cannot be regenerated
+from the code it tests).
+
+### What went wrong in getting here, recorded deliberately
+
+Three proposals were made before any measurement, and two were wrong:
+- an "agreement contracts" design that was largely tautological after the day's
+  own fixes;
+- a cash-reconciliation check built and tested against real history: **16 false
+  positives in 36 days, and it missed both real deposits.** Dropped, not shipped.
+- a claim that 298 read sites made this a rewrite. Counting properly: **12** bare
+  reads of a money/protection artifact, plus a handful of shared helpers. The
+  scope was never the problem; not measuring it was.
+
+---
+
+## 2026-08-31 — the session sized the book against a snapshot nobody had checked
+
+**The charter said "EVERY session ENDS by refreshing the broker snapshot" and the
+tool docstring said "call this before you finish".** So a session read a snapshot
+that could be days old, planned and sized every position against it, and
+reconciled afterwards. The session obeyed both instructions faithfully, and too
+late.
+
+**Age cannot catch this.** `_staleness()` returned `None` — "nothing to report" —
+because `busday_count` was 1 and the limit is 1. The file was one trading day old
+and parsed perfectly. It was short a **$30 deposit, 30% of NAV**. The session read
+NAV 71.31 against a true 101.51.
+
+It was caught only because the order gate refused a buy on the mismatch and the
+session went looking. **A smaller deposit refuses nothing** — the gate stays quiet
+and the whole book gets sized against a number wrong by a third, silently.
+
+**Fixed, four changes, the two prose ones moving together so they cannot
+contradict:**
+- charter — refresh at the START and the end, what a delta means, and what to do
+  when the refresh refuses;
+- `refresh_broker_snapshot()` docstring — "call this FIRST, and again before you
+  finish";
+- `_write_broker_snapshot()` — reads the file it is about to replace and returns
+  `cash_delta` / `account_value_delta` plus an `UNEXPLAINED_CASH` note. **Reported,
+  never classified:** deposit vs withdrawal vs dividend is not its call. The
+  comparison is free — the old file is right there;
+- `_staleness()` — no longer returns `None` inside the age limit. It states the
+  age AND that age is not confirmation. `stale: False` preserved so no consumer
+  changes behaviour.
+
+⛔ **A REFUSED REFRESH MUST NOT STOP TRADING.** The publisher refuses on an
+unproven page transcript or an unreadable row. Made a hard precondition, that
+turns a bad read into an outage — the same shape as the false halt that morning.
+Report it, work from the stale snapshot knowing it is stale, record that you did.
+
+Verified against a copy: no movement → `cash_delta 0.0`, no flag; a simulated $30
+deposit → `cash_delta 30.0`, `UNEXPLAINED_CASH` naming the amount and the prior
+snapshot's timestamp. Refreshing twice in one session succeeds both times.
+
+**The $30 deposit itself is recorded** in `research_store/flows.jsonl`
+(`source: principal-confirmed`), so the equity curve is not read as a gain nobody
+earned. Without it, that night's equity point would have shown **+58.5%**.
+
+---
+
+## 2026-08-31 — health.py had stopped compiling under the interpreter it promised to support
+
+`src/health.py` used a conditional spanning newlines inside an f-string — PEP 701,
+3.12+ only — so it no longer compiled under system python3.10, **while its own
+comment promised it did**. Confirmed pre-existing by stashing and recompiling.
+
+The comment's stated REASON was also stale, which is why it went unnoticed: it
+said the constraint existed because "the dashboard and the 08:00 cron check run on
+different interpreters". Both now run under `.venv` 3.12. The reason stopped being
+true, so the rule stopped being enforced by anything, and the code drifted out of
+compliance with a promise still written above it.
+
+**The constraint survives for a different reason, now written down:**
+`scripts/market_monitor.py` runs under system python3.10 because the moomoo SDK is
+installed only there, and `health` is exactly the module a stop watcher might
+need. A module the monitor imports that will not parse under 3.10 is not a style
+problem — it is a stop watcher that cannot start.
+
+Fixed by hoisting the expression (output byte-identical, verified by importing
+both versions side by side: same 16 checks, zero rows differing), and a new
+`health.py310_compatible` check now compiles the monitor's transitive import
+closure with the REAL 3.10 binary. Derived from `deployed.import_closure()`, not
+hardcoded. Skipped on the dashboard render (4.1s daily is fine; on a page load it
+is not). In-process `compile()` was rejected as an implementation: it uses the
+running interpreter's parser and would report clean forever.
+
+---
+
 ## 2026-08-31 — the dashboard was reporting a gain where there was a loss
 
 Follow-up to the rebuild below, on the principal's instruction that the page be

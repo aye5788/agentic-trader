@@ -326,7 +326,13 @@ scripts/hooks/pretooluse_order_gate.py
                         still runs (phased-rollout switch); rm to go live. Small
                         JSON + config only — NEVER the price panel (~0.1s
                         budget, on the critical path of every order).
-scripts/market_monitor.py Intraday stop/take-profit watcher. Polls moomoo quotes
+scripts/market_monitor.py Intraday stop/take-profit watcher.
+                        ⛔ AN UNREADABLE overrides.json IS NOT AN EMPTY ONE
+                        (2026-08-31). It used to swallow the parse error and
+                        apply no overrides, which silently reverted all 12
+                        positions to the loop's looser thesis stops with nothing
+                        reporting it. The fallback is unchanged and still
+                        fail-safe; it now ALERTS, fire-on-transition. Polls moomoo quotes
                         during RTH vs. each holding's stored stop/targets; fires
                         prompts/exit.md (market sell) on a breach. Pure-Python
                         watching, Claude only on an event. Runs as a systemd
@@ -389,7 +395,21 @@ scripts/score_reviews.py
 prompts/review.md       The reviewer's procedure. Phase 1 = form its OWN view
                         before reading the agent's reasoning (which is handed
                         over BY PATH, never inlined, so it cannot anchor).
-prompts/charter.md      THE SESSION CHARTER — rendered from config by
+prompts/charter.md      ⛔ THE SESSION'S JOB IS TO TRADE. DIAGNOSING THIS SYSTEM
+                        IS NOT ITS JOB (principal's ruling, 2026-08-31, in THE
+                        DIVISION OF LABOUR). Raised 2026-08-25, recorded as "NOT
+                        YET ADDRESSED — for a later charter pass", and it
+                        recurred six days later. TWICE it has moved money on a
+                        code opinion: a stop WIDENED on 08-25 because the session
+                        judged the enforcement logic wrong, and on 08-31 a DECIDED
+                        SELL of FCX reversed on a drawdown halt that did not
+                        exist (~40% of that session's reasoning written under a
+                        false premise, then re-sold 7 minutes later). The session
+                        must reconcile once, re-test, write ONE open_question if
+                        still blocked, and GO BACK TO THE BOOK. Never work around
+                        a gate — refusing to circumvent is REQUIRED, investigating
+                        it is FORBIDDEN; they are different things.
+                        THE SESSION CHARTER — rendered from config by
                         src/charter.py (mandate.toml + strategy.toml + the live
                         MCP tool list), never hand-copied. A literal threshold in
                         the template is a DEFECT; check_charter_no_literals
@@ -425,7 +445,24 @@ research_store/rh/positions.json
                         the monitor stop-watched a position that had been sold.
                         WRITTEN ONLY by agent_env.refresh_broker_snapshot() (every
                         session, trading or not) and record_fills() (after a
-                        trade). The deleted fast loop used to write it; when it
+                        trade).
+                        ⛔ REFRESHED AT THE START OF A SESSION AS WELL AS THE END
+                        (2026-08-31). It used to be end-only — charter and tool
+                        docstring both said so — which meant a session SIZED THE
+                        WHOLE BOOK against a snapshot that could be days old and
+                        reconciled afterwards. On 2026-08-31 it was short a $30
+                        deposit (30% of NAV) and the session planned against NAV
+                        71.31 versus a true 101.51; it was caught only because the
+                        order gate refused a buy on the mismatch. A SMALLER
+                        DEPOSIT REFUSES NOTHING. The refresh now returns
+                        `cash_delta`/`account_value_delta` against the file it
+                        replaces and flags UNEXPLAINED_CASH — reported, never
+                        classified (deposit vs withdrawal vs dividend is not its
+                        call). ⛔ A REFUSED REFRESH MUST NOT STOP TRADING: work
+                        from the stale snapshot, say it is stale, record it. AGE
+                        IS NOT CONFIRMATION — _staleness() returned None that
+                        morning because the file was one trading day old and
+                        parsed perfectly. Only the broker settles it. The deleted fast loop used to write it; when it
                         went, nothing took over.
                         ⛔ EVERY writer goes through _write_broker_snapshot(), and
                         the one that journals the fill passes it the SAME ts, so
@@ -477,13 +514,37 @@ src/health.py           SCHEDULED-JOB LIVENESS — did each moving part actually
                         evaluate() pure + selftested, gather() thin I/O. Built after
                         the signal panel was found to have NEVER run (2026-07-24) —
                         a job that never runs can't fire its own alerts.
+                        ⛔ IT IS NO LONGER ONLY LIVENESS (2026-08-31). Liveness
+                        cannot see a job that runs and produces something WRONG,
+                        which is what every defect of 2026-08-31 was. Two content
+                        checks now ride alongside:
+                        • `unreadable_artifacts` — the 7 files where being wrong
+                          costs money or protection, PARSED not just stat'd.
+                          ABSENT IS DELIBERATELY NOT A FINDING: a missing file is
+                          a real state. PRESENT-BUT-UNREADABLE is the event,
+                          because every reader in this repo catches a parse error
+                          and substitutes the SAME empty default the absent case
+                          produces — so a corrupt overrides.json silently reverts
+                          every stop in the book (measured, all 12 positions).
+                        • `py310_compatible` — compiles the monitor's transitive
+                          import closure with the REAL /usr/bin/python3. The stop
+                          watcher runs under 3.10; a module it imports using
+                          3.12-only syntax is a watcher that cannot START.
+                          health.py itself had already lapsed this way. Derived
+                          from deployed.import_closure(), never hardcoded, and
+                          SKIPPED on the dashboard render (4.1s: fine daily, not
+                          on a page load) — it rides `use_network`.
+                        ⚠️ A new Check status must also be added to the dashboard's
+                        word/colour map in dashboard/dashboard.html or it renders
+                        as raw lowercase in amber.
 scripts/health_check.py THE UPKEEP REMINDER (daily 08:00). Runs health.checks() and
                         pushes anything unhealthy to the OPS ntfy topic. FIRE-ONCE
                         per condition (clears silently on heal); the dashboard
                         "Scheduled jobs" card carries standing status. Owns the
                         NO credential reminder any more — the Schwab 7-day token
-                        was the only one and it is gone; every check is now
-                        "did this job leave evidence it ran".
+                        was the only one and it is gone. Most checks ask "did this
+                        job leave evidence it ran"; since 2026-08-31 two ask
+                        whether what it produced is USABLE — see src/health.py.
                         `--open-issue` also routes findings into the oversight
                         loop below (deduped `bug`+`auto-fix` GitHub issue).
 scripts/reload_stale.py RUN THIS AFTER EDITING REPO PYTHON (see "CHANGING CODE
