@@ -15,7 +15,11 @@ from flask import Flask, Response, request
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
+# scripts/ too: letter_facts owns the ONE reader of flows.jsonl, and the
+# dashboard must not carry a second opinion about what a deposit is.
+sys.path.insert(0, str(REPO / "scripts"))
 import health                                         # noqa: E402
+from letter_facts import _flows_since                 # noqa: E402
 import governance as gov                              # noqa: E402
 import mandate                                        # noqa: E402
 import marks                                          # noqa: E402
@@ -23,7 +27,6 @@ import strategy as strat                              # noqa: E402
 from agent_env import memory                          # noqa: E402
 from agent_env import state                           # noqa: E402
 from research_store import read_current               # noqa: E402
-from research_store.validate import reward_risk       # noqa: E402
 
 try:                                                  # load DASH_USER/DASH_PASS from .env
     from dotenv import load_dotenv
@@ -162,10 +165,44 @@ def build_data() -> dict:
         float((cfg.get("governance") or {}).get("min_fractional_order_usd", 1.0)))
 
     def _row(sym, t, h, held):
-        # R:R stays THESIS geometry (entry-zone mid), unchanged: it describes the
-        # setup the ranking proposed, not the position. Re-basing it on avg_cost
-        # would silently change what the column means.
-        rr = reward_risk(t) if t is not None else None
+        # ⛔ THE ROW MUST RECONCILE. Entry, Stop, Targets and R:R sat side by side
+        # and came from different places: Stop/Targets were the ENFORCED levels
+        # while Entry was the thesis entry-zone mid and R:R was
+        # reward_risk(thesis). A reader could not derive the R:R from the numbers
+        # beside it, because it was not computed from them.
+        #
+        # It was worse than inconsistent. The slow loop constructs every thesis to
+        # clear R:R >= 2, so thesis R:R is very nearly a CONSTANT — on 2026-08-31
+        # the column read "2.2" for all twelve holdings. It implied every position
+        # offered 2.2:1 from here. Measured off the real rows: STX 0.63, FTNT
+        # 0.78, LITE 0.56, KO 0.57, AMD 0.92, INTC 0.95 — every one below 1:1,
+        # and four positions had their stop ABOVE cost (no loss possible at the
+        # stop), which no single ratio expresses at all.
+        #
+        # Both are now taken from what the row SHOWS: entry is what was actually
+        # paid for a held position, and R:R is (target1 - entry) / (entry - stop)
+        # over the displayed levels. A pending row has paid nothing, so it keeps
+        # the planned entry zone and its thesis geometry — and says so.
+        _t1 = None
+        if held:
+            _entry = h.get("avg_cost")
+            _t1 = (list(h.get("targets") or []) or [None])[0]
+            _stop = h.get("stop")
+        else:
+            _entry = (round(sum(t.entry_zone) / 2, 2)
+                      if t is not None and t.entry_zone else None)
+            _stop = t.stop if t is not None else None
+            _t1 = ((t.targets if t is not None else None) or [None])[0]
+        rr, rr_state = None, None
+        if None not in (_entry, _stop, _t1):
+            _risk = float(_entry) - float(_stop)
+            if _risk > 0:
+                rr = (float(_t1) - float(_entry)) / _risk
+            elif held:
+                # stop at or above cost: being stopped out books a PROFIT, so
+                # there is no risk to divide by. A ratio here would be negative
+                # and read as "bad" — the opposite of what it means.
+                rr_state = "locked"
         return {
             "ticker": sym,
             # A held row carries its ACTUAL share of NAV. A protective thesis has
@@ -179,8 +216,9 @@ def build_data() -> dict:
             "avg_cost": h.get("avg_cost") if held else None,
             "last": h.get("mark") if held else None,
             "pnl": h.get("pnl") if held else None,
-            "entry": (round(sum(t.entry_zone) / 2, 2)
-                      if t is not None and t.entry_zone else None),
+            "entry": _entry,
+            # held -> what was actually paid; pending -> the planned zone mid
+            "entry_is_cost": held,
             # enforced; book_stop is set only when an override is in force, so a
             # divergence between what fires and what the loop proposed is visible
             "stop": h.get("stop") if held else (t.stop if t is not None else None),
@@ -192,7 +230,8 @@ def build_data() -> dict:
             # visible: an unprotected holding is the one thing this page exists
             # to surface. None for a pending row — nothing is held to watch.
             "watched": bool(h.get("watched")) if held else None,
-            "rr": round(rr, 2) if rr else None,
+            "rr": round(rr, 2) if rr is not None else None,
+            "rr_state": rr_state,
             "score": (t.signals.get("score") if t is not None else None),
             "state": "held" if held else "pending",
             # a PENDING row that is ruled out is not "not bought yet" — it is
@@ -232,6 +271,40 @@ def build_data() -> dict:
     last_exec = next((e for e in reversed(recent) if e.get("event") == "execution"), None)
 
     equity = _tail_jsonl(RS / "history" / "equity.jsonl", 400)
+    # ⛔ A BALANCE RATIO IS NOT A RETURN. The header rendered
+    # `last/first - 1` over equity.jsonl and called it "+11.2% since 2026-07-09".
+    # equity.jsonl records value/invested/cash and NO external cash flow, and a
+    # CONFIRMED $20.00 deposit landed on 2026-07-12 -- visible in the series as
+    # 62.51 -> 79.68 in one day, +27%, on a book that cannot move that far.
+    # Net of it the account is DOWN 20.0% over the same window. The page was
+    # reporting a 31-point gain where there was a loss, in the flattering
+    # direction, on the number a reader looks at first.
+    #
+    # scripts/letter_facts.py already solved this for the investor letter -- its
+    # docstring is explicit, "so a deposit is never narrated as performance" --
+    # and _flows_since() is the repo's ONLY reader of flows.jsonl. Reused rather
+    # than reimplemented so the letter and this page can never disagree about
+    # what counts as a contribution. Same arithmetic as letter_facts' week_pnl:
+    # (end - net_flows) / start - 1.
+    #
+    # Close-to-close basis, matching the chart underneath it, NOT the live mark:
+    # mixing an intraday value into a series return is how the two stop agreeing.
+    _ev = [e for e in equity if isinstance(e.get("value"), (int, float))]
+    perf = None
+    if len(_ev) > 1:
+        try:
+            _net, _fl = _flows_since(_ev[0]["date"], _ev[-1]["date"])
+        except Exception:                             # noqa: BLE001
+            _net, _fl = 0.0, []
+        _s, _e = float(_ev[0]["value"]), float(_ev[-1]["value"])
+        perf = {
+            "start_date": _ev[0]["date"], "start_value": _s,
+            "end_date": _ev[-1]["date"], "end_value": _e,
+            "net_flows": _net,
+            "flows": [{"date": f.get("date"), "direction": f.get("direction"),
+                       "amount": f.get("amount")} for f in _fl],
+            "return_pct": round((_e - _net) / _s - 1.0, 4) if _s > 0 else None,
+        }
     # ⛔ TWO DIFFERENT DRAWDOWNS EXIST, AND THIS CARD USED TO MIX THEM.
     # Until 2026-08-31 it measured against max(equity.jsonl) — correct, and for
     # the right reason (FIX A, 2026-08-10: governance's persisted peak_value is
@@ -328,6 +401,7 @@ def build_data() -> dict:
             "halt": last_exec.get("halt_reason"),
         } if last_exec else None,
         "equity": [{"date": e.get("date"), "value": e.get("value")} for e in equity],
+        "performance": perf,
         "guardrails": {
             # the BLOCKING mandate criterion, against ITS limit
             "drawdown": (round(dd_m["value"], 4) if dd_m.get("value") is not None
