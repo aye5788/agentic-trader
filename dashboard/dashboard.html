@@ -243,7 +243,8 @@ const rows=document.getElementById("rows");
     <td><span class="st ${h.state}">${(h.state||'').toUpperCase()}</span></td>`;
   rows.appendChild(tr);
 });
-document.getElementById("holdMeta").textContent=`${(DATA.holdings||[]).length} names · ${DATA.holdings&&DATA.holdings.some(h=>h.state==='held')?'live':'target'}`;
+{const _h=DATA.holdings||[],_held=_h.filter(x=>x.state==='held').length;
+ document.getElementById("holdMeta").textContent=`${_held} held · ${_h.length-_held} pending`;}
 
 // pending universe-maintenance proposal (read-only review surface)
 function prow(k,v,color){return `<div class="row"><span class="k">${k}</span><span class="v"${color?` style="color:var(--${color})"`:''}>${v}</span></div>`;}
@@ -355,7 +356,7 @@ document.getElementById("roRows").innerHTML=ros.length
       `<span style="font-weight:400">${clip(r.reason,110)}</span>`
       +(r.until?`<span class="sub">until ${esc(r.until)}</span>`:'<span class="sub">no expiry</span>'),
       "warn")).join("")
-  : `<div class="empty">No binding rule-outs — every universe name is buyable.</div>`;
+  : `<div class="empty">No binding rule-outs. (Other gates — cooldown, whitelist, halt-entries, buying power — are not judged here.)</div>`;
 
 // ---- the independent reviewer's last verdict ------------------------------
 // ADVISORY. Not a veto, and it never reaches the agent
@@ -469,7 +470,8 @@ eqMeta.textContent=[S.max_holdings&&("top-"+S.max_holdings),
   S.rebalance&&(S.rebalance+" rebuild")].filter(Boolean).join(" · ")||"daily close";
 const series=eq.map(p=>p.value);
 if(series.length<2){note.textContent="collecting — live history begins now";}
-else{note.textContent=`${series.length} days${(DATA.performance&&DATA.performance.net_flows)?" · ▲ = cash added":""}`;}
+else{note.textContent=`${series.length} daily closes to ${eq[eq.length-1].date}`
+  +((DATA.performance&&DATA.performance.net_flows)?" · ▲ = cash added":"");}
 const cv=document.getElementById("eq");
 function css(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
 function draw(){
@@ -513,7 +515,7 @@ function draw(){
   c.beginPath();c.arc(X(n-1),Y(data[n-1]),3.5,0,7);c.fillStyle=acc;c.fill();c.strokeStyle=css("--surface");c.lineWidth=2;c.stroke();
 }
 draw();let raf;addEventListener("resize",()=>{cancelAnimationFrame(raf);raf=requestAnimationFrame(draw);});
-document.getElementById("gen").textContent="live from the Research Store · auto-refreshes on reload";
+document.getElementById("gen").textContent="rendered from the Research Store at load · reload for current data";
 </script>
 </body>
 </html>
