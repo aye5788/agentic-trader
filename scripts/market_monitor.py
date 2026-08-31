@@ -87,6 +87,9 @@ _LAST_NO_TARGET: frozenset = frozenset()
 _LAST_SOLO: frozenset = frozenset()
 _LAST_SOLO_REFUSED: frozenset = frozenset()
 _LAST_STALE_OWNERSHIP: bool = False
+# ⛔ AN UNREADABLE overrides.json IS NOT AN EMPTY ONE. Same fire-on-transition
+# pattern as the flags above. See the read below for why this exists.
+_LAST_OV_UNREADABLE: bool = False
 _LAST_TARGET_SUPPRESSED: frozenset = frozenset()   # journal on change, not every 15s tick
 
 
@@ -1605,10 +1608,46 @@ def check_once(cfg, client) -> int:
     # a CHANGE (see _LAST_UNPROTECTED/_LAST_SUSPECT_EMPTY above), matching the
     # _LAST_DROPPED/_LAST_HALTED fire-on-transition pattern rather than
     # re-pushing every 15s poll while the condition persists.
-    try:
-        _ov_early = json.loads((MON / "overrides.json").read_text())
-    except Exception:                                        # noqa: BLE001
-        _ov_early = {}
+    # ⛔ ABSENT AND UNREADABLE ARE NOT THE SAME THING, AND THIS TREATED THEM AS
+    # ONE. `except Exception: {}` made a TORN overrides.json indistinguishable
+    # from a book with no agent levels set — and {} means "apply no overrides",
+    # so every position silently reverts to the loop's looser thesis stop.
+    #
+    # MEASURED 2026-08-31 by making the file unreadable: all 12 held positions
+    # dropped to the book stop (MU 843.00 -> 813.259, LITE 810.85 -> 758.60),
+    # CRWD lost its stop entirely, every `set_by_agent` flag cleared, and NOTHING
+    # anywhere reported it — not the monitor, not positions(), not the dashboard.
+    # All three then agreed, and all three were correct: the protection really
+    # had reverted. That is the same outcome as the Sunday wipe (see
+    # slow_loop.py), reachable by one corrupt file, in silence.
+    #
+    # The fallback is UNCHANGED and stays fail-safe: with no usable overrides we
+    # keep the thesis stops, because refusing to watch would unprotect the book.
+    # What changes is that it is no longer SILENT.
+    _ov_path = MON / "overrides.json"
+    _ov_unreadable = False
+    if not _ov_path.exists():
+        _ov_early = {}                      # a real, ordinary state: none set
+    else:
+        try:
+            _ov_early = json.loads(_ov_path.read_text())
+        except Exception:                                    # noqa: BLE001
+            _ov_early = {}
+            _ov_unreadable = True
+    global _LAST_OV_UNREADABLE
+    if _ov_unreadable != _LAST_OV_UNREADABLE:
+        if _ov_unreadable:
+            print("  ⚠ overrides.json is PRESENT but UNREADABLE — every agent-set "
+                  "level is being ignored this tick; positions are on their "
+                  "thesis stops, which are looser")
+            notify("🚨 Agent-set stop levels cannot be read",
+                   "research_store/monitor/overrides.json exists but will not "
+                   "parse. Every position has reverted to the slow loop's thesis "
+                   "stop, which is LOOSER than the level the agent set. Nothing "
+                   "was lost and exits still fire, but the book is less protected "
+                   "than intended until the file is repaired or rewritten with "
+                   "set_levels.", tags="rotating_light")
+        _LAST_OV_UNREADABLE = _ov_unreadable
     # Candidates about to be armed on their own agent-set stop. Subtracted from
     # the ALERT below (not from the file) so a snapshot rewrite does not push a
     # spurious "unprotected" for a position the very next line protects. If
