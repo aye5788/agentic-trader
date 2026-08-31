@@ -35,10 +35,38 @@ SNAPSHOT = RS / "rh" / "positions.json"
 QUOTES = RS / "monitor" / "quotes.json"
 
 
-def _read_json(path: Path, default):
+# Names the files whose read FAILED on the most recent load() — including the
+# load() that returned None and therefore had no dict to carry them. Read it
+# immediately after load(); it is overwritten by the next call.
+LAST_READ_ERRORS: list = []
+
+
+def _read_json(path: Path, default, errors: list | None = None):
+    """Read JSON, distinguishing ABSENT from UNREADABLE.
+
+    ⛔ THESE ARE NOT THE SAME THING AND THIS TREATED THEM AS ONE. A bare
+    `except Exception: return default` makes a TORN file indistinguishable from
+    one that was never written, so a corrupted read silently becomes "there is
+    nothing here" and the caller proceeds on a fallback it does not know it is
+    using. Measured on 2026-08-31 elsewhere in this system: an unreadable
+    overrides.json reverted every stop in the book with nothing reporting it.
+
+    The FALLBACK IS UNCHANGED — callers get exactly what they got before, which
+    is why this is safe to add under ~25 consumers. The only difference is that
+    an unreadable file now NAMES ITSELF in `errors`.
+
+    ⛔ NO I/O, NO PUSH, NO notify IMPORT. This module is imported by the
+    PreToolUse order gate, which runs on the critical path of every order with a
+    ~0.1s budget, and by the monitor under system python3.10. Reporting is the
+    caller's job; this only records what happened.
+    """
+    if not path.exists():
+        return default                     # a real state, not a failure
     try:
         return json.loads(path.read_text())
-    except Exception:
+    except Exception:                      # noqa: BLE001 — present but unusable
+        if errors is not None:
+            errors.append(path.name)
         return default
 
 
@@ -47,17 +75,33 @@ def load(snapshot_path: Path = SNAPSHOT) -> dict | None:
 
     {"account_number", "as_of", "ts", "marked_at", "cash",
      "positions": {sym: {"qty","avg_cost","mark","value","pnl"}},
-     "invested", "account_value"}
+     "invested", "account_value", "read_errors"}
+
+    `read_errors` names any file that was PRESENT but would not parse. Empty is
+    normal. Non-empty means these numbers are standing on a fallback: a torn
+    quotes.json marks the whole book at cost basis, so the valuation is wrong
+    while looking ordinary. An ABSENT file is not listed -- that is a real state.
+    When this function returns None there is no dict to carry it, so the same
+    list is also left in the module-level `LAST_READ_ERRORS`.
 
     account_value = cash + marked invested when the snapshot carries cash
     (new schema); otherwise the snapshot's own (possibly stale) total.
     Returns None when no snapshot exists yet.
     """
-    snap = _read_json(snapshot_path, None)
+    global LAST_READ_ERRORS
+    _errors: list = []
+    snap = _read_json(snapshot_path, None, _errors)
     if not snap:
+        # ⛔ Returning None here is UNCHANGED behaviour and deliberate: consumers
+        # already handle it (the order gate then fails closed on a missing
+        # account value, which is correct). The loss is that a TORN snapshot and
+        # a never-written one are the same None, so nothing downstream can tell
+        # "the account is not set up yet" from "the file is corrupt". Recorded in
+        # the module-level marker below so a caller CAN ask.
+        LAST_READ_ERRORS = list(_errors)
         return None
     snap_ts = snap.get("ts") or ""
-    mq = _read_json(QUOTES, {})
+    mq = _read_json(QUOTES, {}, _errors)
     quote_ts = str(mq.get("ts") or "")
     quotes = mq.get("prices") or {}
 
@@ -138,7 +182,16 @@ def load(snapshot_path: Path = SNAPSHOT) -> dict | None:
         cash = account_value - invested
     freshness = (snapshot_freshness.status(snapshot_path, RS / "journal.jsonl")
                  if snapshot_path == SNAPSHOT else None)
+    LAST_READ_ERRORS = list(_errors)
     return {"account_number": snap.get("account_number"),
+            # ⛔ FILES THAT WERE PRESENT BUT WOULD NOT PARSE on this load.
+            # Empty is the normal case. NON-EMPTY MEANS THE NUMBERS BELOW ARE
+            # STANDING ON A FALLBACK: a torn quotes.json silently marks the whole
+            # book at COST BASIS, so account_value, invested, every pnl and every
+            # weight are wrong while looking entirely ordinary. An ABSENT file is
+            # NOT listed -- that is a real state (no snapshot yet, monitor has not
+            # quoted yet) and not an event.
+            "read_errors": list(_errors),
             # `ts` is the authoritative BROKER-HOLDINGS observation time.
             # `marked_at` may be newer merely because monitor quotes moved; it
             # must never be used to claim that ownership itself is fresh.
