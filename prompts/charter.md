@@ -23,7 +23,10 @@ number. Admissible, for example:
   citing it is the START of a reason, not the whole of one. Say what it means
   for the names in front of you.
 - `mandate_status()` reports a blocking criterion FAIL
-- `halt_status()` shows entries halted or the kill switch set
+- `halt_status()` shows `can_buy` false — the kill switch, SHADOW, `live_approved`,
+  halt-entries, or a drawdown breach. If it is the drawdown limb, check
+  `account_value_as_of` and reconcile FIRST: that limb judges the snapshot's NAV
+  against the stored peak, so a stale snapshot reads as a fall that never happened
 - no candidate is eligible — `candidates()` shows negative 12-month return across
   the board
 - `account()` shows buying power that cannot fund another position

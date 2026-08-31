@@ -1958,29 +1958,81 @@ def performance(limit: int = 30) -> str:
 def halt_status() -> str:
     """Are the switches on? Read this BEFORE planning orders.
 
-    Three independent controls, and they are not the same thing:
+    FIVE account-level controls, mirroring scripts/hooks/pretooluse_order_gate.py
+    in its own order of precedence. They are not the same thing:
       - kill switch (`research_store/HALT`): nothing is placed, not even a sell.
         Exits must be done by hand. The monitor keeps WATCHING and alerting.
+      - SHADOW (`research_store/SHADOW`): every order refused, INCLUDING sells,
+        while the loop is exercised end to end.
+      - live_approved: the master switch in config. BUYS ONLY — the gate allows
+        a sell with it off, because refusing an exit strands a position.
       - halt-entries (`research_store/HALT_ENTRIES`): new buys blocked, exits
         still go through.
-      - live_approved: the master switch in config. Off means alert-only.
+      - drawdown breach: buys refused past [governance] max_drawdown, measured
+        against the STORED peak. Exits stay armed.
 
-    An order that violates these is refused at placement, so without this tool
-    you would plan, be denied, and have no way to learn why.
+    ⛔ THIS TOOL EXISTS TO EXPLAIN A REFUSAL, so it must not under-report one.
+    It was written 2026-08-10 listing three switches, which was the complete set
+    THEN. SHADOW and the sells-exempt rule arrived 08-11 (9284639) and the
+    drawdown halt returned to the gate on 08-14 (9c8628e); neither updated this,
+    so it kept answering as though the older, smaller set were still all of it.
+
+    It cost a session. On 2026-08-31 the open session read can_buy TRUE, was
+    refused by the gate at -29.5%, could not reconcile the two, and raised
+    "NEEDS A HUMAN: is the gate's peak stale or corrupt?" The gate was right —
+    a $30 deposit had not reached positions.json — but the tool whose job is
+    explaining refusals did not know this refusal existed.
+
+    `account_value_used` / `account_value_as_of` are reported for exactly that
+    case: the drawdown limb judges the SNAPSHOT's NAV against the stored peak, so
+    a stale snapshot reads as a drawdown. Seeing which number, and how old, turns
+    that from a mystery into a reconciliation.
     """
     cfg = strat.load()
     kill = gov.kill_switch_active(cfg)
     entries = gov.halt_entries_active(cfg)
     live = gov.live_approved(cfg)
+    # same path the gate's SHADOW_FILE points at (pretooluse_order_gate.py:85)
+    shadow = (REPO / "research_store" / "SHADOW").exists()
+
+    # ⛔ drawdown_breach, NEVER gates()/drawdown_halt(): those call update_peak(),
+    # which WRITES. This is a read-only status tool and must not ratchet a live
+    # gate as a side effect of being consulted — the same rule the hook follows.
+    _v = marks.load() or {}
+    try:
+        _av = float(_v.get("account_value"))
+    except (TypeError, ValueError):
+        _av = float("nan")
+    try:
+        breached, dd = gov.drawdown_breach(_av, cfg)
+    except Exception:                                  # noqa: BLE001
+        breached, dd = True, float("nan")              # fail closed, like the gate
+
     return json.dumps({
         "kill_switch": kill,
-        "halt_entries": entries,
+        "shadow_mode": shadow,
         "live_approved": live,
-        "can_buy": bool(live and not kill and not entries),
-        "can_sell": bool(live and not kill),
-        "meaning": ("kill switch: nothing places, exits by hand. halt_entries: "
-                    "buys blocked, exits still place. live_approved off: "
-                    "alert-only, nothing places."),
+        "halt_entries": entries,
+        "drawdown_breach": bool(breached),
+        "drawdown": (round(dd, 4) if isinstance(dd, float) and math.isfinite(dd)
+                     else None),
+        "drawdown_limit": (cfg.get("governance") or {}).get("max_drawdown"),
+        "account_value_used": (_av if math.isfinite(_av) else None),
+        "account_value_as_of": _v.get("marked_at"),
+        # mirrors the gate's precedence exactly
+        "can_buy": bool(live and not kill and not entries and not shadow
+                        and not breached),
+        # ⛔ NOT gated on live_approved. The gate ALLOWS a sell with it off
+        # (pretooluse_order_gate.py:219-223, "Exits stay available"), and telling
+        # a session it cannot exit when it can is the more dangerous error: it
+        # strands a position the agent wanted out of.
+        "can_sell": bool(not kill and not shadow),
+        "meaning": ("kill switch: nothing places, exits by hand. SHADOW: nothing "
+                    "places, including sells. live_approved off / halt_entries / "
+                    "drawdown breach: BUYS blocked, exits still place. If "
+                    "drawdown_breach is true, check account_value_as_of before "
+                    "concluding the account fell — a stale snapshot reads as a "
+                    "drawdown, and refresh_broker_snapshot is the fix."),
     }, indent=2)
 
 
