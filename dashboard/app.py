@@ -291,7 +291,24 @@ def build_data() -> dict:
             "gov_breached": _gov_breached,
             "max_order_pct": g["max_order_pct"],
             "max_order": round(g["max_order_pct"] * acct_value, 2),
-            "cooldown": list(cooldown.keys())},
+            # ⛔ ACTIVE ONLY, AND THE RULE COMES FROM governance.
+            # This listed every KEY in cooldown.json. Nothing prunes that file --
+            # market_monitor.add_cooldown() writes and never deletes -- so it is
+            # a permanent accumulation, and the card reported 11 names "on
+            # cooldown" when one was. Two of them (EEM, XLK) were ETFs from the
+            # sleeve deleted on 2026-08-20, which the book can no longer buy at
+            # all. A guardrail panel overstating what is restricted is not a
+            # harmless cosmetic: it invites working around a limit that expired
+            # in July.
+            #
+            # Filtered through governance.cooldown_until() rather than comparing
+            # dates here, because that function IS the rule the order gate
+            # applies (pretooluse_order_gate.py:267) -- a second comparison in
+            # this file could disagree with the gate about what is restricted.
+            # It reads only, and fails open exactly as the gate does.
+            "cooldown": [{"symbol": _s, "until": _u} for _s, _u in
+                         sorted((k, gov.cooldown_until(k)) for k in cooldown)
+                         if _u]},
         "realized": _read_json(RS / "rh" / "realized.json", None),
         "health": _health_rows(),
         "pending": _pending_universe_proposal(),

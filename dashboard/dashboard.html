@@ -269,7 +269,7 @@ document.getElementById("guardRows").innerHTML=
    <div class="row"><span class="k">Live trading</span><span class="v" style="color:var(--${DATA.flags.live_approved?'pos':'warn'})">${DATA.flags.live_approved?'ARMED':'PAUSED'}</span></div>
    <div class="row"><span class="k">Kill-switch</span><span class="v" style="color:var(--${DATA.flags.kill_switch?'neg':'pos'})">${DATA.flags.kill_switch?'ENGAGED — places nothing, stops NOT firing':'clear'}</span></div>
    <div class="row"><span class="k">Halt-entries</span><span class="v" style="color:var(--${DATA.flags.halt_entries?'warn':'pos'})">${DATA.flags.halt_entries?'ENGAGED — no new buys, stops still armed':'clear'}</span></div>
-   <div class="row"><span class="k">Cooldown (stopped-out)</span><span class="v">${(g.cooldown&&g.cooldown.length)?g.cooldown.join(', '):'none'}</span></div>
+   <div class="row"><span class="k">Cooldown (stopped-out)<span class="sub">active only &middot; expired entries are not shown</span></span><span class="v">${(g.cooldown&&g.cooldown.length)?g.cooldown.map(c=>c.symbol+' \u2192 '+c.until).join(', '):'none'}</span></div>
    <div class="row"><span class="k">Realized P&amp;L (30d)</span><span class="v">${DATA.realized?`<span style="color:var(--${(DATA.realized.total||0)>=0?'pos':'neg'})">$${fmt(DATA.realized.total)}</span> · ${DATA.realized.days?DATA.realized.days.reduce((a,x)=>a+(x.trades||0),0):0} closes`:'— (no exits yet)'}</span></div>`;
 
 // scheduled-job liveness. This is the standing counterpart to the one-shot phone
