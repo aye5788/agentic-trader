@@ -70,10 +70,24 @@ SKIPPED = "__skipped__"
 HALTED = "__halted__"
 
 # Kill-switch path, mirroring [governance].kill_switch_file in config/strategy.toml.
-# Hardcoded rather than read from the config on purpose: this module imports nothing
-# from src/ and must stay importable under system python3.10 (no tomllib), because
-# the dashboard and the 08:00 cron check run on different interpreters. If the
-# config value is ever changed from the default, change it here too.
+# Hardcoded rather than read from the config on purpose: this module keeps its
+# imports to the standard library plus snapshot_freshness, and must stay
+# importable under system python3.10 (no tomllib). If the config value is ever
+# changed from the default, change it here too.
+#
+# ⛔ WHY 3.10 STILL, and it is NOT the reason this comment used to give. It said
+# "the dashboard and the 08:00 cron check run on different interpreters"; both
+# now run under .venv 3.12, so that reason is stale. The constraint survives
+# because scripts/market_monitor.py runs under system python3.10 (the moomoo SDK
+# is installed only there) and this is exactly the module a stop watcher might
+# reasonably need. The cost of keeping it is one line; the cost of finding out
+# the hard way is a monitor that cannot import its own health model.
+#
+# It had already lapsed: a conditional spanning newlines inside an f-string
+# (PEP 701, 3.12+) at the snapshot_identity branch made this file fail to compile
+# under 3.10 for an unknown period, while this very comment promised it did not.
+# Nothing detected that, because nothing on the box runs it under 3.10 today.
+# If you add syntax here, compile it under BOTH interpreters, not just .venv.
 KILL_SWITCH = "research_store/HALT"
 
 # A job whose log advanced while its output did not has RUN AND FAILED — the exact
@@ -483,12 +497,17 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
                              f"account {ident.get('account') or '?'} confirmed "
                              f"by the broker payload"))
         else:
+            # ⛔ HOISTED OUT OF THE f-STRING ON PURPOSE. A conditional spanning
+            # newlines INSIDE {...} is PEP 701 syntax, accepted only on 3.12+.
+            # Written that way, this module stopped compiling under system
+            # python3.10 while its own docstring still promised it did — and
+            # nothing caught it, because everything that runs it today is 3.12.
+            _pinned = ("the operator-pinned account " + ident["account"]
+                       if ident.get("account")
+                       else "no account at all (none pinned)")
             out.append(Check("snapshot_identity", "Snapshot account identity",
                              None, "unverified",
-                             f"identity rests on "
-                             f"{'the operator-pinned account ' + ident['account']
-                                if ident.get('account')
-                                else 'no account at all (none pinned)'}, not on "
+                             f"identity rests on {_pinned}, not on "
                              f"the broker's own bytes — this surface returns no "
                              f"account number to confirm it against. No operator "
                              f"action exists; the mismatch guard still refuses "
