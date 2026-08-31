@@ -127,7 +127,7 @@
       </div>
     </main>
     <aside>
-      <section class="card"><div class="hd"><h2>Last run — plan vs. actual</h2><span class="meta" id="planMeta"></span></div>
+      <section class="card"><div class="hd"><h2>Last execution</h2><span class="meta" id="planMeta"></span></div>
         <div class="rows" id="planRows"></div>
       </section>
       <section class="card"><div class="hd"><h2>Guardrails</h2><span class="meta">Layer 5</span></div>
@@ -221,27 +221,26 @@ if(pend){
     `<div class="row"><span class="k" style="font-style:italic">Approve in a Claude session: "apply the pending universe proposal".</span><span class="v"></span></div>`;
 }
 
-// plan vs. actual
-const plan=DATA.plan,ex=DATA.last_execution;
+// Last execution. The ORDER-PLAN half was removed 2026-08-31: order_plan.json
+// was written by the fast loop, deleted 2026-08-14, and the panel had been
+// rendering a seventeen-day-old plan as current -- including "BLOCKED LITE"
+// directly above a holdings table showing LITE held.
+//
+// ⛔ The execution used to render only INSIDE the `if(plan)` branch, so with no
+// plan the card printed "No order plan yet" and silently dropped the fill it
+// did have. The live half now stands on its own.
+const ex=DATA.last_execution;
 const planRows=document.getElementById("planRows"),planMeta=document.getElementById("planMeta");
-if(!plan){planRows.innerHTML=`<div class="empty">No order plan yet.</div>`;}
+if(!ex){planMeta.textContent="";planRows.innerHTML=`<div class="empty">No execution recorded yet.</div>`;}
 else{
-  planMeta.textContent="planned "+((plan.generated||"").replace("T"," ").replace("+00:00","")||plan.as_of||"");
+  planMeta.textContent=(ex.ts||"").replace("T"," ").slice(0,16);
   let h="";
-  if(plan.halted.length)h+=prow("⛔ HALTED",plan.halted.join(" · "),"neg");
-  if(!plan.approved.length&&!plan.review.length&&!plan.blocked.length)
-    h+=prow("Plan","no orders — book matches targets","pos");
-  plan.approved.forEach(o=>h+=prow(`${o.side.toUpperCase()} ${o.symbol}`,`$${fmt(o.amount)} · ${o.reason}`));
-  plan.review.forEach(o=>h+=prow(`⚖ REVIEW ${o.symbol}`,`$${fmt(o.amount)} · hit ${o.tier||"target"} · knife floor ${fmt(o.floor)}`,"warn"));
-  plan.blocked.forEach(o=>h+=prow(`✕ BLOCKED ${o.symbol}`,(o.why||"").slice(0,60),"neg"));
-  if(ex){
-    const ts=(ex.ts||"").replace("T"," ").slice(0,16);
-    h+=prow("— executed —",ts||"");
-    (ex.fills||[]).forEach(f=>h+=prow(`✓ ${(f.side||"").toUpperCase()} ${f.symbol}`,
-      `$${fmt(f.amount)}${f.avg_price?` @ ${fmt(f.avg_price)}`:""}${f.status?` · ${f.status}`:""}`,"pos"));
-    (ex.reentry_decisions||[]).forEach(d=>h+=prow(`⚖ ${d.symbol}: ${d.decision}`,(d.reason||"").slice(0,60),"warn"));
-    if(ex.halt)h+=prow("halt",(ex.halt||"").slice(0,80),"neg");
-  }
+  (ex.fills||[]).forEach(f=>h+=prow(`✓ ${(f.side||"").toUpperCase()} ${f.symbol}`,
+    `$${fmt(f.amount)}${f.avg_price?` @ ${fmt(f.avg_price)}`:""}${f.status?` · ${f.status}`:""}`,"pos"));
+  (ex.reentry_decisions||[]).forEach(d=>h+=prow(`⚖ ${d.symbol}: ${d.decision}`,(d.reason||"").slice(0,60),"warn"));
+  if(ex.halt)h+=prow("halt",(ex.halt||"").slice(0,80),"neg");
+  // an execution event with no fills listed is still a fact worth showing
+  if(!h)h=prow("execution recorded","no fills itemised in the journal entry");
   planRows.innerHTML=h;
 }
 

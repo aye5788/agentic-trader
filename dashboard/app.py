@@ -192,8 +192,19 @@ def build_data() -> dict:
     holdings.sort(key=lambda r: (by_sym[r["ticker"]].rank
                                  if r["ticker"] in by_sym else 9_999))
 
-    # plan vs. actual: the last computed order plan + the last execution event
-    plan = _read_json(RS / "rh" / "order_plan.json", {})
+    # ⛔ THE ORDER-PLAN HALF IS GONE (2026-08-31). research_store/rh/order_plan.json
+    # was written by scripts/fast_loop.py, DELETED 2026-08-14 with the procedural
+    # executor. Nothing has written it since; the file on disk is frozen at
+    # 2026-08-14 and the card rendered it as current for seventeen days -- most
+    # recently "BLOCKED LITE", a rule-out lifted long ago, directly above a
+    # holdings table showing LITE held. A panel that contradicts the live table
+    # beside it is worse than an absent one: a reader has to know which to
+    # distrust. There is no replacement artifact because sessions now REASON
+    # rather than emit a plan; rebuilding this from agent_decision events would
+    # be a different card, not a repair, and is a decision for the principal.
+    #
+    # What survives is the half that was never stale: the last execution, read
+    # from the journal.
     recent = _tail_jsonl(RS / "journal.jsonl", 60)
     last_exec = next((e for e in reversed(recent) if e.get("event") == "execution"), None)
 
@@ -258,19 +269,6 @@ def build_data() -> dict:
                   "halt_entries": (RS / "HALT_ENTRIES").exists(),
                   "monitor_book": mstate.get("book_asof")},
         "holdings": holdings,
-        "plan": {
-            "generated": plan.get("generated"), "as_of": plan.get("as_of"),
-            "live_approved": plan.get("live_approved"),
-            "halted": plan.get("halted") or [],
-            "approved": [{k: o.get(k) for k in ("symbol", "side", "amount", "reason")}
-                         for o in plan.get("approved", [])],
-            "review": [{"symbol": o.get("symbol"), "amount": o.get("amount"),
-                        "tier": (o.get("reentry") or {}).get("tier"),
-                        "floor": (o.get("reentry") or {}).get("knife_floor")}
-                       for o in plan.get("review", [])],
-            "blocked": [{"symbol": o.get("symbol"), "why": o.get("blocked")}
-                        for o in plan.get("blocked", [])],
-        } if plan else None,
         "last_execution": {
             "ts": last_exec.get("ts") or last_exec.get("as_of"),
             "fills": last_exec.get("fills", last_exec.get("placed", [])),
