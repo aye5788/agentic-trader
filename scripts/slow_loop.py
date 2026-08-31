@@ -834,19 +834,45 @@ def main() -> None:
     write_product(product, mandate=strat.risk_mandate(cfg))
     print("\nwritten to Research Store (current.json + journal)")
 
-    # Intraday risk-review overrides/intents are strictly INTRA-WEEK overlays: the
-    # fresh weekly geometry supersedes them. Clear them so a Tuesday-tightened stop
-    # is never re-applied on top of next week's rebuilt levels. (spec §7) BUT this
-    # script also runs nightly (Mon-Fri 18:00, per deploy/crontab.template) for the
-    # daily recompute — that run must NOT clear overrides, or a stop the 15:45 risk
-    # review tightened earlier the same day would be wiped before the next open.
-    # Only the Sunday 20:00 weekly rebuild clears (weekday(): Mon=0 ... Sun=6).
-    if date.today().weekday() == 6:
-        for _f in ("overrides.json", "deferred_intents.json"):
-            try:
-                (REPO / "research_store" / "monitor" / _f).unlink()
-            except FileNotFoundError:
-                pass
+    # ⛔ THE SUNDAY OVERRIDE WIPE IS GONE (2026-08-31). DO NOT REINSTATE IT.
+    #
+    # This block used to unlink research_store/monitor/overrides.json and
+    # deferred_intents.json on every Sunday rebuild, per the 2026-07-14
+    # intraday-risk-management spec §7 ("overrides are intra-week ... the weekly
+    # rebuild clears that week's overrides"). That rule was written for
+    # scripts/risk_review.py, which wrote overrides at 15:45 and was RETIRED into
+    # the sessions on 2026-08-13. Its other expiry mechanism — the timed pruner —
+    # died with it and was noticed; this one did not, and outlived by two weeks
+    # the decision that superseded it.
+    #
+    # WHAT IT CONTRADICTED. Levels no longer expire (principal, 2026-08-17):
+    # stated in decide.merge_levels ("protection could vanish on a schedule
+    # nobody chose"), in market_monitor.apply_overrides, in src/level_rules.py,
+    # in agent_env/server.py — and, bindingly, in prompts/charter.md:179, which
+    # tells the agent in its own instructions "A level you set outlives the
+    # position. Levels never expire." The file it names was being deleted every
+    # Sunday night. overrides.json is no longer a risk-review overlay; it is
+    # where the agent's own set_levels decisions live.
+    #
+    # WHAT IT COST, measured. The wipe ran Sun 2026-08-30 20:00:43 and took the
+    # levels on all 12 held positions with it, loosening 11 stops (LITE −6.4%,
+    # LRCX −5.4%, FCX −5.0%, MU −3.5%) and pushing every take-profit further
+    # out — a protection change nobody decided. It had run every Sunday before
+    # that: on Mon 2026-08-25 the session re-set levels on eight positions under
+    # the heading "FIRST DECIDED EXIT PLAN ON THIS POSITION", re-deriving work
+    # the previous week had already done and which this line had erased. The
+    # agent is stateless and could not see why its own take-profits kept
+    # reverting to formula geometry.
+    #
+    # A level now ends the way the charter says it does: when the agent changes
+    # it, or clears it (clear_levels, part of every exit), or when
+    # apply_overrides refuses a stop at or above the live price. Not on a timer,
+    # and not on a calendar.
+    #
+    # deferred_intents.json went with it: risk_review was its only writer, so
+    # this was deleting a file nothing has created since 2026-08-13. A cleanup
+    # for a mechanism that no longer exists reads as live to the next reader —
+    # the same defect class as the ETF sleeve's leftover table.
 
     # --- weekly stale-seed watch accrual (universe maintenance, Piece 1) ---
     # ⚠️ GATED ON THE SCREEN DAY since 2026-08-20. This block ran on EVERY slow
