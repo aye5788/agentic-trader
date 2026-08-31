@@ -145,7 +145,7 @@ class Check:
 # for the ones carrying a per-unit or per-finding identifier.
 DERIVED_KEYS = frozenset({
     "unprotected_positions", "unrecorded_fills", "snapshot_identity",
-    "positions_snapshot", "unreadable_artifacts",
+    "positions_snapshot", "unreadable_artifacts", "py310_compatible",
 })
 KEY_PREFIXES = ("deployed_", "repo_check:")
 
@@ -458,6 +458,21 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
     # file silently becomes "there is nothing here" and protection reverts with
     # nothing reporting it. `unreadable` is deliberately NOT in NON_ALERTING:
     # this pages.
+    _py = probes.get("py310_compatible")
+    if _py == SKIPPED:
+        out.append(Check("py310_compatible", "Monitor interpreter (py3.10)",
+                         None, "unknown", "not checked here"))
+    elif _py:
+        _f = "; ".join(f"{rel}: {err}" for rel, err in _py[:3])
+        out.append(Check(
+            "py310_compatible", "Monitor interpreter (py3.10)", None, "blocked",
+            f"{len(_py)} module(s) the stop watcher imports will not parse under "
+            f"{PY310}. THE MONITOR CANNOT START ON THIS CODE. {_f}"))
+    elif _py is not None:
+        out.append(Check("py310_compatible", "Monitor interpreter (py3.10)",
+                         None, "ok",
+                         "every module the monitor imports parses under python3.10"))
+
     _bad = probes.get("unreadable_artifacts")
     if _bad:
         _names = ", ".join(f"{rel.split('/')[-1]} ({label})" for rel, label in _bad)
@@ -875,6 +890,58 @@ def _unreadable_probe(root: pathlib.Path) -> list:
     return bad
 
 
+# The stop watcher runs under system python3.10 (the moomoo SDK is installed only
+# there); everything else runs .venv 3.12. A module the monitor imports that uses
+# 3.12-only syntax is not a style problem — it is a stop watcher that cannot
+# start. src/health.py itself had already lapsed this way (a PEP 701 f-string)
+# while its own comment promised it had not, and nothing noticed, because nothing
+# on this box runs these files under 3.10 until the monitor does.
+PY310 = "/usr/bin/python3"
+PY310_ENTRY = "scripts/market_monitor.py"
+
+
+def _py310_probe(root: pathlib.Path, run: bool) -> object:
+    """Can the monitor's interpreter parse everything the monitor imports?
+
+    -> [] when clean, [(rel, error)] when not, SKIPPED when not run.
+
+    ⛔ MUST USE THE REAL 3.10 BINARY. Compiling in-process would use THIS
+    interpreter's parser and pass on exactly the syntax being looked for, which
+    is worse than no check: it would report clean forever.
+
+    ⛔ SKIPPED ON THE DASHBOARD. Measured 3.5s for the closure — fine once a day,
+    far too slow on the critical path of a page render. It rides `use_network`,
+    which is already the flag meaning "the expensive probes are off here".
+
+    The file list is DERIVED from deployed.import_closure(), not hardcoded: a
+    hardcoded list stops covering whatever gets imported next, which is the same
+    drift this check exists to catch.
+    """
+    if not run:
+        return SKIPPED
+    try:
+        sys.path.insert(0, str(root / "src"))
+        import deployed                                  # noqa: PLC0415
+        entry = root / PY310_ENTRY
+        if not entry.exists():
+            return []
+        files = sorted(deployed.import_closure(entry, root))
+    except Exception:                                    # noqa: BLE001
+        return SKIPPED                                   # could not enumerate -> not a finding
+    bad = []
+    for f in files:
+        try:
+            r = subprocess.run([PY310, "-m", "py_compile", str(f)],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode:
+                last = [l for l in (r.stderr or "").strip().splitlines() if l.strip()]
+                bad.append((str(pathlib.Path(f).relative_to(root)),
+                            last[-1] if last else "compile failed"))
+        except Exception:                                # noqa: BLE001
+            continue
+    return bad
+
+
 def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dict:
     """Collect the timestamps evaluate() judges. All failures degrade to None."""
     root = root or REPO
@@ -910,6 +977,8 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "deployed_code": _deployed_probe(root),
         # Content, not liveness: a file can be freshly written and unparseable.
         "unreadable_artifacts": _unreadable_probe(root),
+        # Expensive: rides use_network so the dashboard render skips it.
+        "py310_compatible": _py310_probe(root, use_network),
     }
 
 
