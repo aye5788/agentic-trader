@@ -131,7 +131,7 @@ class Check:
 # for the ones carrying a per-unit or per-finding identifier.
 DERIVED_KEYS = frozenset({
     "unprotected_positions", "unrecorded_fills", "snapshot_identity",
-    "positions_snapshot",
+    "positions_snapshot", "unreadable_artifacts",
 })
 KEY_PREFIXES = ("deployed_", "repo_check:")
 
@@ -438,6 +438,26 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
     # what we SEND to get_equity_positions, never what the broker echoes back.
     # Deriving it would make the payload assert the very thing being verified
     # and turn the mismatch guard into a formality that always passes.
+    # ⛔ PRESENT-BUT-UNREADABLE, which is NOT the same as absent. See
+    # _unreadable_probe: every reader in this system catches a parse error and
+    # substitutes the same empty default the absent case produces, so a corrupt
+    # file silently becomes "there is nothing here" and protection reverts with
+    # nothing reporting it. `unreadable` is deliberately NOT in NON_ALERTING:
+    # this pages.
+    _bad = probes.get("unreadable_artifacts")
+    if _bad:
+        _names = ", ".join(f"{rel.split('/')[-1]} ({label})" for rel, label in _bad)
+        out.append(Check(
+            "unreadable_artifacts", "Unreadable critical files", None, "unreadable",
+            f"{len(_bad)} file(s) present but will not parse: {_names}. Readers "
+            "fall back to an empty default, so levels/valuation may silently be "
+            "standing on the loop's numbers instead of the agent's — repair or "
+            "rewrite before relying on any figure derived from them."))
+    elif _bad is not None:
+        out.append(Check("unreadable_artifacts", "Unreadable critical files",
+                         None, "ok",
+                         f"all {len(CRITICAL_ARTIFACTS)} critical artifacts parse"))
+
     ident = probes.get("snapshot_identity")
     if ident is not None and ident.get("unreadable"):
         # The probe FAILED. Not a finding and not a heal — see the probe's
@@ -783,6 +803,59 @@ def _deployed_probe(root: pathlib.Path) -> list | None:
         return None
 
 
+# The artifacts where being wrong costs money or protection. A file NOT in this
+# list is research data: wrong is cheap and a page about it is noise.
+CRITICAL_ARTIFACTS = (
+    ("research_store/rh/positions.json",        "broker snapshot"),
+    ("research_store/monitor/overrides.json",   "agent-set levels"),
+    ("research_store/monitor/quotes.json",      "monitor quotes"),
+    ("research_store/monitor/cooldown.json",    "stop-out cooldowns"),
+    ("research_store/monitor/enforcement.json", "enforced levels"),
+    ("research_store/current.json",             "the book"),
+    ("research_store/flows.jsonl",              "external cash flows"),
+)
+
+
+def _unreadable_probe(root: pathlib.Path) -> list:
+    """Which critical artifacts are PRESENT but will not parse. -> [(rel, label)]
+
+    ⛔ ABSENT IS NOT A FINDING. A missing file is a real state — no levels set,
+    the monitor has not quoted yet, no flows recorded — and paging about it is
+    the cry-wolf noise this module exists to avoid. PRESENT-BUT-UNREADABLE is a
+    different thing entirely, and until 2026-08-31 nothing in this system could
+    tell the two apart: every reader caught the parse error and substituted the
+    same empty default the absent case produces.
+
+    That is not theoretical. Measured on 2026-08-31: an unreadable overrides.json
+    silently reverted all 12 held positions from their agent-set stops to the
+    loop's looser thesis stops (MU 843.00 -> 813.259), left one position with no
+    stop at all, and was invisible to the monitor, positions() and the dashboard
+    alike — because all three then AGREED, and all three were CORRECT. The
+    protection really had gone. No cross-check between surfaces can find that;
+    only asking whether the file itself is readable can.
+
+    Never raises: a probe that takes health down teaches nothing.
+    """
+    bad = []
+    for rel, label in CRITICAL_ARTIFACTS:
+        path = root / rel
+        try:
+            if not path.exists():
+                continue
+            text = path.read_text()
+            if rel.endswith(".jsonl"):
+                for line in text.splitlines():
+                    if line.strip():
+                        json.loads(line)
+            else:
+                json.loads(text)
+        except OSError:
+            bad.append((rel, f"{label} — unreadable"))
+        except Exception:                       # noqa: BLE001 — malformed content
+            bad.append((rel, label))
+    return bad
+
+
 def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dict:
     """Collect the timestamps evaluate() judges. All failures degrade to None."""
     root = root or REPO
@@ -816,6 +889,8 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         # writing fresh artifacts, so every other check reads green while the
         # process enforces last week's logic. See src/deployed.py.
         "deployed_code": _deployed_probe(root),
+        # Content, not liveness: a file can be freshly written and unparseable.
+        "unreadable_artifacts": _unreadable_probe(root),
     }
 
 
