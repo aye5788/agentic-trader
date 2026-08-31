@@ -131,7 +131,7 @@
         <div class="rows" id="planRows"></div>
       </section>
       <section class="card"><div class="hd"><h2>Guardrails</h2><span class="meta">Layer 5</span></div>
-        <div class="meter"><div class="lab"><span>Drawdown from peak</span><b id="ddLab"></b></div><div class="gauge"><i id="ddBar"></i></div></div>
+        <div class="meter"><div class="lab"><span>Drawdown from peak <span style="color:var(--faint)">&middot; mandate, blocking</span></span><b id="ddLab"></b></div><div class="gauge"><i id="ddBar"></i></div></div>
         <div class="rows" id="guardRows"></div>
       </section>
       <section class="card"><div class="hd"><h2>Regime floor</h2><span class="meta">mechanical</span></div>
@@ -246,12 +246,26 @@ else{
 }
 
 // guardrails
-const g=DATA.guardrails||{};const dd=(g.drawdown||0)*100,lim=(g.dd_limit||.25)*100;
-document.getElementById("ddLab").textContent=`${dd.toFixed(1)}% / ${lim.toFixed(0)}%`;
-const ddi=document.getElementById("ddBar");ddi.style.width=Math.min(100,Math.abs(dd)/lim*100||2)+"%";
-ddi.style.background=Math.abs(dd)>=lim?"var(--neg)":Math.abs(dd)>lim*.6?"var(--warn)":"var(--pos)";
+const g=DATA.guardrails||{};
+// ⛔ The limit MUST come from the same criterion as the value. This used to fall
+// back to .25 -- the GOVERNANCE entries-halt threshold -- against a value
+// measured from the MANDATE's peak, so the bar mixed two criteria. No default
+// now: an unmeasurable drawdown reads as unknown rather than borrowing the other
+// criterion's number.
+const dd=(g.drawdown==null?null:g.drawdown*100),lim=(g.dd_limit==null?null:g.dd_limit*100);
+const ddi=document.getElementById("ddBar");
+if(dd==null||lim==null){
+  document.getElementById("ddLab").textContent=g.dd_state==="INSUFFICIENT_DATA"?"not measurable":"—";
+  ddi.style.width="2%";ddi.style.background="var(--faint)";
+}else{
+  document.getElementById("ddLab").textContent=`${dd.toFixed(1)}% / ${lim.toFixed(0)}%`;
+  ddi.style.width=Math.min(100,Math.abs(dd)/lim*100||2)+"%";
+  ddi.style.background=Math.abs(dd)>=lim?"var(--neg)":Math.abs(dd)>lim*.6?"var(--warn)":"var(--pos)";
+}
+if(g.dd_reason)document.getElementById("ddLab").title=g.dd_reason;
 document.getElementById("guardRows").innerHTML=
-  `<div class="row"><span class="k">Max order size</span><span class="v">$${fmt(g.max_order)} · ${Math.round((g.max_order_pct||0)*100)}%</span></div>
+  `<div class="row"><span class="k">Entries-halt drawdown<span class="sub">governance peak &middot; blocks new buys only</span></span><span class="v" style="color:var(--${DATA.guardrails.gov_breached?'neg':'pos'})">${DATA.guardrails.gov_drawdown==null?'—':(DATA.guardrails.gov_drawdown*100).toFixed(1)+'% / '+Math.round((DATA.guardrails.gov_dd_limit||0)*100)+'%'}</span></div>
+   <div class="row"><span class="k">Max order size</span><span class="v">$${fmt(g.max_order)} · ${Math.round((g.max_order_pct||0)*100)}%</span></div>
    <div class="row"><span class="k">Live trading</span><span class="v" style="color:var(--${DATA.flags.live_approved?'pos':'warn'})">${DATA.flags.live_approved?'ARMED':'PAUSED'}</span></div>
    <div class="row"><span class="k">Kill-switch</span><span class="v" style="color:var(--${DATA.flags.kill_switch?'neg':'pos'})">${DATA.flags.kill_switch?'ENGAGED — places nothing, stops NOT firing':'clear'}</span></div>
    <div class="row"><span class="k">Halt-entries</span><span class="v" style="color:var(--${DATA.flags.halt_entries?'warn':'pos'})">${DATA.flags.halt_entries?'ENGAGED — no new buys, stops still armed':'clear'}</span></div>

@@ -16,6 +16,8 @@ from flask import Flask, Response, request
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 import health                                         # noqa: E402
+import governance as gov                              # noqa: E402
+import mandate                                        # noqa: E402
 import marks                                          # noqa: E402
 import strategy as strat                              # noqa: E402
 from agent_env import state                           # noqa: E402
@@ -196,16 +198,48 @@ def build_data() -> dict:
     last_exec = next((e for e in reversed(recent) if e.get("event") == "execution"), None)
 
     equity = _tail_jsonl(RS / "history" / "equity.jsonl", 400)
-    # Peak sourced from the audited equity.jsonl series, NOT from governance's
-    # research_store/governance/state.json peak_value (FIX A, 2026-08-10): that
-    # tracker is sampled at an arbitrary fast-loop moment and has already
-    # drifted from this series (82.22 there vs 81.99 here on 2026-08-10). The
-    # dashboard must show the same drawdown number the mandate uses, not a
-    # second, silently-competing one. See src/mandate.py drawdown()'s docstring.
-    equity_vals = [e.get("value") for e in equity
-                   if isinstance(e.get("value"), (int, float))]
-    peak = float(max(equity_vals)) if equity_vals else acct_value
-    dd = 0.0 if peak <= 0 else min(0.0, acct_value / peak - 1.0)
+    # ⛔ TWO DIFFERENT DRAWDOWNS EXIST, AND THIS CARD USED TO MIX THEM.
+    # Until 2026-08-31 it measured against max(equity.jsonl) — correct, and for
+    # the right reason (FIX A, 2026-08-10: governance's persisted peak_value is
+    # sampled at an arbitrary moment and had already drifted, 82.22 vs 81.99) —
+    # and then rendered that number against `[governance] max_drawdown`, which
+    # belongs to the OTHER measure and its OTHER peak. It read "-13.1% / 25%",
+    # implying the entries-halt was half-consumed, while the gate that actually
+    # halts entries read -1.7%. Numerator from one criterion, denominator from
+    # another.
+    #
+    #   MANDATE drawdown   peak = max(equity.jsonl), limit [drawdown] max_pct
+    #                      (0.20). BLOCKING — this is the one that can flatten
+    #                      the book. Close-to-close only.
+    #   GOVERNANCE halt    peak = governance/state.json, limit [governance]
+    #                      max_drawdown (0.25). Blocks NEW ENTRIES only.
+    #                      config/mandate.toml:53 states the difference outright.
+    #
+    # Both are now shown, each against its own limit.
+    #
+    # Read through mandate.drawdown() rather than recomputed here: the previous
+    # inline version also measured INTRADAY, dividing live marks by the peak,
+    # which that function's docstring forbids for this criterion ("an intraday
+    # measure fires the flatten on noise"). It is close-to-close by definition.
+    # The FULL series is read, not the 400-point chart tail — the peak is an
+    # all-time high-water mark and a tail would silently understate it once the
+    # log outgrows the window.
+    _eq_all = _tail_jsonl(RS / "history" / "equity.jsonl", 10_000_000)
+    try:
+        dd_m = mandate.drawdown([e.get("value") for e in _eq_all],
+                                mandate.load()["drawdown"]["max_pct"])
+    except Exception as e:                            # noqa: BLE001 — page > check
+        dd_m = {"value": None, "limit": None, "state": "INSUFFICIENT_DATA",
+                "reason": f"could not evaluate: {type(e).__name__}"}
+    # ⛔ drawdown_breach, NEVER gates()/drawdown_halt(): those call update_peak(),
+    # which WRITES. A page that ratchets a live gate every time it is rendered is
+    # the same defect the PreToolUse hook was built to avoid. breach() is also
+    # the variant the hook itself judges on, so this shows what the authority
+    # will decide, not an approximation of it.
+    try:
+        _gov_breached, _gov_dd = gov.drawdown_breach(acct_value, cfg)
+    except Exception:                                 # noqa: BLE001
+        _gov_breached, _gov_dd = None, None
     cooldown = _read_json(RS / "monitor" / "cooldown.json", {})
     mstate = _read_json(RS / "monitor" / "state.json", {})
 
@@ -244,10 +278,20 @@ def build_data() -> dict:
             "halt": last_exec.get("halt_reason"),
         } if last_exec else None,
         "equity": [{"date": e.get("date"), "value": e.get("value")} for e in equity],
-        "guardrails": {"drawdown": round(dd, 4), "dd_limit": g["max_drawdown"],
-                       "max_order_pct": g["max_order_pct"],
-                       "max_order": round(g["max_order_pct"] * acct_value, 2),
-                       "cooldown": list(cooldown.keys())},
+        "guardrails": {
+            # the BLOCKING mandate criterion, against ITS limit
+            "drawdown": (round(dd_m["value"], 4) if dd_m.get("value") is not None
+                         else None),
+            "dd_limit": dd_m.get("limit"),
+            "dd_state": dd_m.get("state"),
+            "dd_reason": dd_m.get("reason"),
+            # the entries-halt: different peak, different limit, different action
+            "gov_drawdown": (round(_gov_dd, 4) if _gov_dd is not None else None),
+            "gov_dd_limit": g["max_drawdown"],
+            "gov_breached": _gov_breached,
+            "max_order_pct": g["max_order_pct"],
+            "max_order": round(g["max_order_pct"] * acct_value, 2),
+            "cooldown": list(cooldown.keys())},
         "realized": _read_json(RS / "rh" / "realized.json", None),
         "health": _health_rows(),
         "pending": _pending_universe_proposal(),
