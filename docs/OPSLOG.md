@@ -15,9 +15,17 @@ Written to be QUOTED at the next incident, because the next one will start the
 same way: a notification that reads like a bug report, and a reasonable question
 about whether the machine is still trustworthy.
 
-**The answer on the day was NO, and that answer was arrived at by reading
-artifacts, not by reassurance.** What follows is the evidence and the two real
-defects the question flushed out.
+Aaron asked the question directly, more than once, and the answer given was:
+
+> **"No — the system isn't broken."**
+>
+> — the assistant, 2026-09-01, after reading the day's journal entries, the
+> broker snapshot, the rendered charter, the health state and the workflow
+> history. Quote this. It was arrived at from artifacts, not from reassurance,
+> and the evidence for it is below.
+
+What follows is that evidence, and the two real defects the question flushed
+out.
 
 ### What was actually true on 2026-09-01
 
