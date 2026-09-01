@@ -174,6 +174,35 @@ jobs:
         timeout-minutes: 40   # see the job-level cap above — this one must fire first
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # ⛔ WITHOUT THIS THE DISPATCHED ENTRANCE CANNOT RUN AT ALL, and it
+          # never once did: repository_dispatch fired twice (2026-08-13,
+          # 2026-08-31) and both runs died in the action's FIRST call, before
+          # reading a single file —
+          #   "Workflow initiated by non-human actor: github-actions (type: Bot)"
+          # Agent mode (any run with a `prompt:`) opens prepareAgentMode with
+          # checkHumanActor, whose default `allowed_bots: ""` admits NO bot. The
+          # dispatch is POSTed by validate.yml with GITHUB_TOKEN, so the run's
+          # actor IS github-actions[bot] — i.e. everything validate.yml detects
+          # off-box, INCLUDING the dead-man's switch that is the one check
+          # surviving the droplet's death, could file an issue and phone the ops
+          # topic but could never draw a fix attempt. The `if: failure()` steps
+          # below did their job, but their text blames an expired OAuth token,
+          # which sends the reader somewhere the fault is not.
+          #
+          # This does NOT widen who can start an agent run. POSTing a
+          # repository_dispatch requires WRITE access on this repo, the job's
+          # `if:` above still admits only type `auto-fix`, validate.yml is the
+          # only dispatcher, and the issue title/body remain un-interpolated
+          # (stage 0 reads them with `gh` as DATA). The name is matched
+          # case-insensitively with a trailing `[bot]` stripped from both sides,
+          # so this one value covers the `github-actions[bot]` actor.
+          #
+          # ⚠️ NAMED, NEVER `*`. `*` would admit any App that can reach this
+          # repo, with a prompt it controls, on a workflow holding `contents:
+          # write`. And it stays OFF the `interactive` job at the bottom of this
+          # file on purpose: that one takes an untrusted COMMENT as its prompt,
+          # so the bot guard there is what stops a bot-comment loop.
+          allowed_bots: "github-actions"
           # Only the issue NUMBER is interpolated, and only after the resolve
           # step above has proved it is a plain integer (it can come from a
           # caller-supplied dispatch payload). The title/body are NOT pasted
