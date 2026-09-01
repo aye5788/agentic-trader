@@ -9,6 +9,118 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-09-01 — "is it broken?" — no. A stuck flag and a misaimed announcement made it look it
+
+Written to be QUOTED at the next incident, because the next one will start the
+same way: a notification that reads like a bug report, and a reasonable question
+about whether the machine is still trustworthy.
+
+**The answer on the day was NO, and that answer was arrived at by reading
+artifacts, not by reassurance.** What follows is the evidence and the two real
+defects the question flushed out.
+
+### What was actually true on 2026-09-01
+
+The open session traded, correctly. Four orders, four fills, zero fee:
+sold LRCX in full ($8.82 @ 291.45, rank 13, weakest trend in the book, below its
+own 20-day low); trimmed DELL by half ($2.62 @ 441.65) into a print it could not
+stop out of; added SNDK $4.00 and MRK $5.00. Stops raised on two winners that
+could only have closed as losses — MU 843 → 880, SNDK 1277 → 1380 — and CRWD
+restored to its entry stop of 205.00. Close: NAV $100.00, 11 positions, cash
+$15.79, all 11 stops enforced and verified. The 15:15 session placed no orders
+and tested every position against its own named falsifier.
+
+**The failure class that cost real money did NOT recur.** Nothing was traded on
+a belief about a code defect. `prompts/charter.md` → THE DIVISION OF LABOUR
+(`8aab191`, 2026-08-31 13:23) was in force ~21 hours before this session and
+held.
+
+### What was actually wrong: the announcement, not the book
+
+The 10:50 push spent "THE ONE THING WORTH YOUR ATTENTION" on a governance
+confession — that it had superseded the 08-31 session's written MRK test — while
+compressing four fills into one line above it.
+
+**The charter already forbade that announcement.** WHAT TO ANNOUNCE BEFORE YOU
+ACT, class 1: *"Abandoning the house view wholesale — **not a single-name
+deviation**."* An MRK add against a prior session's note is a single-name
+deviation.
+
+**But `announce()`'s own docstring authorises it** (`src/agent_env/server.py`,
+in the tool's "Use it for" list): *"anything a person reading the journal
+tomorrow would wish they had known today."* That class appears nowhere in the
+charter. The session followed the tool and broke the charter — a contradiction
+between two documents, which is the failure class the standing warning at the
+top of `CLAUDE.md` is about.
+
+⛔ **NOT FIXED, AND THE OBVIOUS FIX IS WRONG.** Narrowing the docstring to the
+charter's three classes was proposed and abandoned after reading the RENDERED
+charter end to end. The list says "Three classes" and the document imposes
+**five** announce obligations: the three listed, plus announcing an external cash
+flow (in the 10:35 session block, on `refresh_broker_snapshot`'s deltas), plus
+announcing being blocked out of several top-ranked names (stated twice — in the
+`rule_out` rules and again in THE DIVISION OF LABOUR). Narrowing the docstring
+to three would forbid two things the charter REQUIRES.
+
+The order is therefore: **complete the list first, then narrow the docstring.**
+Constraints for whoever does it — `src/charter.py`'s selftest asserts five exact
+strings survive in that section; `__ANNOUNCE_PCT__` and `__ANNOUNCE_FRACTION__`
+each appear exactly once and both live there; and `scripts/review_session.py`
+hands the SAME rendered charter to the reviewer, so the edit changes what judges
+the agent as well as what instructs it.
+
+### The real defect the question flushed out — fixed in `660df9d`
+
+Two leaks in `scripts/health_check.py`, both ending with a true finding going
+silent. Full mechanism in that commit message; the short form:
+
+1. **`filed: true` was terminal**, and the dedupe search reads OPEN issues only.
+   An issue closed while its cause was still live fell out of every channel at
+   once — not re-filed, and fire-once meant not re-pushed. #12, #13 and #14 were
+   all closed with their conditions still flagged on the box. Now a live
+   condition with no open issue is filed again ONCE, stamped `refiled` so it
+   cannot become a daily nag on something a human deliberately closed.
+2. **A `repo_check` flag could never heal.** The key is a digest of the finding
+   TEXT, so a repaired drift can never re-emit it — but `diff()`'s retired-flag
+   clause skips any key `health.is_known_key()` claims is still producible, and
+   `KEY_PREFIXES` carries `"repo_check:"`. `_rows_from_findings` documented the
+   opposite; `is_known_key` was quietly preventing it. This is the
+   `schwab_token` leak that clause was written for, back through the prefix.
+   Now healed when absent — guarded on the checks having actually RUN, since
+   `repo_check_rows()` reports its own failure AS a finding and would otherwise
+   read as every repo_check healing at once.
+
+### ⛔ THE RULE THIS PAID FOR: A STANDING FLAG IS NOT EVIDENCE OF A LIVE DEFECT
+
+During this session the assistant read `health_state.json`, saw
+`repo_check:a03b64cd` — *"the stop-exit executor CANNOT write
+exit_result.json"* — and reported it to the operator as a live risk of the
+2026-08-19 incident class.
+
+**It was not.** The drift had been repaired days earlier: `af89c05` moved the
+deny to the monitor DIRECTORY rather than a list of files that goes stale, and
+`bb1ff7b` corrected which settings file each process is actually checked
+against. `deploy/exit_executor_settings.json` explicitly permits the write. Two
+of the other three flags were the same — repaired findings held open by defect 2
+above.
+
+So: **the alerting state file was reporting three fixed problems as live, and
+the assistant relayed one of them as a money risk.** Verify a flag against the
+thing it describes — the settings file, the running process, the rendered
+document — before reporting it. `health_state.json` is a cache of what was true
+when it was written, exactly like `research_store/rh/positions.json`.
+
+### What was genuinely open at the end of the day
+
+- **The independent review had not run in 12 days** against a 4-day expectation
+  (cause known to the operator; not in the trading path).
+- **The announce contract**, above. Unfixed by design, not by oversight.
+
+Everything else read clean, and the book was fully protected.
+
+---
+
+
 ## 2026-08-31 — the class behind all of it: "broken" and "empty" are the same value
 
 Third attempt at this class, and the first one grounded in a measurement rather
