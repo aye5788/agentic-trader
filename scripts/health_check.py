@@ -434,6 +434,38 @@ def main() -> None:
 
     to_alert, healed = diff(rows, flagged)
 
+    # ⛔ A CONTENT-HASHED repo_check FLAG CANNOT HEAL ON ITS OWN, and diff() has
+    # no way to know that. Its retired-flag clause refuses to drop any key
+    # `health.is_known_key` says this system can still emit, and KEY_PREFIXES
+    # carries "repo_check:" -- so the flag outlives the finding. But a
+    # repo_check key is a DIGEST OF THE FINDING TEXT (_rows_from_findings):
+    # once the drift is repaired that exact key can never be emitted again, so
+    # its absence really is retirement, not a check that went quiet. The
+    # docstring there already claimed diff() dropped these; is_known_key was
+    # silently preventing it.
+    #
+    # Left alone this is precisely the schwab_token leak diff()'s own docstring
+    # was written about, reintroduced through the prefix. Three such flags --
+    # reentry_review, trails.json and the exit-executor exit_result.json -- sat
+    # in health_state.json with their drifts ALREADY repaired (af89c05 moved the
+    # deny to the directory; bb1ff7b corrected which settings file is checked).
+    # A stuck flag is not inert: fire-once keys off `flagged`, so it permanently
+    # silences that finding should the same drift ever return.
+    #
+    # ONLY WHEN THE CHECKS ACTUALLY RAN. repo_check_rows() reports its own
+    # failure AS a finding rather than raising, and on that path emits one
+    # synthetic row and none of the real keys -- which would otherwise read as
+    # every repo_check finding healing at once, on the strength of a run that
+    # never happened. That is the same mistake is_known_key exists to prevent,
+    # so it is guarded here rather than relaxed there.
+    if not any(c.key.startswith(REPO_CHECK_PREFIX)
+               and str(c.detail).startswith("src/repo_checks.py could not run:")
+               for c in rows):
+        live_keys = {c.key for c in rows}
+        healed += [k for k in flagged
+                   if k.startswith(REPO_CHECK_PREFIX)
+                   and k not in live_keys and k not in healed]
+
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     for key in healed:
         flagged.pop(key, None)
@@ -477,12 +509,46 @@ def main() -> None:
         rows_by_key = {c.key: c for c in rows}
         retry = [rows_by_key[k] for k, e in flagged.items()
                  if k not in new_keys and not e.get("filed", True) and k in rows_by_key]
-        to_file = to_alert + retry
+
+        # ⛔ A CLOSED ISSUE ON A STILL-LIVE CONDITION IS A DROPPED CONDITION.
+        # `filed: true` used to be terminal -- the condition was never considered
+        # for filing again -- and `_find_open_issue` only ever searches OPEN
+        # issues. So an issue closed while its cause persisted fell out of every
+        # channel at once: not re-filed (filed was true), and not re-pushed
+        # either (fire-once). It went quiet while still being true, and the only
+        # remaining trace was the dashboard.
+        #
+        # Not hypothetical: #12, #13 and #14 were all closed with all four of
+        # their conditions still flagged in health_state.json, one of them the
+        # exit executor being unable to write exit_result.json -- the 2026-08-19
+        # incident class.
+        #
+        # ONCE PER CONDITION, NOT EVERY RUN. `refiled` is stamped on the way out
+        # regardless of what the operator then does with the issue, because
+        # nothing here can tell "fixed, then regressed" from "closed as
+        # won't-fix" -- and a check that silently reopens an issue a human
+        # deliberately closed, every single day, is exactly the noise that trains
+        # someone to ignore the channel. One recovery per condition; a standing
+        # condition after that lives on the dashboard, where it already shows.
+        #
+        # A `gh` failure makes `_find_open_issue` return None, which reads here
+        # as "no open issue". The cost of that false reading is bounded to one
+        # extra filing, because `refiled` is stamped either way.
+        orphaned: list = []
+        adopted = [k for k, e in flagged.items()
+                   if k not in new_keys and e.get("filed", True)
+                   and not e.get("refiled", False) and k in rows_by_key]
+        if adopted and _find_open_issue(ISSUE_TITLE) is None:
+            orphaned = [rows_by_key[k] for k in adopted]
+
+        to_file = to_alert + retry + orphaned
         if to_file:
             filed_ok = file_issue(to_file, dry=args.dry)
             if not args.dry and filed_ok:
                 for c in to_file:
                     flagged[c.key]["filed"] = True
+                for c in orphaned:
+                    flagged[c.key]["refiled"] = True
                 st["flagged"] = flagged
                 save_state(st)
 
