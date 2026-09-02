@@ -9,6 +9,148 @@ journal `notes`, or by hand). One `##` heading per entry.
 ---
 
 
+## 2026-09-02 — "a bug report, not a trading report" — the agent read the display 4 seconds early
+
+Aaron's phone got, from the 10:35 session: *"JNJ re-entered on my own re-entry
+test — but I chose between two conflicting wordings of it"*, and a
+`record_decision` whose second half was headed "ONE THING WENT WRONG AND IS
+FIXED". His verdict: a bug report on the system, again, when the session is
+supposed to trade.
+
+**The trading was fine.** Two monitor stop-outs before the open (KO 13:35Z,
+CRWD 14:03Z) left cash at 30.2% of a $98.83 NAV against a 9-of-14 book. The
+session deployed $14.00 — JNJ $7.00 new, DELL $4.00 add, MU $3.00 add — cash to
+16.0%, ten positions, all `watched: true`, mark-to-stop ~5.3% of NAV, and wrote
+a cash decision with the arithmetic for what it left (`journal.jsonl`
+14:46:43Z). That part is what the charter asks for.
+
+### The timeline, to the second
+
+From `logs/session_stream.open.jsonl` and `journalctl -u agentic-monitor`:
+
+| Time (Z) | Call | What it said |
+| -------- | ---- | ------------ |
+| 14:41:08 | `set_levels(JNJ)` pre-order | `enforced: false` — *"not held at the broker -- the monitor only watches positions you own"* |
+| 14:43:14 | JNJ fills | |
+| 14:44:05 | `record_fills` | snapshot now carries JNJ |
+| **14:44:09** | `positions()` | JNJ `watched: false`, `stop_status: "override REJECTED: no usable live price to check it against — the guard fails closed"` |
+| **14:44:13** | monitor poll | *"watching on agent-set stops (no thesis): JNJ"* — armed on the 14:41 write |
+| 14:44:23 | `set_levels(JNJ)` again | `enforced: true`; identical levels, changed nothing |
+| 14:45:04 | `record_decision` | "the pre-order write at 14:41 returned stop REJECTED ('no usable live price…')" — misattributed: that string came from `positions()`, not from the 14:41 response |
+| 14:46:50 | `open_question` | a theory of the cause and a proposed practice |
+| 14:47:21 | `announce` | the push |
+
+Four seconds. The monitor polls every `[monitor].poll_secs` = 15s; the read
+landed inside the window between the snapshot refresh and the next poll.
+`_pending_early` names are excluded from the unprotected alarm
+(`market_monitor.py:1665`), so no false push came from the watcher — the only
+push was the agent's own. Sessions on 08-27 (LITE, LRCX), 08-28 (FTNT) and 09-01
+(SNDK) did the same pre-order write and wrote "expect enforced:false until the
+fill lands"; their reads landed after the tick.
+
+### Why the agent read a transient as a verdict
+
+Two documents told it so, and the code was right in both places.
+
+1. **`src/levels.py:114`** used one string for two states. "The monitor has not
+   quoted this symbol yet" (price `None`, `price_guard` true — transient for any
+   held name) and "the quote is corrupt" (NaN/inf/≤0 — a real refusal) both
+   read *"REJECTED … the guard fails closed"*. Meanwhile `set_levels`' own
+   report for the same instant (`decide.py:230`) says *"It arms on the next
+   poll that has a quote."* Two tools, same second, one says pending, one says
+   refused.
+2. **`prompts/charter.md`, WHY YOU ARE HERE** still listed *"has no thesis in
+   tonight's book"* among the causes that leave a position *"unprotected
+   overnight"*. False since `de55a69` (2026-08-20): `standalone_candidates`/
+   `arm_standalone` watch an owned no-thesis name on the agent's own stop.
+   OPSLOG 2026-08-30 item 2 had already corrected the equivalent standing claim
+   (*"Enforcement does not require a thesis"*); the charter had not been. JNJ
+   had no thesis. Read "no thesis → unprotected overnight" there, then
+   `watched: false` + `REJECTED` in `positions()`, and "naked" is the only
+   reading left.
+
+This is the **seventh** `open_question` in this family (08-17, 08-18, 08-20 ×2,
+08-28, and now 09-02). The 08-20 one was fixed and closed on 08-24 — the
+standalone-arm path that protected JNJ today *is* that fix. The agent kept
+re-discovering a solved problem because the display kept showing it a word that
+means "solved" and "broken" at once.
+
+On top of that, the session broke THE DIVISION OF LABOUR three ways —
+misquoted which call returned the string, filed an `open_question` with a
+theory of cause, and announced it — but it followed the charter's own sequence
+to get there.
+
+### What was changed — `fce6497`
+
+- **`src/levels.py`** — the absent-quote branch is split from the corrupt-quote
+  branch. The token `REJECTED` is **kept** in both: `state.py:318-322` derives
+  `levels_in_force` and `LEVELS_NOT_IN_FORCE` from it, the frozen fixtures
+  assert it (one case is exactly this shape), the `positions()` selftest asserts
+  it — and it is true, nothing is in force that instant. Only the text says
+  why, and what clears it. Differential run of old vs new `resolve()` across
+  the 14 fixtures plus 10 selftest/edge inputs: 0 differences in any
+  non-string field, token identical in all 24, text differs on exactly the 3
+  absent-with-guard cases.
+- **`prompts/charter.md`** — the false "no thesis" cause removed from WHY YOU
+  ARE HERE; the off-universe sentence two paragraphs later corrected so the
+  section does not contradict itself; SIZING AND STOPS gains the second
+  transient — *"That confirmation can be early"*: wait one poll, read once
+  more, re-write only for a cause the enforcement note says does not self-clear
+  (looser without `widen`, target count — the FTNT 08-28 shape), a pending
+  level is not an `open_question()`. The interval is `__MONITOR_POLL_SECS__`,
+  rendered by `src/charter.py` from `strategy.load()["monitor"]["poll_secs"]`
+  with strict key access — the same read `market_monitor.py:2230` makes.
+- **Today's `open_question` closed** (`open_questions.jsonl`, 16:36:04Z) with the
+  timeline above, so tomorrow's brief does not inherit "the fill landed
+  unprotected" as fact. The misquoting `record_decision` stays; the record is
+  not rewritten.
+
+**Verification, per the CLAUDE.md rule, not a suite:** the charter rendered
+against the real config before and after — the diff is exactly the three
+passages with `15` substituted, no placeholder survives, and a grep of the whole
+render for "no thesis" / "nothing watching" / "not watching" finds only the new
+correction. `reload_stale.py` restarted `agentic-dashboard.service` (imports
+`levels.py`); re-run reports nothing stale; monitor and dashboard both active.
+The MCP server is spawned per session, so the 15:15 session gets the new string
+without a restart.
+
+**What is NOT confirmed:** that the next session, on the next new entry, stays
+quiet. Only the next fill confirms that.
+
+### Recorded, not changed
+
+- **The push itself has a separate, known, deliberately-unfixed cause** — see
+  2026-09-01 below: `announce()`'s docstring authorises *"anything a person
+  reading the journal tomorrow would wish they had known today"*, a class the
+  charter's WHAT TO ANNOUNCE does not list. Yesterday's push and today's both
+  came through it. The order there stands: complete the charter's list first,
+  then narrow the docstring. Until that is done the agent can always find
+  something it thinks you would wish you knew.
+- `set_levels`' docstring (`server.py:585-595`) still says the monitor requires
+  *"a thesis with target_weight > 0 and a stop (the BOOK filter)"* — the same
+  stale claim, in the tool the agent reads on every call.
+- `enforcement.json` omits standalone-armed names (`_publish_enforcement` runs
+  before `arm_standalone`); JNJ is absent from it today. No current consumer
+  acts on it (`health.py:847` parses it only).
+- `scripts/replay_levels.py` — "wire into the pre-merge checks" — has no
+  caller.
+- `CLAUDE.md` says agent_env "needs NO moomoo"; `src/agent_env/live.py` says
+  moomoo is in `.venv` and the MCP server calls it in-process.
+
+### What the assistant got wrong on the way, recorded because it is the pattern
+
+Its first diagnosis — "`set_levels` cannot price an unheld name; give it the
+live quote `quote()` uses" — was proposed after reading two call sites. It was
+wrong, and it would have re-introduced the display/enforcer divergence that
+`server.py:762` exists to remove. Its second proposal, "reword the status to
+drop REJECTED", was made before grepping the consumers; `state.py` branches on
+that token and the change would have flipped `levels_in_force` to true on an
+unwatched position. Both were caught because Aaron refused to let a proposal
+stand before the surfaces were read. The 08-24 entry below records the same
+thing in the other direction: a correct fix came from measuring first.
+
+---
+
 ## 2026-09-01 — "is it broken?" — no. A stuck flag and a misaimed announcement made it look it
 
 Written to be QUOTED at the next incident, because the next one will start the
