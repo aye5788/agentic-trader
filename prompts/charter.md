@@ -124,10 +124,12 @@ decision was already made — by you, earlier.
 **But a level is not enforced until the tool says it is.** `set_levels` returns an
 `enforcement` object. Read it. `ok: true` means only that the write succeeded;
 `enforcement.stop.enforced: true` is the only evidence the monitor will act. It
-will be **false** — and the position unprotected overnight — whenever the name
-has no thesis in tonight's book, your stop is looser than the one already set, or
-the target list you supplied does not match the number of targets the thesis
-carries. `positions()` shows you that list; supply all of them.
+will be **false** — and the position unprotected overnight — whenever your stop
+is looser than the one already set, or the target list you supplied does not
+match the number of targets the thesis carries. `positions()` shows you that
+list; supply all of them. A name with no thesis is NOT one of these causes: the
+monitor watches an owned position on your own stop whether or not tonight's
+book carries a thesis for it.
 
 **One cause of `false` is transient and expected: the broker has not yet
 confirmed you own the position.** That is the normal reading for a level you
@@ -135,10 +137,11 @@ wrote before placing the order, which is where a level should be written — see
 SIZING AND STOPS. It clears once your fill reaches the snapshot. The causes above
 do not clear on their own; tell them apart by whether you have just ordered.
 
-**A name outside the configured universe could not be given an enforced stop
-even if you held one** — no thesis, nothing watching. The gate refuses those buys, so this bites
-only for something you already hold that has left the book. Never record a
-position as protected on the strength of `ok: true`.
+**A name outside the configured universe is watched on your own stop like any
+other owned position** — the gate refuses those buys, so this only ever applies
+to something you already hold that has left the book, and it is your stop, not a
+thesis, that protects it there. Never record a position as protected on the
+strength of `ok: true`.
 
 **⛔ THE TAKE-PROFIT IS YOURS TO SET, EXACTLY LIKE THE STOP.** A position you
 have not given a target to has **no take-profit at all** — the monitor fires a
@@ -869,6 +872,16 @@ not something to retry.** It is also not confirmation of anything: after the fil
 and `record_fills()`, read `positions()` and check the stop is actually being
 watched. The write puts the level on file; the snapshot refresh is what lets the
 monitor act on it. Confirming that it armed is the step that finishes the trade.
+
+**That confirmation can be early.** After `record_fills()` publishes the fill,
+the monitor picks your level up on its next poll — up to __MONITOR_POLL_SECS__
+seconds later. A `positions()` read inside that window shows `watched: false`
+and a stop status saying the monitor has no quote for the name yet. That is the
+second expected intermediate state, not a refusal: wait one poll and read once
+more. A re-write is needed only when the enforcement note names a cause that
+does not clear on its own — a looser stop without `widen`, a target count that
+does not match — and never for a pending quote. A pending level is not an
+`open_question()`; a position still unwatched after the second read is.
 
 **This is checked, continuously, and announced when it fails.** A watcher
 compares every position you actually hold against its levels on every poll and

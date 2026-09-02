@@ -110,7 +110,24 @@ def resolve(thesis_stop, thesis_targets, override, price=None,
         #                       applied over a live thesis stop.
         _looked = price is not None or price_guard
         _usable = _finite(price) and float(price) > 0
-        if _looked and not _usable:
+        if price is None and price_guard:
+            # ⛔ ABSENT IS NOT CORRUPT (2026-09-02). Both read "REJECTED: no
+            # usable live price ... the guard fails closed", and a session that
+            # read positions() 4 seconds after its fill -- before the monitor's
+            # next poll had quoted the new name -- took the transient for a
+            # verdict: re-wrote the level, filed an open_question, paged the
+            # operator. The monitor armed JNJ 4s after that read, on the
+            # ORIGINAL write. The token "REJECTED" is a contract (state.py
+            # derives levels_in_force from it; the replay fixtures and the
+            # positions() selftest assert it) and it is TRUE here: nothing is
+            # in force this instant. Only the text changes -- it now says why,
+            # and what clears it. A corrupt quote keeps its verdict below.
+            out["effective_stop_status"] = (
+                "override REJECTED: the monitor has no quote for this symbol yet, "
+                "so nothing is in force this instant — a held name is quoted on "
+                "the monitor's next poll; re-read positions() once before "
+                "treating it as unprotected")
+        elif _looked and not _usable:
             out["effective_stop_status"] = ("override REJECTED: no usable live price to "
                                   "check it against — the guard fails closed")
         elif _usable and s >= float(price):
@@ -233,6 +250,14 @@ def _selftest() -> None:
     # unknown price with NO guard skips it, as apply_overrides(prices=None) does
     r = resolve(100.0, [], {"stop": 105.0}, price=None)
     assert r["effective_stop"] == 105.0, r
+    # price looked up and ABSENT (the post-fill window before the monitor's next
+    # poll): refused, token kept, and the text says pending rather than verdict
+    r = resolve(100.0, [], {"stop": 105.0}, price=None, price_guard=True)
+    assert r["effective_stop"] == 100.0 and "REJECTED" in r["effective_stop_status"], r
+    assert "next poll" in r["effective_stop_status"], r
+    # ...and a corrupt price is still the OTHER message, not the pending one
+    r = resolve(100.0, [], {"stop": 105.0}, price=float("nan"), price_guard=True)
+    assert "fails closed" in r["effective_stop_status"], r
     # ...but a caller that DID look and found nothing must fail closed, which is
     # what the live monitor does (it always passes a prices dict).
     r = resolve(100.0, [], {"stop": 105.0}, price=None, price_guard=True)

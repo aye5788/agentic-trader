@@ -325,6 +325,12 @@ def render(mandate_cfg: dict, strat_cfg: dict, tool_names,
         "__UNIVERSE__": render_universe(strat_cfg),
         "__ANNOUNCE_PCT__": _pct(float(conc) * ANNOUNCE_FRACTION),
         "__ANNOUNCE_FRACTION__": _pct(ANNOUNCE_FRACTION),
+        # The post-fill arming window (SIZING AND STOPS). Strict key access on
+        # purpose: scripts/market_monitor.py reads cfg["monitor"]["poll_secs"]
+        # the same way, so the charter cannot quote an interval the monitor
+        # does not run -- and a missing key raises here rather than rendering
+        # "up to 0 seconds".
+        "__MONITOR_POLL_SECS__": str(int(strat_cfg["monitor"]["poll_secs"])),
     }
     for key, val in subs.items():
         text = text.replace(key, val)
@@ -353,7 +359,8 @@ def _selftest() -> None:
                            "max_drawdown": 0.25,
                            "min_dollar_volume_20d": 50_000_000.0},
             "portfolio": {"book_hold": 14, "book_weight": 1.0},
-            "signal": {"residual_tilt": 0.75}}
+            "signal": {"residual_tilt": 0.75},
+            "monitor": {"poll_secs": 15}}
     TOOLS = ["mcp__agentic-trader__brief", "mcp__agentic-trader__quote",
              "mcp__agentic-trader__check_order", "mcp__agentic-trader__performance",
              "mcp__agentic-trader__wake_register", "mcp__agentic-trader__ping"]
@@ -401,8 +408,13 @@ def _selftest() -> None:
     # no placeholder survives
     for ph in ("__MANDATE__", "__TERMS__", "__GATE__", "__TOOLS__",
                "__BASELINE__", "__ANNOUNCE_PCT__", "__ANNOUNCE_FRACTION__",
-               "__UNIVERSE__"):
+               "__UNIVERSE__", "__MONITOR_POLL_SECS__"):
         assert ph not in out, ph
+    # the arming window is the monitor's real interval, interpolated
+    assert "up to 15\nseconds later" in out or "up to 15 seconds later" in out, \
+        "monitor poll interval did not reach the charter"
+    alt_poll = render(MCFG, dict(SCFG, monitor={"poll_secs": 7}), TOOLS)
+    assert "up to 7\nseconds later" in alt_poll or "up to 7 seconds later" in alt_poll
 
     # ⚠️ THE INACTION-DRIFT GUARD. The objective must read as MAKING MONEY, and
     # sitting out must carry a HIGHER burden of proof than acting, with the
@@ -677,6 +689,9 @@ def _selftest() -> None:
     for gone in ("sleeve_hold", "sleeve_weight"):
         assert gone not in real_port, f"{gone} is still in [portfolio]"
     assert str(strategy.load()["signal"]["residual_tilt"]) in real, "tilt vanished"
+    assert (f"up to {int(strategy.load()['monitor']['poll_secs'])}\nseconds later" in real
+            or f"up to {int(strategy.load()['monitor']['poll_secs'])} seconds later" in real), \
+        "monitor poll interval vanished from the real render"
 
     print("charter: OK — every number derived, nothing dropped, unknown placeholder raises")
 
