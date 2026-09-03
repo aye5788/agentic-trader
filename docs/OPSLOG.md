@@ -102,9 +102,14 @@ under `agent_decision` PORTFOLIO at 16:00:16Z. Neither buy pushed to the phone:
 the sessions' MCP `record_fills` does not push — only `scripts/record_fills.py`
 (the exit path) and `announce()` do. That is as built, not a regression.
 
-`agentic-session@open.timer` is still DISABLED; the 15:15 close timer is
-enabled and will run on the temporary pin + drop-in. Re-arm the open timer
-when the incident is resolved, at the same time as the revert.
+**REVERTED ~12:45 ET the same day.** status.claude.com reported the incident
+resolved; a bounded no-tool probe of `claude-opus-5` through `/usr/bin/claude`
+(the binary the unit resolves) answered. Pin restored to `claude-opus-5`,
+drop-in removed + `daemon-reload`, `agentic-session@open.timer` re-enabled.
+The box is back to its pre-incident state for the 15:15 close session. The
+two-install problem and the pin-in-code problem are NOT fixed by the revert;
+they are items 6 and 1 of the design spec written the same afternoon
+(`docs/superpowers/specs/2026-09-03-model-fallback-and-exit-bookkeeping-design.md`).
 
 
 ## 2026-09-02 — "a bug report, not a trading report" — the agent read the display 4 seconds early
