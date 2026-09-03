@@ -8,6 +8,35 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-03 — Claude model outage — 10:35 OPEN session held safely
+
+At 10:24 ET (14:24Z), the official Claude status page reported an active
+"Elevated errors for multiple models" incident. The affected-model update lists
+Mythos/Fable 5.1, Mythos/Fable 5, Opus 5, Opus 4.8, and Opus 4.6. The runner is
+pinned to `claude-opus-5` in `scripts/session.py`, so the 10:35 session was
+directly exposed. The separate Sonnet 5 incident was marked resolved, but that
+did not establish a safe trading fallback.
+
+### Checks and action
+
+- The exact configured Opus session was given a bounded, no-tool connectivity
+  probe; it timed out after 25 seconds with no output.
+- Sonnet 5 was probed both with and without the session MCP configuration; both
+  probes timed out (15 and 20 seconds). No model fallback was enabled, and no
+  full session was retried.
+- The monitor was alive and refreshing quotes at 10:24 ET. `HALT`,
+  `HALT_ENTRIES`, and `SHADOW` were absent. No 10:35 session was launched and
+  no order was placed by this session.
+- The systemd `agentic-session@open.timer` was disabled/inactivated before
+  10:35. The `agentic-session@close.timer` remains enabled and active; exit
+  protection and the monitor were left running.
+
+Re-arm the OPEN timer only after the incident is resolved and a bounded
+Sonnet/Opus probe succeeds. If a fallback is considered, validate the complete
+Claude Code + MCP path first; do not retry a session after an ambiguous failure
+because it may already have placed orders. Official status:
+https://status.claude.com/
+
 
 ## 2026-09-02 — "a bug report, not a trading report" — the agent read the display 4 seconds early
 
