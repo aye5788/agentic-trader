@@ -347,13 +347,17 @@ below has been run on this box and its output pasted into OPSLOG.
    flag, the runner step.
 8. §7 session fill push.
 
-## 10. Out of scope, recorded so nobody re-derives it
+## 10. Out of scope — one POTENTIAL FUTURE PROJECT, and things that stay out
 
-- **A harness-independent order gate** (a local MCP proxy in front of the
-  broker running the gate in-process) — what full Codex TRADING sessions
-  would need. New code on the critical path of every order, holds the broker
-  token, has its own fail-closed question (a sell must never be refused by a
-  proxy crash). Its own spec, if wanted.
+- **POTENTIAL FUTURE PROJECT (principal's decision 2026-09-03: document it,
+  do not build it here): a harness-independent order gate** — a local MCP
+  proxy in front of the broker that runs the gate in-process, so Claude
+  Code, Codex and the code seller are all gated by the same code and full
+  cross-vendor TRADING sessions become possible. It is new code on the
+  critical path of every order, it holds the broker token, and it has its
+  own fail-closed question (a sell must never be refused by a proxy crash).
+  When wanted, it gets its own spec; the custody mode in §5 is the safe
+  stand-in until then.
 - Automatic retry of ANY ambiguous failure. Never.
 - Any change to what the sessions are asked to do. The charter is untouched
   except for the custody variant, which is additive.
