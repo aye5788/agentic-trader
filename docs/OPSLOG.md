@@ -37,6 +37,75 @@ Claude Code + MCP path first; do not retry a session after an ambiguous failure
 because it may already have placed orders. Official status:
 https://status.claude.com/
 
+### Later: the exit path fired during the outage, and the OPEN session was run by hand
+
+**The exit path worked while the session path did not.** At 10:26:42 ET the
+monitor fired DELL target1 (512.17 vs level 512.00) and the exit executor —
+pinned to `claude-opus-4-8`, a model the incident listed as affected — placed
+and filled the half trim 38 seconds later (0.003735 sh @ 510.7964, order
+`6a9983c7-0131-42c0-97b2-2ef51e0baf21`), wrote `exit_result.json`, and pushed
+"Executing: TARGET1 DELL" to the phone. The 10:35 session was the only thing
+the outage actually stopped. The entry above says "no order was placed"; that
+was true of the session, not of the box.
+
+**The executor then stopped short of its bookkeeping — and the cause is NOT the
+outage.** Its transcript shows step 7 issued as
+`.venv/bin/python scripts/record_fills.py; echo "EXIT=$?"`. The allowlist in
+`deploy/exit_executor_settings.json` is EXACT-MATCH on the bare command, so the
+appended `; echo` was refused under `--permission-mode dontAsk`. The SAME
+refusal appears in the 2026-09-02 09:38 and 15:20 exit transcripts; on those
+runs the model retried with the bare command and every step ran. Today it did
+not retry — it wrote a paragraph asking a human for Bash and exited. So this was
+model variance against a brittle rule, and it had been silently one retry away
+from failing every time. Nothing about permission modes on the box changed for
+this process: `--setting-sources ""` drops the user settings (where the
+operator's `autoMode` block was added 2026-09-02), and the transcript records
+`permissionMode: dontAsk`. What is still owed from that run: no
+`partial_outcome` ledger event exists for today's DELL trim (the executor never
+reached 7d; `research_store/rh/partial_closes.json` still holds YESTERDAY's
+488.46 trim), and `research_store/rh/broker_state.json` / `fills.json` are left
+staged from 10:27–10:28 — the next executor overwrites both before use, but
+until then they describe a book two trades old. Fix to consider: state in
+`prompts/exit.md` that the four recorder commands must be typed exactly as
+written with nothing appended, since the grant is exact by design (see the
+docstring in `scripts/record_partial_outcome.py` for why it is not a prefix).
+The session's own `record_fills` (MCP) DID journal the sell at 11:56 ET and
+republished the snapshot, so positions and journal are whole; only the ledger
+label is missing.
+
+**The OPEN session was run by hand at 11:52 ET on `claude-fable-5-1`** (the
+operator's instruction: Opus 5 still listed down, use the interactive model,
+revert after). Two things had to change to make that launch:
+
+1. `scripts/session.py` `--model` pin `claude-opus-5` → `claude-fable-5-1`.
+   ⛔ TEMPORARY. Revert when the incident clears. (`deploy/run_newsletter.sh`
+   also pins `claude-opus-5`; Sunday's run needs the incident resolved or the
+   same treatment.)
+2. The box has TWO Claude Code installs. The cron/systemd PATH resolves
+   `/usr/bin/claude` = **2.1.100** (global npm, April), which refuses this
+   model ("version 2.1.251 or newer is required"); the interactive shell uses
+   the nvm install at `/root/.nvm/versions/node/v22.22.2/bin/claude` =
+   **2.1.259**. The first launch died at the first API call in 630 ms — zero
+   tool calls, zero orders, `session.py` classified it `ok:false, retryable:
+   false` and the ERR trap paged the phone. A RUNTIME systemd drop-in,
+   `/run/systemd/system/agentic-session@.service.d/10-claude-path.conf`,
+   prepends the nvm bin to PATH for the session unit ONLY (not the monitor,
+   whose exit executor stays on 2.1.100). It vanishes on reboot; to remove it
+   by hand: delete the file, `systemctl daemon-reload`. The 2.1.100 install
+   should be updated or retired so the two paths stop disagreeing.
+
+The relaunch ran 375 s, `ok: true`. It refreshed the snapshot at start
+(cash_delta +1.91, explained by the DELL trim — not an external flow), bought
+DELL $4.00 (stop 478 / targets 560, 600) and INTC $2.00, rewrote the JNJ stop to
+267.00, and left $15.36 cash across 10 names. Its closing note is journalled
+under `agent_decision` PORTFOLIO at 16:00:16Z. Neither buy pushed to the phone:
+the sessions' MCP `record_fills` does not push — only `scripts/record_fills.py`
+(the exit path) and `announce()` do. That is as built, not a regression.
+
+`agentic-session@open.timer` is still DISABLED; the 15:15 close timer is
+enabled and will run on the temporary pin + drop-in. Re-arm the open timer
+when the incident is resolved, at the same time as the revert.
+
 
 ## 2026-09-02 — "a bug report, not a trading report" — the agent read the display 4 seconds early
 

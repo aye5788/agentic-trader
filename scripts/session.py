@@ -678,7 +678,7 @@ def _claude_argv(brief: str) -> list[str]:
     # single blob at exit, so the run can be watched live. --verbose is required
     # for stream-json to include tool calls rather than only the final message.
     return ["claude", "-p", "--output-format", "stream-json", "--verbose",
-            "--model", "claude-opus-5", *args]
+            "--model", "claude-fable-5-1", *args]
 
 
 def run(mode: str, dry_run: bool = False) -> dict:
