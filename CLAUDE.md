@@ -773,10 +773,37 @@ src/agent_env/          THE AGENT'S ENVIRONMENT (Plan 2 of the inversion) — a
                         record_decision(), check_order(). Runs under .venv
                         (3.12) with mcp==1.28.1;
                         needs NO moomoo (quotes reach disk via the monitor).
-                        Registered in .mcp.json. NOT yet used by any cron job —
-                        the live loops still run the old procedural prompts.
+                        Registered in .mcp.json. THIS IS THE SESSIONS' ONLY
+                        SURFACE — spawned fresh per session, so an edit here
+                        reaches the next session with no restart. (This entry
+                        read "NOT yet used by any cron job — the live loops
+                        still run the old procedural prompts" until 2026-09-04;
+                        that stopped being true on 08-12 when sessions went
+                        live, and the procedural loops were deleted 08-14.)
                         server.py = tools; state/screen/terrain/decide = pure
                         helpers, each selftested.
+                        ⛔ THE TRADE RECORD STARTS AT memory.RECORD_FLOOR
+                        (2026-08-20) AND EARLIER HISTORY IS CUT (2026-09-04).
+                        82 of the journal's 106 reasoned executions were placed
+                        by the deleted scripts/fast_loop.py, under a cash
+                        account and an ETF sleeve that no longer exist; replayed
+                        through research_log() they read as the AGENT's record.
+                        The floor is the last of five boundaries that each
+                        disqualify what precedes them (fast_loop deleted 08-14,
+                        ETF sleeve sold 08-17, limited margin 08-18, the retry
+                        incident 08-19, ETF machinery deleted 08-20). ⛔ Do NOT
+                        restore the older record and do NOT "improve" this by
+                        feeding it back with provenance labels: that asks the
+                        agent to weigh authorship, and it does not reliably
+                        infer what it is not told (principal, 2026-09-04). A
+                        name's volatility is already in terrain()/history(),
+                        which carry no such caveat. ⛔ And the floor must stay
+                        ANNOUNCED — every view returns `record_floor`, because
+                        the defect that caused the cut was a session writing
+                        that a name had "never" been examined when nothing had
+                        told it where its record began. performance() is
+                        deliberately NOT cut: an equity curve missing its losing
+                        stretch is not an equity curve. See OPSLOG 2026-09-04.
 scripts/                One-off + weekly auth and API-scope probe scripts
 docs/OPSLOG.md          Dated ops & maintainer log (newest first). Technical/
                         plumbing material goes HERE, never in the investor

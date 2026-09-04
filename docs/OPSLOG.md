@@ -8,6 +8,75 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-04 — the trade record is cut at 2026-08-20: a retired executor's trades are not the agent's
+
+**What the principal asked:** review the morning session's behaviour transcript
+— "did it actually use different tools, because all these decisions could just
+be rehashing prior sessions".
+
+**What the transcript showed, and it was good.** 31 tool calls across 20
+distinct tools in a coherent order: orient (`brief`, broker reads,
+`refresh_broker_snapshot`, `halt_status`, `research_log`, `candidates`) →
+research (`quote` on 13 names, `earnings` on 11, `history`+`terrain` on MRVL,
+then on BE, `quote` on five alternatives it did not buy, `sectors`) → act
+(`check_order` ×2, `set_levels` MRVL, two orders) → reconcile (`get_equity_orders`,
+positions, portfolio, `record_fills`, four `record_decision`). Two claims in its
+write-up are verifiable in call ORDER and both hold: `set_levels` is call 20 and
+the MRVL buy is call 21 ("levels written BEFORE the order"), and the gate was
+consulted before each placement. Eight of its most specific figures — DELL trend
+1.0537, its intraday 513.64/534.96/510.27, sigma 4.63, MRVL sigma 4.946 — all
+appear in TOOL RESULTS, none only in its own prose. It was not rehashing.
+
+**The one thing that was false.** Its BE skip records "no prior session has ever
+examined it — recording this so the next session knows it was looked at rather
+than never seen". BE was bought 2026-07-13 at 238.2997 and stopped out
+2026-07-17 at 197.05, **-17.3% in four days**; a session also priced and declined
+it on 08-26. The claim was unbounded, unverified, and written expressly to be
+inherited — the same shape as the rule-outs of 08-21 that encoded a theme cap
+existing nowhere in the mandate.
+
+`research_log(symbol="BE")` would have returned it in FULL — the same call the
+session made for MRVL nine steps earlier, and the one the charter already
+requires "for any name you are about to act on". Recording a skip is acting on a
+name. The instruction existed; it was not followed.
+
+**Why the fix is a CUT and not a history feed.** The assistant proposed
+surfacing prior positions stamped with their decision provenance, so the agent
+could weigh authorship itself. The principal rejected it: *"you are assuming too
+generously the capability of the agent — it's pretty dumb unless you explicitly
+tell it to do something; if you are hoping then you are just gambling"*, and the
+early record is largely a now-removed static mechanism's losses that would
+mislead. That is correct, and the assistant's premise was also wrong on the
+merits: whether BE *got stopped* is a joint fact about BE's volatility AND a stop
+placed by the retired `slow_loop` geometry at the old sizing — not the clean
+regime-independent signal it was argued to be. A name's volatility is already
+fully observable from `terrain()`/`history()`, which needs no caveat.
+
+**The floor.** `memory.RECORD_FLOOR = "2026-08-20"`, applied in
+`_reasoned_events` — the one chokepoint both `research_log()` views read. It is
+the last of five boundaries that each disqualify everything before them:
+fast_loop deleted 08-14 · ETF sleeve liquidated 08-17 · cash → limited margin
+08-18 · the retry incident 08-19 (whose fills are a bug's, not a decision's) ·
+ETF machinery deleted 08-20. Measured on the live journal: **453 reasoned events
+→ 248**, oldest kept 2026-08-20T14:41:08. Of the 106 reasoned executions, 82
+were pre-cutover; `agent_decision` has a hard floor at 08-12 with zero before it,
+so "who decided this" is mechanically derivable, not inferred.
+
+**The announcement is half the fix.** A floor applied but not stated reproduces
+the exact defect: the session said "never" because nothing told it where its
+record began. Both views now return `record_floor` and a note saying an absence
+means *nothing since then*, never that a name is new or unheld. Selftested for
+both the cut and the announcement.
+
+**`performance()` is deliberately NOT cut** — an equity curve with the losing
+stretch removed is not an equity curve. The money was really lost; only the
+*reasoning* record is scoped. The charter states that asymmetry where the two
+tools are described side by side, because otherwise the floor over-generalises.
+
+Commit `1b71159`. `agentic-dashboard` restarted (`memory.py` is in its import
+closure). No literal date in `prompts/charter.md` — the boundary is read from
+`record_floor` at runtime.
+
 ## 2026-09-04 — first two monitor-recorded exits: the sales were whole, one contract was not
 
 09:36 ET SNDK target1 (sold 0.002953 sh) and 09:56 ET INTC target1 (sold
