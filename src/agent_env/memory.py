@@ -53,6 +53,36 @@ MEM_DIRNAME = "memory"
 RULED_OUT = "ruled_out.jsonl"
 QUESTIONS = "open_questions.jsonl"
 
+# ⛔ THE TRADE RECORD STARTS HERE, AND EVERYTHING BEFORE IT IS CUT (2026-09-04).
+#
+# The journal reaches back to 2026-07-13, but 82 of its 106 reasoned executions
+# were placed by scripts/fast_loop.py -- a deterministic executor that never
+# reasoned about a name, was deleted 2026-08-14, and whose losses this book is
+# still carrying. Handing that record to a session as "what this book did" is
+# not history, it is noise attributed to the wrong author.
+#
+# WHY THIS DATE AND NOT AN EARLIER ONE. Each boundary below disqualifies
+# everything before it, so the floor is the last of them:
+#   2026-08-14  fast_loop deleted        - before this, trades are not the agent's
+#   2026-08-17  ETF sleeve liquidated    - that day's fills are a deleted sleeve
+#   2026-08-18  cash -> limited margin   - before this, settlement blocked buys
+#   2026-08-19  the retry incident       - that day holds a BUG's sells, not decisions
+#   2026-08-20  ETF machinery deleted    - first day the system is the current one
+#
+# ⛔ DO NOT "RESTORE" THE OLDER RECORD. It was cut deliberately (principal,
+# 2026-09-04) on the ground that a provenance-stamped loss record asks the agent
+# to weigh authorship correctly, and it does not reliably do that -- it is told
+# what to consider, it does not infer it. A name's volatility is already fully
+# observable from terrain()/history() market data, which is the better source and
+# needs no caveat.
+#
+# ⛔ ABSENCE MUST READ AS BOUNDED, NOT AS NEVER. Every view below reports
+# `record_floor`, because the failure that prompted this cut was a session
+# writing "no prior session has ever examined it" about a name -- an unbounded
+# claim it made because nothing told it where its record began. A floor that is
+# applied but not announced reproduces exactly that defect.
+RECORD_FLOOR = "2026-08-20"
+
 
 def _now_iso(now=None) -> str:
     return (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
@@ -206,7 +236,7 @@ def questions(root: Path) -> dict:
     }
 
 
-def _reasoned_events(journal: Path) -> list:
+def _reasoned_events(journal: Path, floor: str = RECORD_FLOOR) -> list:
     """Every past decision WITH ITS REASON, from wherever it was actually written.
 
     ⚠️ THIS READ USED TO BE `agent_decision` ONLY, AND FOUND NOTHING. Measured
@@ -233,6 +263,13 @@ def _reasoned_events(journal: Path) -> list:
         except ValueError:
             continue
         ev, when = rec.get("event"), rec.get("ts") or rec.get("at")
+
+        # ⛔ CUT AT THE FLOOR -- see RECORD_FLOOR. A record with no usable
+        # timestamp is dropped rather than kept: undated history cannot be
+        # placed on either side of the boundary, and keeping it would smuggle
+        # the retired executor's trades back in under a missing field.
+        if str(when or "")[:10] < floor:
+            continue
 
         if ev == "agent_decision":
             out.append({"when": when, "symbol": rec.get("symbol"),
@@ -402,7 +439,7 @@ def entry_rationale(decisions: list, symbol: str, position_id) -> dict:
 
 
 def research_log(root: Path, journal: Path, limit: int = 25,
-                 symbol: str = "") -> dict:
+                 symbol: str = "", floor: str = RECORD_FLOOR) -> dict:
     """What past sessions decided and why — the agent reading its own record.
 
     Gathers reasoning from EVERY place it is actually written (see
@@ -424,7 +461,7 @@ def research_log(root: Path, journal: Path, limit: int = 25,
     """
     sym = (symbol or "").strip().upper()
 
-    decisions = _reasoned_events(journal)
+    decisions = _reasoned_events(journal, floor)
     decisions.sort(key=lambda r: str(r.get("when") or ""))
     if sym:
         decisions = [d for d in decisions
@@ -468,9 +505,14 @@ def research_log(root: Path, journal: Path, limit: int = 25,
                 "older_decisions_not_shown": older,
                 "levels_and_why": levels, "ruled_out": rules,
                 "open_questions": qs, "full_text": True,
+                "record_floor": floor,
                 "note": f"FULL text for {sym}, nothing clipped. Your own past "
                         f"reasoning, not market fact. Supersede it freely with "
-                        f"a stated reason."}
+                        f"a stated reason. THE RECORD STARTS {floor}: an empty "
+                        f"result means nothing since then, NOT that {sym} has "
+                        f"never been held or examined. Earlier trading was done "
+                        f"by machinery since deleted and is deliberately not "
+                        f"shown. Do not claim a name is new to this book."}
 
     decisions = [{**d, "reason": _clip(d.get("reason"), d.get("symbol"))}
                  for d in decisions]
@@ -489,10 +531,14 @@ def research_log(root: Path, journal: Path, limit: int = 25,
             "open_questions": qs,
             "older_open_questions_not_shown": dropped_q,
             "full_text": False,
+            "record_floor": floor,
             "note": "Your own past reasoning, not market fact. Supersede it "
                     "freely with a stated reason. Long reasons are CLIPPED "
                     "here — call research_log(symbol=\"TICKER\") for the full "
-                    "text of any name before you act on it."}
+                    "text of any name before you act on it. THE RECORD STARTS "
+                    f"{floor} — earlier trading was done by machinery since "
+                    "deleted and is deliberately not shown, so an absence here "
+                    "means nothing since that date, NEVER that a name is new."}
 
 
 def _selftest() -> None:
@@ -557,11 +603,11 @@ def _selftest() -> None:
         # research_log folds in journal decisions, newest first
         j = root / "journal.jsonl"
         j.write_text(
-            '{"event":"agent_decision","ts":"2026-08-01T00:00:00Z","symbol":"MU",'
+            '{"event":"agent_decision","ts":"2026-08-21T00:00:00Z","symbol":"MU",'
             '"action":"buy","reason":"first"}\n'
             'not json\n'
-            '{"event":"execution","ts":"2026-08-02T00:00:00Z"}\n'
-            '{"event":"agent_decision","ts":"2026-08-03T00:00:00Z","symbol":"STX",'
+            '{"event":"execution","ts":"2026-08-22T00:00:00Z"}\n'
+            '{"event":"agent_decision","ts":"2026-08-23T00:00:00Z","symbol":"STX",'
             '"action":"skip","reason":"second"}\n')
         log = research_log(root, j)
         assert [d["symbol"] for d in log["recent_decisions"]] == ["STX", "MU"], log
@@ -574,9 +620,9 @@ def _selftest() -> None:
         # surface too. Reading agent_decision alone returned an empty log against
         # a journal holding 85 reasoned events.
         j.write_text(
-            '{"event":"risk_review","ts":"2026-08-09T16:00:00Z","orders_intended":'
+            '{"event":"risk_review","ts":"2026-08-29T16:00:00Z","orders_intended":'
             '[{"kind":"trim","symbol":"AMAT","fraction":0.5,"reason":"earnings in 2 days"}]}\n'
-            '{"event":"execution","ts":"2026-08-09T16:04:00Z","fills":'
+            '{"event":"execution","ts":"2026-08-29T16:04:00Z","fills":'
             '[{"symbol":"AMAT","side":"sell","status":"filled","note":"trim 50%"}]}\n'
             # ⛔ THE PRODUCTION SHAPE, COPIED OFF THE JOURNAL, NOT INVENTED.
             # This fixture used to write a FLAT {"symbol","reason","note"}
@@ -585,11 +631,11 @@ def _selftest() -> None:
             # reason: None}. The monitor nests them under `triggers`, and one
             # event can carry several. Both real top-level shapes appear here:
             # with `halted` (28 events) and without it (17).
-            '{"event":"exit_signal","ts":"2026-08-08T14:00:00Z","armed":true,'
+            '{"event":"exit_signal","ts":"2026-08-28T14:00:00Z","armed":true,'
             '"halted":false,"triggers":[{"symbol":"WDC","reason":"stop",'
             '"price":41.2,"level":41.35,"fraction":1.0},{"symbol":"STX",'
             '"reason":"stop","price":714.325,"level":738.4014,"fraction":1.0}]}\n'
-            '{"event":"exit_signal","ts":"2026-08-08T15:00:00Z","armed":true,'
+            '{"event":"exit_signal","ts":"2026-08-28T15:00:00Z","armed":true,'
             '"triggers":[{"symbol":"MRK","reason":"target1","price":153.01,'
             '"level":152.9,"fraction":0.5}]}\n')
         log = research_log(root, j)
@@ -619,6 +665,39 @@ def _selftest() -> None:
         (root / "monitor" / "overrides.json").write_text(
             '{"AMD": {"stop": 468.0, "reason": "third pass below the 21-day"}}')
         assert research_log(root, j)["levels_and_why"]["AMD"]["reason"].startswith("third")
+
+        # ⛔ THE FLOOR CUTS, AND SAYS SO. The record before RECORD_FLOOR was
+        # produced by machinery since deleted; showing it attributes a retired
+        # executor's trades to the agent. The announcement half matters as much
+        # as the cut: the defect that prompted this was a session claiming a
+        # name had "never" been examined because nothing told it where its
+        # record began, so an empty result must read as bounded.
+        j.write_text(
+            '{"event":"agent_decision","ts":"2026-07-13T00:00:00Z","symbol":"BE",'
+            '"action":"buy","reason":"placed by the deleted fast_loop"}\n'
+            '{"event":"execution","ts":"2026-07-17T13:40:41Z","fills":'
+            '[{"symbol":"BE","side":"sell","status":"filled","note":"stop"}]}\n'
+            '{"event":"agent_decision","ts":"2026-08-24T00:00:00Z","symbol":"MU",'
+            '"action":"add","reason":"decided by a session"}\n')
+        log = research_log(root, j)
+        syms = [d["symbol"] for d in log["recent_decisions"]]
+        assert syms == ["MU"], f"pre-floor record leaked into the log: {syms}"
+        assert log["record_floor"] == RECORD_FLOOR, log
+        assert RECORD_FLOOR in log["note"], "the floor is applied but not announced"
+
+        # ...and the per-symbol view is cut and bounded the same way. This is the
+        # exact lookup the 2026-09-04 session did not make about BE.
+        one = research_log(root, j, symbol="BE")
+        assert one["recent_decisions"] == [], one
+        assert one["record_floor"] == RECORD_FLOOR, one
+        assert RECORD_FLOOR in one["note"], one
+        assert "never" in one["note"].lower(), "absence must not read as 'never'"
+
+        # an undated record cannot be placed either side of the boundary, so it
+        # is dropped rather than admitted through a missing field
+        j.write_text('{"event":"agent_decision","symbol":"XXX","action":"buy",'
+                     '"reason":"no timestamp"}\n')
+        assert research_log(root, j)["recent_decisions"] == []
 
         # empty tree degrades to empty, never raises
         with tempfile.TemporaryDirectory() as d2:

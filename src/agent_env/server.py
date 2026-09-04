@@ -2193,6 +2193,18 @@ def research_log(limit: int = 25, symbol: str = "") -> str:
     read it at all. It discovered two binding rule-outs only by having its orders
     refused, and recorded that as luck rather than design. A memory too large to
     return is the same as no memory.
+
+    ⛔ **THE RECORD HAS A START DATE, AND AN ABSENCE IS NOT A "NEVER".** Every
+    result carries `record_floor`. Trading before it was placed by a
+    deterministic executor that was deleted 2026-08-14, under a cash account and
+    an ETF sleeve that no longer exist, and it is deliberately NOT shown — it is
+    that machinery's record, not yours. So an empty result means "nothing since
+    `record_floor`". It does NOT mean a name is new, unexamined, or never held,
+    and you must not write that it is: on 2026-09-04 a session recorded that a
+    name had "never" been examined, on the strength of a lookup it had not made,
+    and that claim was false and would have been inherited as fact by the next
+    session. If you want to know what a name has actually done, that is
+    `terrain()` and `history()` — market data, which has no such boundary.
     """
     return json.dumps(memory.research_log(REPO / "research_store", JOURNAL,
                                           limit, symbol=symbol),

@@ -741,7 +741,10 @@ trimming has not been happening. And the record spans more than one decision
 regime — part of it was placed by a deterministic executor that no longer
 exists, part by sessions deciding for themselves — with **nothing in the data
 marking where one ends and the other begins**, so no slice of it can be
-attributed to the way decisions are made today.
+attributed to the way decisions are made today. Note the asymmetry with
+`research_log()` below, which IS cut at a start date: this one is deliberately
+NOT, because an equity curve with the losing stretch removed is not an equity
+curve. The money was really lost; only the *reasoning* record is scoped.
 
 So read it as realised outcome context: real, worth having, and NOT validation
 of the current process. Do not cite it as evidence that what you are doing
@@ -751,6 +754,15 @@ works.
 processes with separate memory; without reading it you will re-derive the same
 conclusions and re-litigate the same rejections. It is your reasoning, not market
 fact — supersede it freely with a stated reason.
+
+**It starts on a date, and every result tells you which one in `record_floor`.**
+Trading before that date was placed by a deterministic executor that has since
+been deleted, under an account type and a fund sleeve that no longer exist; it is
+that machinery's record rather than yours, and it is deliberately not shown. So
+an empty result means *nothing since `record_floor`*. It is not evidence that a
+name is new to this book, has never been held, or has never been examined — do
+not write that it is. What a name has actually done in the market is `terrain()`
+and `history()`, which have no such boundary.
 
 ---
 
