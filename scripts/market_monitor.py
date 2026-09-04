@@ -48,6 +48,7 @@ from adapters.moomoo import prices as mmp        # noqa: E402
 from adapters.moomoo.client import quote_ctx     # noqa: E402
 from notify import push as notify               # noqa: E402  shared ntfy helper
 import exit_bookkeeping                          # noqa: E402  monitor-owned exit recording (§4, 2026-09-03)
+import models                                    # noqa: E402  the exit executor's model + chain (config/models.toml)
 # ⛔ ONE DEFINITION OF "THE SAME REQUEST", shared with the gate that enforces it.
 # The producer of the identity and its verifier must never drift into two
 # implementations, so the stamp the executor is launched with and the check the
@@ -1200,8 +1201,11 @@ EXECUTOR_TOOLS = [
 ]
 
 
-def executor_argv() -> list:
-    """The exact argv for one exit-executor spawn. PURE (no clock, no I/O).
+def executor_argv(model: str) -> list:
+    """The exact argv for one exit-executor spawn of `model`. PURE (no clock, no I/O).
+
+    `model` is a parameter, never a literal: config/models.toml names the exit
+    role's primary and the chain behind it (src/models.py), read at spawn time.
 
     Split out from run_executor() so the invocation can be READ and probed
     without spawning a model against a live broker.
@@ -1243,9 +1247,9 @@ def executor_argv() -> list:
     no Bash grant at all.
     """
     return ["claude", "-p",
-            # model pinned — the exit path must never break because a default
-            # model was retired
-            "--model", "claude-opus-4-8",
+            # the model is PINNED (never the CLI default, which can be retired
+            # under us) but pinned in config, not here
+            "--model", model,
             "--setting-sources", "",
             "--settings", str(REPO / "deploy" / "exit_executor_settings.json"),
             "--strict-mcp-config",
@@ -1315,7 +1319,7 @@ def run_executor(req_id: str, timeout_secs: int = 300) -> dict:
         # failed exit. scripts/session.py:784 records the same failure for the
         # trading sessions; this path inherits the lesson rather than the bug.
         # (It also sidesteps MAX_ARG_STRLEN, 128KiB per argument.)
-        subprocess.run(executor_argv(),
+        subprocess.run(executor_argv(models.primary("exit")),
                        input=(REPO / "prompts" / "exit.md").read_text(),
                        text=True, cwd=str(REPO), env=executor_env(req_id),
                        timeout=timeout_secs, check=False)

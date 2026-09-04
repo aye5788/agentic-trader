@@ -1576,7 +1576,64 @@ def check_exit_path_can_record(root: pathlib.Path) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------- check 12
+
+# A model id anywhere but config/models.toml is the 2026-09-03 defect: three
+# code literals, one of them swapped under an outage by editing code and
+# committing a temporary value to main with a memory note to revert it.
+# src/models.py is the ONE reader of that config; everything else takes the id
+# as a parameter (session.py `_claude_argv`, market_monitor.py `executor_argv`)
+# or shells out to `src/models.py <role>`. Matched as a QUOTED literal or a
+# `--model <id>` argument, so prose about a model in a comment stays silent.
+_MODEL_ID_RE = re.compile(
+    r"""["']claude-[a-z]+-[0-9][0-9a-z.-]*["']|--model\s+claude-[a-z]+-[0-9]""")
+_MODEL_SCAN_DIRS = ("scripts", "deploy", "src")
+_MODEL_SCAN_SUFFIXES = (".py", ".sh", ".json")
+_MODEL_EXEMPT = ("src/models.py",)
+
+
+def check_no_model_literals(root: pathlib.Path) -> list[str]:
+    """No model id may be pinned as a literal outside config/models.toml.
+
+    THE FAILURE THIS CATCHES: a `--model claude-…` or `"claude-…-N"` typed
+    into a runner, a wrapper or a settings file. When that model is retired or
+    down, the swap is a code edit under pressure — and on 2026-09-03 it was
+    committed to main as a temporary value. config/models.toml (+ the
+    git-ignored models.local.toml) is where a pin lives; src/models.py is the
+    only module allowed to spell one, in its selftest fixtures.
+
+    Publishing rule: file:line only. The matched id is never echoed — an id is
+    harmless, but the rule is one rule.
+    """
+    failures: list[str] = []
+    for d in _MODEL_SCAN_DIRS:
+        base = root / d
+        if not base.is_dir():
+            continue
+        for path in sorted(p for p in base.rglob("*") if p.is_file()
+                           and p.suffix in _MODEL_SCAN_SUFFIXES
+                           and not any(part in _SKIP_DIRS for part in p.parts)):
+            rel = str(path.relative_to(root))
+            # This file carries ids in its own selftest fixtures, exactly as
+            # check_no_api_key documents for its literal: excluded, and the
+            # blindness is the same and accepted for the same reason.
+            if rel in _MODEL_EXEMPT or path.resolve() == _SELF_PATH:
+                continue
+            try:
+                text = path.read_text(errors="ignore")
+            except OSError:
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if _MODEL_ID_RE.search(line):
+                    failures.append(
+                        f"{rel}:{lineno} pins a model id as a LITERAL — every "
+                        f"unattended role's model comes from config/models.toml "
+                        f"via src/models.py (id withheld; open the line)")
+    return failures
+
+
 CHECKS = (
+    check_no_model_literals,
     check_exit_path_can_record,
     check_cron_paths,
     check_scheduled_jobs_armed,
@@ -1620,6 +1677,24 @@ def _write(root: pathlib.Path, relpath: str, content: str) -> None:
 
 
 def _selftest() -> None:
+    # -------------------- check 12: check_no_model_literals -------------
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        _write(root, "scripts/a.py", 'argv = ["--model", model]\n# prose: claude-opus-5 was down\n')
+        _write(root, "deploy/b.sh", '--model "$(.venv/bin/python src/models.py newsletter)" \\\n')
+        _write(root, "src/models.py", 'x = "claude-opus-5"\n')     # the one exemption
+        _write(root, "docs/c.md", '"claude-opus-5"\n')             # not a scanned dir
+        assert check_no_model_literals(root) == [], check_no_model_literals(root)
+        _write(root, "scripts/a.py", 'argv = ["--model", "claude-opus-5"]\n')
+        _write(root, "deploy/b.sh", 'claude -p --model claude-sonnet-5 \\\n')
+        _write(root, "deploy/c.json", '{"model": "claude-fable-5-1"}\n')
+        bad = check_no_model_literals(root)
+        assert len(bad) == 3, bad
+        # _MODEL_SCAN_DIRS order, then path order within a dir
+        assert bad[0].startswith("scripts/a.py:1") and bad[1].startswith("deploy/b.sh:1") \
+            and bad[2].startswith("deploy/c.json:1"), bad
+        assert "claude-" not in " ".join(bad), "the id is withheld"
+
     # -------------------- check 1: check_cron_paths --------------------
     with tempfile.TemporaryDirectory() as td:
         root = pathlib.Path(td)

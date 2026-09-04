@@ -58,6 +58,7 @@ import snapshot_freshness            # noqa: E402
 import broker_read                  # noqa: E402
 import governance as gov            # noqa: E402
 from research_store import store    # noqa: E402  session_run journal events
+import models                       # noqa: E402  the session's model + chain (config/models.toml)
 
 MODES = ("premarket", "open", "close", "wake")
 LOCK = REPO / "research_store" / "session.lock"
@@ -805,8 +806,13 @@ def _claude_env() -> dict:
     return {**os.environ, **ISOLATION_ENV}
 
 
-def _claude_argv(brief: str) -> list[str]:
-    """The command line, with the tool surface sourced from session_tools.sh.
+def _claude_argv(brief: str, model: str) -> list[str]:
+    """The command line for one spawn of `model`, tool surface from session_tools.sh.
+
+    `model` is a parameter, never a literal: config/models.toml names the
+    session role's primary and the chain behind it (src/models.py), read at
+    spawn time. The 2026-09-03 outage swap was a code edit committed to main;
+    this is why it never is again.
 
     Sourced rather than reimplemented: that file is the single definition of the
     session's tool surface, and a second copy here would drift from it silently
@@ -837,7 +843,7 @@ def _claude_argv(brief: str) -> list[str]:
     # single blob at exit, so the run can be watched live. --verbose is required
     # for stream-json to include tool calls rather than only the final message.
     return ["claude", "-p", "--output-format", "stream-json", "--verbose",
-            "--model", "claude-opus-5", *args]
+            "--model", model, *args]
 
 
 def run(mode: str, dry_run: bool = False) -> dict:
@@ -994,7 +1000,8 @@ def run(mode: str, dry_run: bool = False) -> dict:
         sfh = open(stream_path, "w")
         try:
             proc = subprocess.Popen(
-                _claude_argv(brief), cwd=str(REPO), env=_claude_env(),
+                _claude_argv(brief, models.primary("session")),
+                cwd=str(REPO), env=_claude_env(),
                 stdin=subprocess.PIPE,
                 stdout=sfh, stderr=subprocess.PIPE, text=True,
                 start_new_session=True)  # own group, so _kill_group reaches the tree
@@ -1178,8 +1185,9 @@ def _selftest() -> None:
     assert set(r) >= {"ok", "mode", "error"}, r
 
     # ---- THE ARGV MUST NOT SWALLOW THE PROMPT OR DROP THE EMPTY STRING ----
-    argv = _claude_argv("THE-BRIEF")
+    argv = _claude_argv("THE-BRIEF", "claude-test-model")
     assert "THE-BRIEF" not in argv, "the brief goes on stdin, never in argv"
+    assert argv[argv.index("--model") + 1] == "claude-test-model", "the model is the parameter"
     assert "" in argv, "the empty-string argument to --tools was lost"
     i = argv.index("--tools")
     assert argv[i + 1] == "", f"--tools must be followed by the empty string: {argv[i:i+3]}"

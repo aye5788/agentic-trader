@@ -104,7 +104,7 @@ mkdir -p logs
 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 \
 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
 claude -p \
-  --model claude-opus-5 \
+  --model "$(.venv/bin/python src/models.py newsletter)" \
   --setting-sources "" \
   --settings deploy/newsletter_settings.json \
   --strict-mcp-config \
