@@ -1,0 +1,4 @@
+{
+  "_comment": "The EMPTY MCP surface for chain drills (scripts/session.py --drill, scripts/market_monitor.py --executor-drill). A drill proves the model chain walks on a clean failure; it must be able to reach no tool and no broker. --strict-mcp-config makes this file the ONLY MCP source.",
+  "mcpServers": {}
+}

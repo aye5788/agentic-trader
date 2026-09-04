@@ -59,6 +59,10 @@ import broker_read                  # noqa: E402
 import governance as gov            # noqa: E402
 from research_store import store    # noqa: E402  session_run journal events
 import models                       # noqa: E402  the session's model + chain (config/models.toml)
+import fallback                     # noqa: E402  the chain walk (clean failure only)
+from fallback import (              # noqa: E402  stream parsing + reason classes live there
+    result_text as stream_result, counts as stream_counts, reason_class)
+import notify                       # noqa: E402  phone push on a fallback
 
 MODES = ("premarket", "open", "close", "wake")
 LOCK = REPO / "research_store" / "session.lock"
@@ -430,26 +434,20 @@ def render_review(rev: dict | None, mode: str) -> str:
 # with a NAMED reason class, and the brief renders the last few sessions with
 # what the class means and what to do about it. Define, don't imply.
 
-#: Failure classes, matched against the runner's error AND the CLI's own final
-#: `result` line (stream_result). Order matters: first hit wins.
-_REASON_CLASSES = (
-    ("usage_limit",     ("hit your limit", "usage limit")),
-    ("version_too_old", ("version_too_old", "does not support this model")),
-    ("model_outage",    ("api error: 5", "overloaded", "rate limit",
-                         "connection error", "network error")),
-    ("auth",            ("authentication_error", "invalid api key",
-                         "credit balance is too low")),
-    ("timeout",         ("timed out after",)),
-    ("interrupted",     ("interrupted (",)),
-    ("not_launched",    ("refusing to run", "refusing to start", "halt active")),
-)
+#: The failure classes themselves (fallback.REASON_CLASSES) are matched
+#: against the runner's error AND the CLI's own final `result` line; this is
+#: what each one MEANS to the next session. Define, don't imply.
 CLASS_MEANING = {
+    "cli_unavailable": "the box's Claude CLI was mid self-update for a few "
+                       "seconds — the runner retried; the operator's to watch.",
     "usage_limit":     "the operator's Claude subscription cap was hit — an "
                        "operator-side budget, not this system, not a gate.",
     "model_outage":    "the model vendor was down or overloaded — nothing this "
                        "system did.",
     "version_too_old": "the box's CLI rejected the pinned model — the operator's "
                        "to fix.",
+    "unknown_model":   "the pinned model id does not exist (retired or mistyped "
+                       "in config/models.toml) — the operator's to fix.",
     "auth":            "the runner could not authenticate — the operator's to fix.",
     "timeout":         "it hit its wall-clock limit; anything it recorded first "
                        "is in the journal.",
@@ -461,51 +459,38 @@ CLASS_MEANING = {
 SESSION_HISTORY_N = 4
 
 
-def stream_result(out: str) -> str:
-    """The CLI's own final `result` text from a stream-json transcript, or "".
-
-    Scanned from the END, and ONLY the `type: result` line — never agent prose,
-    which is exactly where matching "rate limit" anywhere went wrong before
-    (see _DEAD_SIGNATURES).
-    """
-    for raw in reversed((out or "").splitlines()):
-        try:
-            m = json.loads(raw)
-        except Exception:               # noqa: BLE001
-            continue
-        if isinstance(m, dict) and m.get("type") == "result":
-            return str(m.get("result") or "")
-    return ""
+SESSION_CHAIN_BUDGET_X = 1.5     # the whole chain fits 1.5 session timeouts
+DRILL_MCP = REPO / "deploy" / "drill_mcp.json"
+DRILL_PROMPT = "Reply with exactly: OK"
+DRILL_TIMEOUT_S = 120
 
 
-def stream_counts(out: str) -> tuple[int, int]:
-    """(tool calls, order placements) in a stream-json transcript. Pure."""
-    calls = orders = 0
-    for raw in (out or "").splitlines():
-        try:
-            m = json.loads(raw)
-        except Exception:               # noqa: BLE001
-            continue
-        if not isinstance(m, dict) or m.get("type") != "assistant":
-            continue
-        content = (m.get("message") or {}).get("content") or []
-        for c in content if isinstance(content, list) else []:
-            if isinstance(c, dict) and c.get("type") == "tool_use":
-                calls += 1
-                if str(c.get("name") or "").endswith("place_equity_order"):
-                    orders += 1
-    return calls, orders
+def _journal_fallback(role: str, mode: str, frm: str, to: str | None,
+                      reason: str | None, attempt: int, drill: bool = False) -> None:
+    """One journal event + one phone push per chain transition. Never raises."""
+    rec = {"event": "model_fallback",
+           "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "role": role, "mode": mode, "from": frm, "to": to,
+           "reason": reason, "attempt": attempt}
+    if drill:
+        rec["drill"] = True
+    try:
+        store.append_journal(rec)
+    except Exception as e:              # noqa: BLE001
+        print(f"⚠️ model_fallback journal write failed: {e}", file=sys.stderr)
+    title = f"FALLBACK {role}:{mode}" + (" (DRILL)" if drill else "")
+    body = f"{frm} → {to or 'EXHAUSTED'} ({reason}) attempt {attempt}"
+    print(f"model fallback: {body}")
+    notify.push(title, body, tags="warning" if to else "rotating_light")
 
 
-def reason_class(error: str | None, result_text: str = "") -> str | None:
-    """Name the failure class for the record; None when the session ran ok."""
-    if not error:
-        return None
-    low = f"{error}\n{result_text or ''}".lower()
-    for name, sigs in _REASON_CLASSES:
-        if any(s in low for s in sigs):
-            return name
-    return "ambiguous"
+def _drill_argv(model: str) -> list[str]:
+    """A spawn that can reach NO tool and NO broker: empty MCP surface, no
+    built-ins, dontAsk. What it proves is the chain, not the session."""
+    return ["claude", "-p", "--output-format", "stream-json", "--verbose",
+            "--model", model, "--setting-sources", "",
+            "--strict-mcp-config", "--mcp-config", str(DRILL_MCP),
+            "--tools", "", "--permission-mode", "dontAsk"]
 
 
 def render_session_history(events: list) -> str:
@@ -570,6 +555,7 @@ def _journal_session_run(result: dict, out: str) -> None:
             "error": (result.get("error") or "")[:200] or None,
             "seconds": result.get("seconds"),
             "tool_calls": calls, "orders": orders,
+            "model": result.get("model"), "attempts": result.get("attempts"),
         })
     except Exception as e:              # noqa: BLE001
         print(f"⚠️ session_run journal write failed: {e}", file=sys.stderr)
@@ -846,6 +832,79 @@ def _claude_argv(brief: str, model: str) -> list[str]:
             "--model", model, *args]
 
 
+def _spawn_once(argv: list, stdin_text: str, stream_path: Path,
+                timeout_s: int) -> tuple:
+    """ONE headless spawn. -> (rc, stream text, stderr). Never raises.
+
+    ⛔ THE PROMPT GOES ON STDIN, NEVER IN argv. `--allowedTools` is VARIADIC,
+    so a trailing prompt argument is consumed as one more tool name and the
+    session starts with no prompt at all. stdin also sidesteps MAX_ARG_STRLEN
+    (128KiB per argument) -- the brief is ~28KB today and grows.
+    ⛔ STDOUT GOES TO A FILE, NOT A PIPE. communicate() only returns once the
+    child exits, so a piped stdout is invisible until the run is over. A file
+    is written as the child produces each line, so it can be tailed, and the
+    transcript is read back off disk afterwards so classify() sees exactly
+    what the operator saw.
+    A timeout KILLS THE GROUP AND THEN DRAINS: a session that hung is the one
+    most likely to have placed orders and most in need of a transcript.
+    """
+    stream_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = None
+    try:
+        with open(stream_path, "w") as sfh:
+            proc = subprocess.Popen(
+                argv, cwd=str(REPO), env=_claude_env(),
+                stdin=subprocess.PIPE, stdout=sfh, stderr=subprocess.PIPE,
+                text=True, start_new_session=True)
+            try:
+                _, err = proc.communicate(input=stdin_text, timeout=timeout_s)
+                rc = proc.returncode
+            except subprocess.TimeoutExpired:
+                _kill_group(proc)
+                try:
+                    _, err = proc.communicate(timeout=10)
+                except Exception:       # noqa: BLE001
+                    err = ""
+                err = (err or "") + f"\ntimed out after {timeout_s}s"
+                rc = -1
+    except Exception as e:              # noqa: BLE001  a spawn that cannot start
+        rc, err = -1, f"spawn failed: {type(e).__name__}: {e}"
+    finally:
+        if proc is not None:
+            _kill_group(proc)
+    try:
+        out = stream_path.read_text()
+    except OSError:
+        out = ""
+    return rc, out, err or ""
+
+
+def drill(mode: str, chain: list) -> dict:
+    """Walk `chain` with a no-tool prompt and NO MCP. -> a printable verdict.
+
+    The principal's condition (spec §8): the chain must be SEEN to fire before
+    it is armed. This is that: the real CLI, the real chain logic, a prompt
+    that can do nothing. Run it with a bogus primary and the fallback event,
+    the phone push and the second model's answer are the proof. No lock, no
+    brief, no broker read, no session_run event; the journal rows carry
+    `drill: true`.
+    """
+    stream_path = REPO / "logs" / "session_stream.drill.jsonl"
+    walk = fallback.run_chain(
+        chain,
+        lambda m: _spawn_once(_drill_argv(m), DRILL_PROMPT, stream_path, DRILL_TIMEOUT_S),
+        classify,
+        per_attempt_s=DRILL_TIMEOUT_S, budget_s=DRILL_TIMEOUT_S * len(chain) + 60,
+        cli_retry_after_s=models.cli_retry_after_s(),
+        on_fallback=lambda frm, to, reason, n: _journal_fallback(
+            "session", mode, frm, to, reason, n, drill=True))
+    return {"ok": walk["ok"], "drill": True, "mode": mode, "chain": chain,
+            "stopped": walk["stopped"],
+            "attempts": [{"model": a.model, "rc": a.rc, "reason_class": a.reason_class,
+                          "tool_calls": a.tool_calls,
+                          "answer": stream_result(a.out)[:60]} for a in walk["attempts"]]}
+
+
 def run(mode: str, dry_run: bool = False) -> dict:
     """Run one session. -> {"ok", "mode", "error"} (plus detail when it ran)."""
     if mode not in MODES:
@@ -996,40 +1055,28 @@ def run(mode: str, dry_run: bool = False) -> dict:
         # transcript is read back off disk afterwards, so classify() and the
         # timeout drain below see exactly what they saw before.
         stream_path = REPO / "logs" / f"session_stream.{mode}.jsonl"
-        stream_path.parent.mkdir(parents=True, exist_ok=True)
-        sfh = open(stream_path, "w")
-        try:
-            proc = subprocess.Popen(
-                _claude_argv(brief, models.primary("session")),
-                cwd=str(REPO), env=_claude_env(),
-                stdin=subprocess.PIPE,
-                stdout=sfh, stderr=subprocess.PIPE, text=True,
-                start_new_session=True)  # own group, so _kill_group reaches the tree
-            try:
-                _, err = proc.communicate(input=brief,
-                                          timeout=TIMEOUT_S.get(mode, 900))
-                rc = proc.returncode
-            except subprocess.TimeoutExpired:
-                # DRAIN AFTER KILLING. The first form discarded everything the
-                # session had printed -- and a session that hung is the one MOST
-                # likely to have placed orders and most in need of a transcript
-                # to reconcile against. communicate() returns once the pipes
-                # close, which the kill guarantees. stdout is already on disk.
-                _kill_group(proc)
-                try:
-                    _, err = proc.communicate(timeout=10)
-                except Exception:       # noqa: BLE001
-                    err = ""
-                err = (err or "") + f"\ntimed out after {TIMEOUT_S.get(mode, 900)}s"
-                rc = -1
-        finally:
-            sfh.close()
-        try:
-            out = stream_path.read_text()
-        except OSError:
-            out = ""
-
-        ok, error = classify(rc, out, err)
+        # ⛔ THE CHAIN (config/models.toml, src/fallback.py). One spawn per
+        # model, in order, and the next model is tried ONLY when the previous
+        # spawn failed with ZERO tool calls in its transcript. A failure after
+        # any tool call is ambiguous -- it may have placed an order -- and stops
+        # here, exactly as before the chain existed. Each transition is
+        # journalled (`model_fallback`) and pushed to the phone.
+        per_attempt = TIMEOUT_S.get(mode, 900)
+        chain = models.chain("session")
+        walk = fallback.run_chain(
+            chain,
+            lambda m: _spawn_once(_claude_argv(brief, m), brief, stream_path, per_attempt),
+            classify,
+            per_attempt_s=per_attempt, budget_s=per_attempt * SESSION_CHAIN_BUDGET_X,
+            cli_retry_after_s=models.cli_retry_after_s(),
+            on_fallback=lambda frm, to, reason, n: _journal_fallback("session", mode, frm, to, reason, n))
+        last = walk["attempts"][-1]
+        rc, out, err = last.rc, last.out, last.err
+        ok, error = last.ok, last.error
+        if not ok and walk["stopped"] in ("exhausted", "budget"):
+            error = (f"{error} [model chain {walk['stopped']} after "
+                     f"{len(walk['attempts'])} attempt(s): "
+                     f"{', '.join(a.model for a in walk['attempts'])}]")
         fill_after = snapshot_freshness.latest_fill_ts(
             REPO / "research_store" / "journal.jsonl")
         if fill_after is not None and fill_after != fill_before:
@@ -1055,7 +1102,9 @@ def run(mode: str, dry_run: bool = False) -> dict:
                   "seconds": round(time.time() - started, 1),
                   "retryable": should_retry(error),
                   "output_bytes": len(out or ""),
-                  "launched": True}
+                  "launched": True,
+                  "model": last.model, "attempts": len(walk["attempts"]),
+                  "chain_stopped": walk["stopped"]}
         _journal_session_run(result, out)
         return result
 
@@ -1368,6 +1417,12 @@ def _selftest() -> None:
     # only the newest N are shown
     many = [dict(ok_run, ts=f"2026-08-{d:02d}T16:00:00+00:00") for d in range(1, 10)]
     assert render_session_history(many).count("- 2026-08-") == SESSION_HISTORY_N
+    # the drill spawn can reach NO tool and NO broker: empty MCP file, no built-ins
+    d = _drill_argv("claude-test-model")
+    assert d[d.index("--model") + 1] == "claude-test-model"
+    assert d[d.index("--tools") + 1] == "" and "--strict-mcp-config" in d
+    assert json.loads(DRILL_MCP.read_text())["mcpServers"] == {}, DRILL_MCP
+    assert "--allowedTools" not in d, "a drill grants nothing"
 
     print("session: OK")
 
@@ -1377,6 +1432,12 @@ if __name__ == "__main__":
     ap.add_argument("mode", nargs="?", choices=[*MODES, "selftest"])
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--drill", action="store_true",
+                    help="walk the model chain with a no-tool prompt: no lock, no "
+                         "brief, no broker, no MCP. Proves the chain, not the session.")
+    ap.add_argument("--drill-chain", default="",
+                    help="comma-separated model ids for --drill (default: the "
+                         "configured session chain); a bogus first id is the test")
     a = ap.parse_args()
 
     if a.selftest or a.mode == "selftest":
@@ -1384,6 +1445,11 @@ if __name__ == "__main__":
         raise SystemExit(0)
     if not a.mode:
         ap.error("a mode is required")
+    if a.drill:
+        chain = [m.strip() for m in a.drill_chain.split(",") if m.strip()] or models.chain("session")
+        result = drill(a.mode, chain)
+        print(json.dumps(result, indent=2))
+        raise SystemExit(0 if result["ok"] else 1)
 
     result = run(a.mode, dry_run=a.dry_run)
     # A session that never reached the spawn (lock wait, HALT, broker read
