@@ -273,6 +273,35 @@ config/strategy.toml    CODIFIED STRATEGY — single source of truth: risk gates
                         validation mandate. Load via src/strategy.py.
                         Edge = momentum (settled); [signal]/[meta]/[portfolio] all
                         momentum. PEAD is fully retired — see docs/DESIGN.md.
+config/models.toml      THE MODEL PINS for every unattended role (session, exit
+                        executor, newsletter) + the fallback chain + the
+                        terminal/budget steps (declared "none" until built).
+                        Loaded by src/models.py AT SPAWN TIME — no restart.
+                        ⛔ NEVER commit a temporary pin: config/models.local.toml
+                        (git-ignored, human) merges over it; an outage swap is
+                        a local edit and reverting is deleting that file
+                        (2026-09-03 committed one to main; never again).
+                        ⛔ A model id literal anywhere in scripts/, deploy/,
+                        src/ is a defect — src/repo_checks.py enforces it.
+src/fallback.py         THE CHAIN WALK (2026-09-04). One rule: the next model
+                        is tried ONLY when the spawn failed with ZERO tool
+                        calls in its stream-json transcript. Any failure after
+                        a tool call is ambiguous (it may have placed an order)
+                        and stops. The CLI's self-update window retries the
+                        same model once. Every transition journals
+                        `model_fallback` and pushes. Used by session.py and
+                        market_monitor.run_executor. Reason classes
+                        (usage_limit, model_outage, version_too_old,
+                        unknown_model, cli_unavailable, timeout, …) derive from
+                        the runner's error + the CLI's own final result line,
+                        never agent prose. DRILLS prove it fires:
+                        `scripts/session.py open --drill --drill-chain
+                        claude-bogus,claude-sonnet-5` and
+                        `scripts/market_monitor.py --executor-drill …` — no
+                        MCP (deploy/drill_mcp.json), no tools, no broker; run
+                        them through the unit's PATH. A usage cap hits every
+                        Claude model at once: the budget step is declared
+                        INERT (principal, 2026-09-04).
 config/universe.csv     Fixed 150-name momentum universe (human-seed reconciled
                         with dollar-volume liquidity fill). `flag` col marks
                         adr/micro/spec/fresh-ipo model-caveats. Referenced by
@@ -360,6 +389,12 @@ scripts/session.py      THE SESSION RUNNER — the inversion's entry point. LIVE
                         may have ALREADY PLACED ORDERS.
                         ⚠️ Unlike the legacy loops, a session is NOT handed a
                         procedure — it gets prompts/charter.md and decides.
+                        SINCE 2026-09-04: every verdict — ran, failed, never
+                        launched — journals `session_run` with a reason class,
+                        and the brief renders SINCE YOUR LAST RUN (the newest
+                        4, MISSED rows explained, "not yours to diagnose").
+                        The spawn walks config/models.toml's chain via
+                        src/fallback.py; `--drill` proves the chain.
 scripts/review_session.py
                         THE INDEPENDENT REVIEW — a DIFFERENT model (Codex)
                         judges what the session just did. Runs SEQUENTIALLY
@@ -550,6 +585,14 @@ src/health.py           SCHEDULED-JOB LIVENESS — did each moving part actually
                         ⚠️ A new Check status must also be added to the dashboard's
                         word/colour map in dashboard/dashboard.html or it renders
                         as raw lowercase in amber.
+                        • `claude_binary` / `claude_models` (2026-09-04): the
+                          session unit and a login shell must resolve the SAME
+                          `claude` (the box had two — an un-updatable April
+                          2.1.100 on the cron PATH and an auto-updating nvm
+                          install in the shell; the orphan is deleted and
+                          /usr/local/bin/claude → the nvm binary), and the
+                          installed version must accept every pinned model
+                          (`[requires]` in config/models.toml). Ride `use_network`.
 scripts/health_check.py THE UPKEEP REMINDER (daily 08:00). Runs health.checks() and
                         pushes anything unhealthy to the OPS ntfy topic. FIRE-ONCE
                         per condition (clears silently on heal); the dashboard

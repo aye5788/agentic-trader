@@ -8,6 +8,46 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-04 — the model chain is live on both paths, and it was seen to fire
+
+Spec §1, §2, §6, §8.1–8.3 (plan 2 of the 2026-09-03 design), landed before
+the open. The principal's condition — the chain must be SEEN to fire before
+it is armed — was met with six drills, all through the unattended PATHs:
+
+| drill | chain given | result |
+| --- | --- | --- |
+| session, 08:22 | claude-does-not-exist → sonnet-5 | 1 fallback, Sonnet answered `OK` |
+| session, 08:23 | nope-1 → nope-2 → sonnet-5 | 2 fallbacks (`unknown_model`), `OK` |
+| session, 08:23 | the real chain | Opus 5 answered, no fallback |
+| exit, 08:25 | nope-x → sonnet-5 | 1 fallback, `OK` |
+| exit, 08:26 | the real chain | Opus 4.8 answered, no fallback |
+| both, 08:27 | the real chains on the single 2.1.260 install | no fallback |
+
+Every fallback wrote a `model_fallback` journal row (`drill: true`) and a
+phone push; the principal confirmed receiving them.
+
+**What changed.** `config/models.toml` pins every role (session opus-5, exit
+opus-4-8, newsletter opus-5), the chain `[sonnet-5, fable-5-1]`, and the
+terminal/budget steps as `"none"` (code seller and custody are plans 3–4;
+the budget step is INERT by the principal's decision). `models.local.toml`
+(git-ignored) overrides it; `src/models.py` loads at spawn time; a
+`repo_checks` rule forbids a model literal anywhere else. `src/fallback.py`
+walks the chain under THE ONE RULE (next model only after a spawn with zero
+tool calls; ambiguous stops; the CLI's self-update window retries the same
+model once after 30 s). `scripts/session.py` and `market_monitor.run_executor`
+both use it; the executor's transcript now lands in `logs/exit_stream.jsonl`.
+`--drill` / `--executor-drill` exist so the next person can prove it again.
+
+**One install.** `/usr/bin/claude` (2.1.100, April, un-updatable — the system
+npm's prefix had moved to the nvm tree) is DELETED; `/usr/local/bin/claude`
+symlinks the nvm binary (2.1.260, auto-updating), first on the cron and
+systemd PATHs. Two health lines guard it: `claude_binary` (unit vs shell
+resolve the same file+version) and `claude_models` (installed version ≥ every
+pin's floor). Auto-update stays on; its few-second window is the
+`cli_unavailable` class and is retried.
+
+**Still to come:** the code seller (§3) and Codex custody (§5).
+
 ## 2026-09-04 — a missed session now tells the next one, in its own words
 
 **What happened.** The 2026-09-03 15:15 CLOSE session ran 86 s, made 11 read

@@ -1,8 +1,10 @@
 # Model fallback chain, code seller, and monitor-owned exit bookkeeping — design
 
 **Date:** 2026-09-03
-**Status:** approved in conversation by the principal (Aaron) the same afternoon;
-awaiting his review of this written form.
+**Status:** approved by the principal (Aaron) 2026-09-03. LANDED 2026-09-04
+before the open: §1, §2, §4, §6, §7, §8.1–8.3 (OPSLOG 2026-09-04, two
+entries). PENDING: §3 code seller, §5 custody, §8.4–8.5. Budget step: INERT
+by the principal's decision 2026-09-04.
 **Trigger:** the 2026-09-03 Claude model outage (`docs/OPSLOG.md`, same date).
 
 ## 0. What happened and what it exposed
