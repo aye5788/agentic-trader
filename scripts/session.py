@@ -57,6 +57,7 @@ import strategy                     # noqa: E402
 import snapshot_freshness            # noqa: E402
 import broker_read                  # noqa: E402
 import governance as gov            # noqa: E402
+from research_store import store    # noqa: E402  session_run journal events
 
 MODES = ("premarket", "open", "close", "wake")
 LOCK = REPO / "research_store" / "session.lock"
@@ -416,6 +417,163 @@ def render_review(rev: dict | None, mode: str) -> str:
     return "\n".join(out) + "\n---\n\n"
 
 
+# --------------------------------------------------------------------------- #
+# session_run — every verdict leaves a journal event, and the brief shows them
+# --------------------------------------------------------------------------- #
+# ⛔ WHY (2026-09-03). The 15:15 CLOSE session died 86 s in on "You've hit your
+# limit" — the operator's subscription cap. The runner classified it correctly,
+# paged the phone, and wrote NOTHING to the journal: a failed session was the
+# only event in the system that left no trace where the next session reads.
+# The 10:35 session would have seen a journal that simply stopped at noon, and
+# the charter forbids it to go looking for why. So: every verdict is journalled
+# with a NAMED reason class, and the brief renders the last few sessions with
+# what the class means and what to do about it. Define, don't imply.
+
+#: Failure classes, matched against the runner's error AND the CLI's own final
+#: `result` line (stream_result). Order matters: first hit wins.
+_REASON_CLASSES = (
+    ("usage_limit",     ("hit your limit", "usage limit")),
+    ("version_too_old", ("version_too_old", "does not support this model")),
+    ("model_outage",    ("api error: 5", "overloaded", "rate limit",
+                         "connection error", "network error")),
+    ("auth",            ("authentication_error", "invalid api key",
+                         "credit balance is too low")),
+    ("timeout",         ("timed out after",)),
+    ("interrupted",     ("interrupted (",)),
+    ("not_launched",    ("refusing to run", "refusing to start", "halt active")),
+)
+CLASS_MEANING = {
+    "usage_limit":     "the operator's Claude subscription cap was hit — an "
+                       "operator-side budget, not this system, not a gate.",
+    "model_outage":    "the model vendor was down or overloaded — nothing this "
+                       "system did.",
+    "version_too_old": "the box's CLI rejected the pinned model — the operator's "
+                       "to fix.",
+    "auth":            "the runner could not authenticate — the operator's to fix.",
+    "timeout":         "it hit its wall-clock limit; anything it recorded first "
+                       "is in the journal.",
+    "interrupted":     "the operator stopped it.",
+    "not_launched":    "the runner refused to start it (lock, halt, or a broker "
+                       "read it could not trust) — see its error.",
+    "ambiguous":       "it died mid-run; whatever it recorded is in the journal.",
+}
+SESSION_HISTORY_N = 4
+
+
+def stream_result(out: str) -> str:
+    """The CLI's own final `result` text from a stream-json transcript, or "".
+
+    Scanned from the END, and ONLY the `type: result` line — never agent prose,
+    which is exactly where matching "rate limit" anywhere went wrong before
+    (see _DEAD_SIGNATURES).
+    """
+    for raw in reversed((out or "").splitlines()):
+        try:
+            m = json.loads(raw)
+        except Exception:               # noqa: BLE001
+            continue
+        if isinstance(m, dict) and m.get("type") == "result":
+            return str(m.get("result") or "")
+    return ""
+
+
+def stream_counts(out: str) -> tuple[int, int]:
+    """(tool calls, order placements) in a stream-json transcript. Pure."""
+    calls = orders = 0
+    for raw in (out or "").splitlines():
+        try:
+            m = json.loads(raw)
+        except Exception:               # noqa: BLE001
+            continue
+        if not isinstance(m, dict) or m.get("type") != "assistant":
+            continue
+        content = (m.get("message") or {}).get("content") or []
+        for c in content if isinstance(content, list) else []:
+            if isinstance(c, dict) and c.get("type") == "tool_use":
+                calls += 1
+                if str(c.get("name") or "").endswith("place_equity_order"):
+                    orders += 1
+    return calls, orders
+
+
+def reason_class(error: str | None, result_text: str = "") -> str | None:
+    """Name the failure class for the record; None when the session ran ok."""
+    if not error:
+        return None
+    low = f"{error}\n{result_text or ''}".lower()
+    for name, sigs in _REASON_CLASSES:
+        if any(s in low for s in sigs):
+            return name
+    return "ambiguous"
+
+
+def render_session_history(events: list) -> str:
+    """The 'since your last run' block for the brief. -> "" with no history.
+
+    One line per recent session (ran / MISSED: class), a legend ONLY for the
+    classes that actually appear among the missed ones, and the standing
+    instruction: a missed session is the operator's problem; do its review as
+    part of this one; do not diagnose. Pure.
+    """
+    runs = [e for e in (events or []) if isinstance(e, dict)
+            and e.get("event") == "session_run"]
+    runs = sorted(runs, key=lambda e: str(e.get("ts") or ""))[-SESSION_HISTORY_N:]
+    if not runs:
+        return ""
+    out = ["## SINCE YOUR LAST RUN — the scheduled sessions before this one", ""]
+    missed_classes = []
+    for e in reversed(runs):
+        day = str(e.get("ts") or "")[:10]
+        mode = str(e.get("mode") or "?")
+        secs = e.get("seconds")
+        stats = (f"{secs}s, " if secs is not None else "") + \
+                f"{e.get('tool_calls', 0)} tool calls, {e.get('orders', 0)} orders"
+        if e.get("ok"):
+            out.append(f"- {day} {mode:<5} — ran ({stats})")
+        else:
+            cls = str(e.get("reason_class") or "ambiguous")
+            missed_classes.append(cls)
+            out.append(f"- {day} {mode:<5} — MISSED: {cls} ({stats})")
+    if missed_classes:
+        out += ["", "What the classes mean:"]
+        for cls in dict.fromkeys(missed_classes):
+            out.append(f"  {cls} — {CLASS_MEANING.get(cls, CLASS_MEANING['ambiguous'])}")
+        out += ["",
+                "A MISSED session is the operator's problem, not yours: do not "
+                "diagnose it and do not go looking for why. Do that session's "
+                "review — levels, trims considered, questions to tomorrow — as "
+                "part of this one, then trade the book."]
+    return "\n".join(out) + "\n\n---\n\n"
+
+
+def session_history() -> str:
+    """render_session_history over the real journal. Never raises."""
+    try:
+        return render_session_history(store.read_journal())
+    except Exception as e:              # noqa: BLE001
+        print(f"⚠️ session history unavailable: {e}", file=sys.stderr)
+        return ""
+
+
+def _journal_session_run(result: dict, out: str) -> None:
+    """Journal one session verdict — ran or not. Never raises."""
+    try:
+        calls, orders = stream_counts(out)
+        store.append_journal({
+            "event": "session_run",
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "mode": result.get("mode"),
+            "ok": bool(result.get("ok")),
+            "launched": bool(result.get("launched")),
+            "reason_class": reason_class(result.get("error"), stream_result(out)),
+            "error": (result.get("error") or "")[:200] or None,
+            "seconds": result.get("seconds"),
+            "tool_calls": calls, "orders": orders,
+        })
+    except Exception as e:              # noqa: BLE001
+        print(f"⚠️ session_run journal write failed: {e}", file=sys.stderr)
+
+
 EVIDENCE = REPO / "research_store" / "reviews" / "institutional_evidence.json"
 
 
@@ -557,6 +715,7 @@ def build_brief(mode: str, evidence: str = "") -> str:
     evidence_section = (("\n---\n\n" if handoff_block else "")
                         + evidence + "\n---\n\n") if evidence else ""
     return (f"{text}\n\n---\n\n{render_review(last_review(), mode)}"
+            f"{session_history()}"
             f"{handoff_block}{evidence_section}"
             f"THIS SESSION: **{mode}**, "
             f"{stamp.strftime('%A %Y-%m-%d %H:%M %Z')}.\n")
@@ -888,7 +1047,9 @@ def run(mode: str, dry_run: bool = False) -> dict:
         result = {"ok": ok, "mode": mode, "error": error,
                   "seconds": round(time.time() - started, 1),
                   "retryable": should_retry(error),
-                  "output_bytes": len(out or "")}
+                  "output_bytes": len(out or ""),
+                  "launched": True}
+        _journal_session_run(result, out)
         return result
 
     except KeyboardInterrupt:
@@ -1159,6 +1320,47 @@ def _selftest() -> None:
     # ...and not when no level decision was recorded
     assert level_claim_unmet([{"event": "agent_decision", "action": "hold"}], {}, {}) is None
 
+    # session_run: the failure CLASS is derived from the runner's error and the
+    # CLI's own result line, never from agent prose (2026-09-03 usage limit).
+    stream = "\n".join([
+        json.dumps({"type": "system", "subtype": "init"}),
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "no rate limit hit, placed the BUY"},
+            {"type": "tool_use", "name": "mcp__agentic-trader__brief"},
+            {"type": "tool_use", "name": "mcp__robinhood-trading__place_equity_order"}]}}),
+        json.dumps({"type": "result", "is_error": True,
+                    "result": "You've hit your limit · resets 4:40pm (America/New_York)"}),
+    ])
+    assert stream_result(stream).startswith("You've hit your limit"), stream_result(stream)
+    assert stream_result("") == "" and stream_result("not json") == ""
+    assert stream_counts(stream) == (2, 1), stream_counts(stream)
+    assert reason_class(None) is None
+    assert reason_class("exit 1: {\"usage\": 5781}", stream_result(stream)) == "usage_limit"
+    assert reason_class("session died: api error: 529 overloaded") == "model_outage"
+    assert reason_class("exit 1: x", "API Error: 400 claude_code_version_too_old") == "version_too_old"
+    assert reason_class("exit -1: timed out after 900s") == "timeout"
+    assert reason_class("refusing to run a second session") == "not_launched"
+    assert reason_class("something new") == "ambiguous"
+    # the brief block: nothing -> ""; a missed session -> its row, the legend
+    # for ITS class only, and the standing instruction; all-ran -> no legend.
+    assert render_session_history([]) == ""
+    ok_run = {"event": "session_run", "ts": "2026-09-03T16:01:00+00:00", "mode": "open",
+              "ok": True, "seconds": 375.1, "tool_calls": 40, "orders": 2}
+    missed = {"event": "session_run", "ts": "2026-09-03T19:16:36+00:00", "mode": "close",
+              "ok": False, "reason_class": "usage_limit", "seconds": 86.4,
+              "tool_calls": 11, "orders": 0}
+    blk = render_session_history([ok_run, missed, {"event": "agent_decision"}])
+    assert "- 2026-09-03 close — MISSED: usage_limit (86.4s, 11 tool calls, 0 orders)" in blk, blk
+    assert "- 2026-09-03 open  — ran (375.1s, 40 tool calls, 2 orders)" in blk, blk
+    assert blk.index("close — MISSED") < blk.index("open  — ran"), "newest first"
+    assert "usage_limit — the operator's Claude subscription cap" in blk, blk
+    assert "model_outage —" not in blk, "legend lists only the classes present"
+    assert "do not diagnose it" in blk and blk.endswith("\n\n---\n\n"), blk
+    assert "What the classes mean" not in render_session_history([ok_run])
+    # only the newest N are shown
+    many = [dict(ok_run, ts=f"2026-08-{d:02d}T16:00:00+00:00") for d in range(1, 10)]
+    assert render_session_history(many).count("- 2026-08-") == SESSION_HISTORY_N
+
     print("session: OK")
 
 
@@ -1176,5 +1378,9 @@ if __name__ == "__main__":
         ap.error("a mode is required")
 
     result = run(a.mode, dry_run=a.dry_run)
+    # A session that never reached the spawn (lock wait, HALT, broker read
+    # refused, an exception) still leaves its verdict in the journal.
+    if not result.get("launched") and not result.get("dry_run"):
+        _journal_session_run(result, "")
     print(json.dumps(result, indent=2))
     raise SystemExit(0 if result["ok"] else 1)

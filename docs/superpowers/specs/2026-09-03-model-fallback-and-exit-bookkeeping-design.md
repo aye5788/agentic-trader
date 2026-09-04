@@ -126,6 +126,20 @@ failure because it may already have placed orders") made mechanical. It is
 STRICTER than `should_retry()`'s signature list, and it is the only condition
 under which anything is retried.
 
+**The budget failure class (added 2026-09-04).** The 09-03 close session
+died on the operator's SUBSCRIPTION usage cap (`reason_class: usage_limit`,
+now journalled by the runner — see OPSLOG 2026-09-04). A cap hits every
+Claude model in the chain at once, so the chain above does not help for it.
+The chain therefore needs one BUDGET-INDEPENDENT step, and which one is the
+operator's decision, recorded here as open: (a) a dedicated subscription
+token for the box (`claude setup-token` on a second account), so interactive
+work can never starve the cron sessions — removes the cause; or (b) an
+API-key-billed attempt of the same model, with `ANTHROPIC_API_KEY` set ONLY
+in that spawn's environment and never in the box's (the CLAUDE.md footgun,
+made deliberate and scoped). `usage_limit` is a clean failure only under the
+same zero-tool-call rule; the 09-03 close had made 11 calls and would NOT
+have been retried.
+
 **Budget.** Each attempt keeps the role's timeout; the chain's total is capped
 at the role's cron window (`session`: `TIMEOUT_S[mode]` × 1.5, so an OPEN
 session chain never runs into the close; `exit`: `executor_timeout_secs` × 2).

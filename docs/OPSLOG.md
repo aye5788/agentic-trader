@@ -8,6 +8,52 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-04 — a missed session now tells the next one, in its own words
+
+**What happened.** The 2026-09-03 15:15 CLOSE session ran 86 s, made 11 read
+calls (snapshot refresh, positions, portfolio, terrain, quote…), recorded no
+decision, placed no order, and died on the CLI's `"You've hit your limit ·
+resets 4:40pm"` — the operator's Claude SUBSCRIPTION cap, spent by that
+afternoon's long interactive working session (the spec + plan for the
+outage). The runner classified it `ok:false, retryable:false` (correct: tools
+had run, so a retry could double-place) and paged the phone. It wrote NOTHING
+to the journal, and the brief had no section about prior sessions, so the
+09-04 10:35 session would have seen a journal that simply stopped at noon —
+and the charter forbids it to go looking for why.
+
+**For 09-04 specifically:** an `open_question` was filed by the operator at
+08:03 ET telling the 10:35 session exactly that, that it is not the system's
+fault and not its to diagnose, and to fold the missed close's review into its
+run. That is a hand fix; the mechanism below replaces it from now on.
+
+**Mechanism (scripts/session.py):**
+- Every verdict — ran, failed, or never launched — journals a `session_run`
+  event: `mode, ok, launched, reason_class, error[:200], seconds, tool_calls,
+  orders`. `reason_class` is derived from the runner's error AND the CLI's own
+  final `result` line (`stream_result`, scanned from the end, only the
+  `type: result` record — never agent prose, which is where "rate limit"
+  matching went wrong before). Classes: `usage_limit`, `version_too_old`,
+  `model_outage`, `auth`, `timeout`, `interrupted`, `not_launched`,
+  `ambiguous`. Yesterday's real close transcript classifies as `usage_limit`,
+  11 tool calls, 0 orders.
+- The brief gains **SINCE YOUR LAST RUN**: the newest 4 `session_run` rows
+  (`ran (375.1s, 40 tool calls, 2 orders)` / `MISSED: usage_limit (86.4s, 11
+  tool calls, 0 orders)`), a legend for ONLY the classes that appear among the
+  missed rows, and the standing instruction: a missed session is the
+  operator's problem — do not diagnose; do its review as part of this one;
+  trade the book. Rendered by `render_session_history` (pure), inserted after
+  the review block and before the recovery handoff. Empty until the first
+  event exists, so the 09-04 open session sees the open question, and the
+  09-04 close session is the first to see the block.
+
+**What it exposes for the fallback design.** A usage cap hits every Claude
+model in the chain at once — plan 2's chain as specified would not have saved
+this close. Spec §2 now names `usage_limit` as a class that needs a
+BUDGET-INDEPENDENT step (a dedicated subscription token for the box, or an
+API-key-billed step scoped to that spawn only), which is the operator's
+decision. Interactive work on Fable draws on the same subscription; the cron
+sessions themselves are pinned to Opus 5.
+
 ## 2026-09-03 (later) — the monitor records every exit; the executor keeps only its pen
 
 Spec `docs/superpowers/specs/2026-09-03-model-fallback-and-exit-bookkeeping-design.md`
