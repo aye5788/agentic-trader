@@ -1,0 +1,52 @@
+# Model pins for every unattended role, and the fallback chain behind them.
+#
+# Spec: docs/superpowers/specs/2026-09-03-model-fallback-and-exit-bookkeeping-design.md
+# (§1 config, §2 chain). Loaded by src/models.py at SPAWN time — the session
+# runner, the monitor's exit executor and the newsletter all read it fresh, so
+# a change here needs no restart.
+#
+# ⛔ OVERRIDE LOCALLY, NEVER EDIT A TEMPORARY VALUE INTO THIS FILE.
+# config/models.local.toml (git-ignored, human-written, same shape) is merged
+# OVER this one. An outage swap is a local edit; reverting is deleting that
+# file. On 2026-09-03 a temporary pin was committed to main with a memory note
+# to revert it — this file exists so that never happens again.
+#
+# ⛔ A model id literal anywhere else in scripts/, deploy/ or src/ (outside
+# src/models.py and its selftest) is a defect: src/repo_checks.py enforces it.
+
+[roles]
+session    = "claude-opus-5"
+exit       = "claude-opus-4-8"
+newsletter = "claude-opus-5"
+
+[chain]
+# Ordered, cross-family. A role's chain = [its primary] + these (primary
+# deduped). Walked ONLY on a clean failure — the spawn failed AND made zero
+# tool calls (src/fallback.py). Anything else is ambiguous and stops here.
+fallbacks = ["claude-sonnet-5", "claude-fable-5-1"]
+# The CLI itself can be briefly unusable during its own self-update ("claude
+# native binary not installed", observed 2026-09-04 08:07). That is a clean
+# failure on EVERY step (same binary), so the SAME model is retried once after
+# this many seconds before the chain is walked.
+cli_retry_after_s = 30
+
+[terminal]
+# The model-free last step of each role's chain. "none" until it exists:
+#   exit    -> "code_seller"  (spec §3)
+#   session -> "custody"      (spec §5)
+session = "none"
+exit    = "none"
+
+[budget]
+# Budget-independent step for a SUBSCRIPTION usage cap (spec §2, added
+# 2026-09-04). Declared, and INERT by the principal's decision the same day
+# ("neither for now"): a usage_limit that arrives after any tool call stays a
+# paged, unretried miss; one that arrives before any tool call walks the chain
+# like every other clean failure, and will usually exhaust it, since the cap
+# is per account, not per model.
+step = "none"
+
+[requires]
+# Minimum Claude Code version that accepts each model id. Static; the daily
+# health check compares it against the installed CLI.
+"claude-fable-5-1" = "2.1.251"

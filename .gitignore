@@ -5,6 +5,7 @@ secrets/
 
 # box-local strategy overrides (the live-trading arm switch lives here)
 /config/strategy.local.toml
+/config/models.local.toml
 # machine-written by the adaptive layer's promote step (scripts/promote_proposal.py)
 /config/strategy.adaptive.toml
 
