@@ -2,9 +2,14 @@
 
 **Date:** 2026-09-03
 **Status:** approved by the principal (Aaron) 2026-09-03. LANDED 2026-09-04
-before the open: §1, §2, §4, §6, §7, §8.1–8.3 (OPSLOG 2026-09-04, two
-entries). PENDING: §3 code seller, §5 custody, §8.4–8.5. Budget step: INERT
-by the principal's decision 2026-09-04.
+before the open: §1, §2, §3, §4, §6, §7, §8.1–8.4 (OPSLOG 2026-09-04, three
+entries). **§5 custody mode DEFERRED** by the principal 2026-09-04: the
+code seller already covers the money-critical piece (a Claude outage
+cannot leave a breached position unsold), and the §8.5 spike — a headless
+`codex exec` calling one MCP tool on Codex 0.148 — produced no output in
+180 s, consistent with the 08-14 cancellation bug still standing. If
+wanted later, that spike is the first step. Budget step: INERT by the
+principal's decision 2026-09-04. Session chain therefore ends at Fable.
 **Trigger:** the 2026-09-03 Claude model outage (`docs/OPSLOG.md`, same date).
 
 ## 0. What happened and what it exposed
@@ -241,7 +246,7 @@ restart between the sale and the bookkeeping is safe.
 The monitor restarts via `scripts/reload_stale.py`, which refuses while an
 exit is in flight.
 
-## 5. Custody mode (sessions, terminal step, Codex)
+## 5. Custody mode (sessions, terminal step, Codex) — DEFERRED 2026-09-04 (see Status)
 
 **Spike first.** A headless `codex exec` against the reviewer's existing
 read-only `agentic-trader` server, launched with the cron PATH, calling

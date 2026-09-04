@@ -301,7 +301,26 @@ src/fallback.py         THE CHAIN WALK (2026-09-04). One rule: the next model
                         MCP (deploy/drill_mcp.json), no tools, no broker; run
                         them through the unit's PATH. A usage cap hits every
                         Claude model at once: the budget step is declared
-                        INERT (principal, 2026-09-04).
+                        INERT (principal, 2026-09-04). The EXIT chain ends in
+                        the code seller below; the SESSION chain ends at Fable
+                        (Codex custody mode DEFERRED 2026-09-04).
+scripts/code_seller.py  THE MODEL-FREE EXIT (spec §3, live 2026-09-04): the
+                        exit chain's terminal step, reached ONLY after every
+                        model failed cleanly. Same request id (the hook's own
+                        request_id — imported, never copied), refuses on
+                        HALT/SHADOW/live_approved or a non-pinned account,
+                        reads live positions from the broker MCP with the
+                        CLI's stored token (proven accepted from a second
+                        client), sells floor(fraction × live, 6dp) as a market
+                        share-quantity order bounded by the hook's own
+                        _scope_verdict, rewrites exit_result.json after EACH
+                        placement, stages the recorder files. Fails CLOSED on
+                        pagination, token refusal, non-fill: nothing placed
+                        for that symbol, result absent, monitor pauses + pages.
+                        `--drill` = review only, nothing placed (run 08:33 ET
+                        2026-09-04, clean, before wiring). A Claude-wide
+                        outage cannot leave a breached position unsold while
+                        the broker is up.
 config/universe.csv     Fixed 150-name momentum universe (human-seed reconciled
                         with dollar-volume liquidity fill). `flag` col marks
                         adr/micro/spec/fresh-ipo model-caveats. Referenced by

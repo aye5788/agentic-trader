@@ -46,7 +46,29 @@ resolve the same file+version) and `claude_models` (installed version ≥ every
 pin's floor). Auto-update stays on; its few-second window is the
 `cli_unavailable` class and is retried.
 
-**Still to come:** the code seller (§3) and Codex custody (§5).
+**Later the same morning — the code seller is live; custody is deferred.**
+`scripts/code_seller.py` is the exit chain's terminal step (`[terminal] exit
+= "code_seller"` in config/models.toml). The spike came first: a Python MCP
+client with the CLI's stored broker token listed all 67 tools and read the
+accounts — the broker accepts that token from a second client. Then the
+seller's own drill (08:33 ET, request bound by hash, live positions read,
+quantity floored, the exit-scope hook's own verdict, `review_equity_order`
+only) came back clean with nothing placed or written; only then was it wired.
+`run_executor` invokes it ONLY after every model failed cleanly; an ambiguous
+failure still stops and pages; the chain's "exhausted" event is held back so
+the phone reads one transition, "→ code_seller". Verified by monkeypatched
+invocation for all three cases before the monitor was restarted on it.
+
+**Codex custody mode (spec §5) is DEFERRED** (principal, 2026-09-04). The
+seller covers the money-critical case; custody would only add level
+management on a day no Claude session can run. Its spike — one headless
+`codex exec` MCP call on Codex 0.148 — produced no output in 180 s. The
+session chain ends at Fable.
+
+**What this makes impossible:** a Claude-wide outage leaving a breached
+position unsold while the broker is up. **What it does not change:** the
+sale is still bounded by the monitor's request and the hook's own arithmetic,
+and nothing ever retries an ambiguous failure.
 
 ## 2026-09-04 — a missed session now tells the next one, in its own words
 
