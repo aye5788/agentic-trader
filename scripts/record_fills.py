@@ -50,7 +50,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 from research_store import store  # noqa: E402
-from notify import push           # noqa: E402
+from notify import push, fill_line  # noqa: E402
 
 FILLS = REPO / "research_store" / "rh" / "fills.json"
 REENTRY_DECISIONS = REPO / "research_store" / "rh" / "reentry_decisions.json"
@@ -246,9 +246,7 @@ def _push_summary(fills: list, reentry: list | None) -> None:
     placed = [f for f in fills if f.get("status") != "skipped"]
     skipped = [f for f in fills if f.get("status") == "skipped"
                and not _expected_skip(f.get("reason"))]
-    lines = [f"{f.get('side', '?').upper()} {f.get('symbol', '?')} ${f.get('amount', '?')}"
-             + (f" @ ${f['avg_price']}" if f.get("avg_price") else f" ({f.get('status', '?')})")
-             for f in placed]
+    lines = [fill_line(f) for f in placed]
     lines += [f"{f.get('side', '?').upper()} {f.get('symbol', '?')} ${f.get('amount', '?')}"
               + f" — SKIPPED: {f.get('reason', 'no reason recorded')}"
               for f in skipped]

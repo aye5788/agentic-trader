@@ -927,6 +927,13 @@ def record_fills(orders: str, broker_positions: str = "", portfolio: str = "") -
 
     store.append_journal({"event": "execution", "ts": ts,
                           "source": "session", "fills": fills})
+    # Phone push, one line per NEW fill (the idempotent filter above means a
+    # re-call never re-pushes). The exit path's recorder has always done this;
+    # the sessions' recorder never did, and the principal expected it
+    # (2026-09-03). push() never raises; the ledger write above never
+    # depends on it.
+    notify.push(f"Agentic session: {len(fills)} order{'s' if len(fills) != 1 else ''} filled",
+                "\n".join(notify.fill_line(f) for f in fills), tags="money_with_wings")
     return json.dumps({"ok": bool(snapshot_result and snapshot_result.get("ok")),
                        "recorded": len(fills), "fills": fills,
                        "snapshot": snapshot_result,

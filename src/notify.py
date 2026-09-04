@@ -90,6 +90,24 @@ def ops_topic() -> str | None:
     return os.environ.get("NTFY_TOPIC_OPS") or os.environ.get("NTFY_TOPIC")
 
 
+def fill_line(f: dict) -> str:
+    """One phone line for one order: 'BUY DELL $4.00 @ $512.17'.
+
+    Shared by scripts/record_fills.py (the exit path) and the sessions' MCP
+    record_fills so the two paths read the same on the phone. `amount` is a
+    float from the MCP path and a string from the exit path; both render.
+    """
+    amt = f.get("amount", "?")
+    try:
+        amt_s = f"{float(amt):.2f}"
+    except (TypeError, ValueError):
+        amt_s = str(amt)
+    line = f"{str(f.get('side', '?')).upper()} {f.get('symbol', '?')} ${amt_s}"
+    if f.get("avg_price"):
+        return line + f" @ ${f['avg_price']}"
+    return line + f" ({f.get('status', '?')})"
+
+
 def _selftest() -> None:
     """Every alert title in this repo must survive an HTTP header."""
     for t in ("\U0001f6a8 Unprotected position(s) \u2014 no stop being watched",
@@ -108,7 +126,12 @@ def _selftest() -> None:
     assert _header_safe("\U0001f6a8") == "agentic-trader alert"
     assert _header_safe("") == "agentic-trader alert"
     assert _header_safe(None) == "agentic-trader alert"
-    print("notify: OK -- every alert title survives a latin-1 header")
+    assert fill_line({"side": "buy", "symbol": "DELL", "amount": 4.0, "avg_price": "512.17"}) \
+        == "BUY DELL $4.00 @ $512.17"
+    assert fill_line({"side": "sell", "symbol": "MU", "amount": "3.65", "status": "skipped"}) \
+        == "SELL MU $3.65 (skipped)"
+    assert fill_line({}) == "? ? $? (?)"
+    print("notify: OK -- every alert title survives a latin-1 header; fill_line renders")
 
 
 if __name__ == "__main__":
