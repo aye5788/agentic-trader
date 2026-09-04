@@ -1183,9 +1183,9 @@ def drop_wakes_for(symbol: str) -> list:
 #: a BARE tool name in --allowedTools is a BLANKET grant that overrides the
 #: narrow `Bash(...)` / `Write(...)` rules in the settings file: probed on this
 #: box, an executor granted bare `Bash` ran `ls /opt` happily while
-#: deploy/exit_executor_settings.json permitted only four specific
-#: `.venv/bin/python scripts/record_*.py` commands. Naming the built-in here
-#: silently converts "may run four recording scripts" into "may run anything".
+#: deploy/exit_executor_settings.json at the time permitted only four specific
+#: `.venv/bin/python scripts/record_*.py` commands (none today). Naming the
+#: built-in here silently converts "may run nothing" into "may run anything".
 #: Their authority therefore comes from the per-command and per-path rules in
 #: that settings file, which is the only place it can be read and reviewed.
 EXECUTOR_TOOLS = [

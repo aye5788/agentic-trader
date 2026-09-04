@@ -69,8 +69,8 @@ PROCEDURE — follow exactly:
    dollar notional and not `amount / avg_price`. A sell without it leaves the
    ledger unable to see the position reach zero, which is exactly the event that
    closes its lifecycle.
-   Do NOT run the recorder yet — step 7 supplies the broker state it publishes
-   alongside these fills, and the two must be written together.
+   You do not run any recorder. The monitor runs them after you exit (see
+   step 7). Your job is the files.
 7. **Reconcile.** If you sold anything, re-fetch `get_equity_positions` (from the
    cursorless first page through the page with no `next`) and `get_portfolio`,
    and write `research_store/rh/broker_state.json`:
@@ -81,18 +81,25 @@ PROCEDURE — follow exactly:
     "portfolio":<raw get_portfolio output>,
     "account_number":"<num>","liquidated":false}
    ```
-   Then run `.venv/bin/python scripts/record_fills.py` ONCE. It journals the
-   fills from step 6 AND publishes `research_store/rh/positions.json`, both
-   stamped with the SAME timestamp.
-   ⛔ **DO NOT hand-write `positions.json`.** You no longer have permission to,
-   and it is not a formatting preference: the publisher REJECTS a truncated or
+   ⛔ **DO NOT run `scripts/record_fills.py` — you have no Bash grant and it
+   is not yours to run.** After you exit, the monitor runs the recorders in
+   this order, each only if its file exists, and moves each consumed file to
+   `research_store/rh/consumed/`:
+     1. `record_fills.py`           ← `fills.json` (+ `broker_state.json`)
+     2. `record_exit_outcome.py`    ← `exit_closes.json`
+     3. `record_partial_outcome.py` ← `partial_closes.json`
+     4. `reconcile_ledger.py`       ← `orders_dump.json`
+   `record_fills.py` journals your fills AND publishes `positions.json`, both
+   under one timestamp — which is why `fills.json` and `broker_state.json`
+   must both be complete before you finish.
+   ⛔ **DO NOT hand-write `positions.json`.** You have no permission to, and
+   it is not a formatting preference: the publisher REJECTS a truncated or
    unreadable broker read rather than coercing it, because a partial book looks
-   current and silently unprotects whatever it dropped. A hand-assembled file has
-   no such check. Passing the pages transcript is how completeness is PROVEN —
-   `exhausted:true` with each page's cursor matching the prior response's next.
-   If the script exits non-zero it REFUSED the write: the previous snapshot is
-   intact, `broker_state.json` is kept for retry, and your fills are already
-   journaled. Fix the transcript and re-run; do not work around it.
+   current and silently unprotects whatever it dropped. Passing the pages
+   transcript is how completeness is PROVEN — `exhausted:true` with each
+   page's cursor matching the prior response's next. If the publisher refuses
+   the write the previous snapshot stays intact, `broker_state.json` is kept,
+   and the monitor pages the operator; your fills are already journaled.
    The dashboard and equity log read this file; a stale snapshot after an exit
    shows positions that no longer exist.
    Also refresh the realized-P&L snapshot — a sell just realized a result:
@@ -105,8 +112,8 @@ PROCEDURE — follow exactly:
 7c. **Record the outcome (the learning label).** For each symbol you sold to a
     FULL close (position now zero), journal its outcome. Write
     `research_store/rh/exit_closes.json` — a JSON array of
-    `{"symbol","entry_price","exit_price","exit_date","exit_reason"}` — then run
-    `.venv/bin/python scripts/record_exit_outcome.py`:
+    `{"symbol","entry_price","exit_price","exit_date","exit_reason"}`. The monitor
+    runs `record_exit_outcome.py` on it after you exit; the fields:
       - entry_price = that symbol's `avg_cost` (average buy price) as returned
         by `get_equity_positions` in step 3, captured BEFORE any sells this
         run — do NOT re-read `positions.json` here: step 7 has already
@@ -125,16 +132,15 @@ PROCEDURE — follow exactly:
     report it, do not retry it. Nothing fully closed → skip this step entirely
     (do not write an empty file). Partial (scale-out) exits do NOT go here — the
     position is still open, so it has no closing outcome; step 7d records them.
-    Do NOT hand-edit `journal.jsonl` and do NOT write your own python snippet;
-    this helper is the only writer.
+    Do NOT hand-edit `journal.jsonl`; the monitor's recorder is the only writer.
 7d. **Record partial (scale-out) sells.** `target1` sells half and leaves the
     position open. That is a real decision with a real result, and until it is
     journalled it is invisible in `performance()` and in the track record — so
     record it, without pretending the trade closed. For each exit you sold with
     `fraction < 1.0`, write `research_store/rh/partial_closes.json` — a JSON
     array of `{"symbol","fraction","entry_price","exit_price","exit_date",
-    "exit_reason"}` — then run
-    `.venv/bin/python scripts/record_partial_outcome.py`:
+    "exit_reason"}`. The monitor runs `record_partial_outcome.py` on it after
+    you exit; the fields:
       - fraction    = that exit's `fraction` from `exit_request.json` (step 1)
       - entry_price = that symbol's `avg_cost` from the step-3
         `get_equity_positions`, captured BEFORE any sells this run
@@ -146,10 +152,10 @@ PROCEDURE — follow exactly:
     on symbol + date + price, so a retry is safe while a genuinely different
     second trim still records. Nothing partial this run → skip entirely (do not
     write an empty file); a `fraction` of 1.0 is refused here by design. Same
-    rules as 7c: `UNANCHORED` is reported not retried, and this helper is the
-    only writer.
-7e. **Ledger reconcile.** Write `research_store/rh/orders_dump.json` (the raw
-    `get_equity_orders` response shape) from `get_equity_orders`, then run
-    `.venv/bin/python scripts/reconcile_ledger.py`. Don't suppress its exit code.
+    rules as 7c.
+7e. **Ledger reconcile input.** Write `research_store/rh/orders_dump.json` (the
+    raw `get_equity_orders` response shape) from `get_equity_orders`. The monitor
+    runs `reconcile_ledger.py` on it after you exit; a divergence pages the
+    operator.
 8. Report one concise line per exit: symbol, reason, amount sold, order id (or why
    skipped). That is your entire output.
