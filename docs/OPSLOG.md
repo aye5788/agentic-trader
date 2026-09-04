@@ -8,6 +8,34 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-03 (later) — the monitor records every exit; the executor keeps only its pen
+
+Spec `docs/superpowers/specs/2026-09-03-model-fallback-and-exit-bookkeeping-design.md`
+§4 and §7, plan 1 of 4 (`docs/superpowers/plans/2026-09-03-exit-bookkeeping-and-fill-push.md`).
+Landed the morning of 2026-09-04 before the open. What changed:
+
+- `src/exit_bookkeeping.py` (new, 3.10-safe): after `run_executor` returns,
+  the monitor runs the four recorder scripts from whichever staging files
+  exist, in the order the prompt always ran them, archives each consumed
+  file to `research_store/rh/consumed/<name>.<ts>.json`, pages on a non-zero
+  script, and pages + journals `exit_bookkeeping_gap` when something sold
+  but nothing was staged. A leftover staging file is still run (every
+  recorder is idempotent) — never skipped silently.
+- `deploy/exit_executor_settings.json`: the four `Bash(record_*.py)` grants
+  are gone. `prompts/exit.md` steps 6–7e write files and name the monitor as
+  the runner. The prompt was read whole after the edit.
+- `src/notify.fill_line` is shared by the exit recorder and the sessions'
+  MCP `record_fills`, which now pushes one line per new fill — the
+  principal's request after asking "no notifications?" on the 09-03 buys.
+- The DELL 09-03 `partial_outcome` was recorded by hand (see the outage
+  entry's addendum below).
+
+What this makes impossible: a filled exit whose ledger and snapshot stay
+silent because a model did not type a command, including when the
+executor dies after placing. What it does NOT change: the sale itself is
+still the executor's (or, from plan 3, the code seller's); `exit_result.json`
+is still the monitor's trigger-fired signal.
+
 ## 2026-09-03 — Claude model outage — 10:35 OPEN session held safely
 
 At 10:24 ET (14:24Z), the official Claude status page reported an active

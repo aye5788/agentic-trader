@@ -337,6 +337,15 @@ scripts/market_monitor.py Intraday stop/take-profit watcher.
                         prompts/exit.md (market sell) on a breach. Pure-Python
                         watching, Claude only on an event. Runs as a systemd
                         service; alert-only unless live_approved. [monitor] config.
+                        ⛔ SINCE 2026-09-03 THE MONITOR RECORDS EVERY EXIT
+                        ITSELF (src/exit_bookkeeping.py): after the executor
+                        returns it runs record_fills / record_exit_outcome /
+                        record_partial_outcome / reconcile_ledger from the
+                        staging files, archives each consumed file to
+                        research_store/rh/consumed/, and pages on a failure or
+                        on "sold but nothing staged". The executor used to run
+                        those under exact-match Bash grants and one un-retried
+                        refusal left a filled DELL trim unrecorded.
 scripts/session.py      THE SESSION RUNNER — the inversion's entry point. LIVE since
                         2026-08-12 (cron: open 10:35, close 15:15 ET weekdays,
                         via deploy/run_session.sh). Starts ONE agent session and
@@ -431,8 +440,10 @@ prompts/exit.md         Exit-executor procedure — market-sell the breached
                         snapshot + realized-P&L after selling.
 src/notify.py           THE ntfy phone-push helper (push(); never raises; no
                         NTFY_TOPIC in .env -> no-op). Used by market_monitor
-                        (stop/target alerts) and record_fills (trade placed/
-                        skipped summaries). deploy/alert.sh mirrors it in shell.
+                        (stop/target alerts), scripts/record_fills.py (exit-path
+                        fill summaries) and, since 2026-09-03, the sessions'
+                        MCP record_fills (one line per new fill) — both via
+                        notify.fill_line. deploy/alert.sh mirrors it in shell.
 src/marks.py            Position valuation — the ONE place snapshot positions
                         become dollars (qty × freshest mark: monitor quote >
                         snapshot last > cost). Dashboard, log_equity and the
@@ -467,10 +478,12 @@ research_store/rh/positions.json
                         ⛔ EVERY writer goes through _write_broker_snapshot(), and
                         the one that journals the fill passes it the SAME ts, so
                         snapshot and journal can never disagree. The EXIT path
-                        (prompts/exit.md step 7) reaches it via
-                        scripts/record_fills.py + research_store/rh/broker_state.json,
-                        because deploy/exit_mcp.json deliberately does NOT mount
-                        the agentic-trader MCP. Until 2026-08-25 that path
+                        reaches it via scripts/record_fills.py +
+                        research_store/rh/broker_state.json — RUN BY THE MONITOR
+                        (src/exit_bookkeeping.py, 2026-09-03), not by the
+                        executor: the executor writes the staging files and
+                        holds no Bash grant. deploy/exit_mcp.json deliberately
+                        does NOT mount the agentic-trader MCP. Until 2026-08-25 that path
                         HAND-WROTE this file from a prompt template — no
                         validation, and a second clock, which made a correct
                         snapshot read stale-after-fill (OPSLOG 2026-08-25, "the
