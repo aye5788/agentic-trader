@@ -123,7 +123,7 @@ NON_ALERTING = ("ok", "unknown", "unverified", "disabled")
 
 # Non-alerting AND settled -> safe to clear a stale flag in health_state.json.
 # "unknown" is deliberately absent: see scripts/health_check.py:diff().
-KNOWN_NON_ALERTING = ("ok", "unverified")
+KNOWN_NON_ALERTING = ("ok", "unverified", "disabled")   # settled: the answer is known
 
 
 @dataclass(frozen=True)
