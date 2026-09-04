@@ -203,6 +203,33 @@ that moved the order gate into a PreToolUse hook. Do not treat it as a reason
 to skip the command: between your edit and the next tick, the stop watcher is
 running code you have already replaced.
 
+## ⛔ THE OVERSIGHT LOOP NEVER SPENDS THE PRINCIPAL'S MODEL BUDGET UNASKED  (since 2026-09-04)
+
+Read this before touching `scripts/health_check.py`, `src/health.py`,
+`.github/workflows/validate.yml` or `.github/workflows/claude.yml`.
+
+- **The `auto-fix` label is a Claude Code run on GitHub Actions billed to the
+  principal's subscription.** From 2026-08-10 to 09-02, nine such runs fired on
+  detector-filed issues and every one concluded "operational, not a code
+  defect — no PR". The last one spent a run discovering the Codex review had
+  been switched off on purpose. **No detector attaches `auto-fix` any more**:
+  the box's health check and both `validate.yml` jobs file `bug`+`ops`, and
+  the `repository_dispatch` hand-off is deleted. Only a human adds `auto-fix`
+  or @-mentions the agent. Do not "restore" the automatic hand-off; if you
+  think a finding needs the agent, say so to the principal.
+- **A job the operator switched off on purpose is a STATE, not a fault.**
+  `research_store/disabled/<health.SPECS key>` (first line = when/why) makes
+  that job read `disabled`: non-alerting, never filed, settles any standing
+  flag, dim on the dashboard as "OFF (operator)". The Codex review has been
+  off since 2026-08-19; `deploy/run_session.sh` writes its marker on every
+  run beside the commented-out invocation. **When re-enabling a job, delete
+  its marker too**, or health keeps reading it as off.
+- **Do not add a check that pages on a condition no human action can
+  resolve.** That is the class behind all of this (see OPSLOG 2026-09-04,
+  "the detectors stop spending the principal's model budget", and the
+  `snapshot_identity` history on 2026-08-21 for the earlier instance).
+  Fire-once + `ops` issue + dashboard is the whole channel.
+
 ## Adaptive-input layer (self-tuning strategy knobs)
 
 An **off-box** background learner tunes `strategy.toml` knobs from the Decision→
