@@ -109,6 +109,20 @@ def reason_class(error: str | None, text: str = "") -> str | None:
     return AMBIGUOUS
 
 
+DRILL_PROMPT = "Reply with exactly: OK"
+
+
+def drill_argv(model: str, empty_mcp_config: str) -> list:
+    """A spawn that can reach NO tool and NO broker: empty MCP surface, no
+    built-ins, dontAsk. What a drill proves is the chain, not the job. Shared
+    by the session runner and the monitor's executor drill so the two prove
+    the same thing."""
+    return ["claude", "-p", "--output-format", "stream-json", "--verbose",
+            "--model", model, "--setting-sources", "",
+            "--strict-mcp-config", "--mcp-config", str(empty_mcp_config),
+            "--tools", "", "--permission-mode", "dontAsk"]
+
+
 def clean_failure(a: Attempt) -> bool:
     """Failed AND provably did no work: zero tool calls in the transcript."""
     return (not a.ok) and a.tool_calls == 0

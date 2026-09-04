@@ -461,7 +461,7 @@ SESSION_HISTORY_N = 4
 
 SESSION_CHAIN_BUDGET_X = 1.5     # the whole chain fits 1.5 session timeouts
 DRILL_MCP = REPO / "deploy" / "drill_mcp.json"
-DRILL_PROMPT = "Reply with exactly: OK"
+DRILL_PROMPT = fallback.DRILL_PROMPT
 DRILL_TIMEOUT_S = 120
 
 
@@ -485,12 +485,8 @@ def _journal_fallback(role: str, mode: str, frm: str, to: str | None,
 
 
 def _drill_argv(model: str) -> list[str]:
-    """A spawn that can reach NO tool and NO broker: empty MCP surface, no
-    built-ins, dontAsk. What it proves is the chain, not the session."""
-    return ["claude", "-p", "--output-format", "stream-json", "--verbose",
-            "--model", model, "--setting-sources", "",
-            "--strict-mcp-config", "--mcp-config", str(DRILL_MCP),
-            "--tools", "", "--permission-mode", "dontAsk"]
+    """See fallback.drill_argv: no tool, no broker; proves the chain."""
+    return fallback.drill_argv(model, str(DRILL_MCP))
 
 
 def render_session_history(events: list) -> str:

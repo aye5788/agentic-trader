@@ -49,6 +49,7 @@ from adapters.moomoo.client import quote_ctx     # noqa: E402
 from notify import push as notify               # noqa: E402  shared ntfy helper
 import exit_bookkeeping                          # noqa: E402  monitor-owned exit recording (§4, 2026-09-03)
 import models                                    # noqa: E402  the exit executor's model + chain (config/models.toml)
+import fallback                                  # noqa: E402  the chain walk (clean failure only)
 # ⛔ ONE DEFINITION OF "THE SAME REQUEST", shared with the gate that enforces it.
 # The producer of the identity and its verifier must never drift into two
 # implementations, so the stamp the executor is launched with and the check the
@@ -1247,6 +1248,10 @@ def executor_argv(model: str) -> list:
     no Bash grant at all.
     """
     return ["claude", "-p",
+            # stream-json to logs/exit_stream.jsonl: the chain's clean-failure
+            # test counts tool_use blocks in it, and until 2026-09-04 the
+            # executor's tool calls were recoverable only from ~/.claude/.
+            "--output-format", "stream-json", "--verbose",
             # the model is PINNED (never the CLI default, which can be retired
             # under us) but pinned in config, not here
             "--model", model,
@@ -1280,8 +1285,68 @@ def executor_env(req_id: str) -> dict:
     return env
 
 
+EXIT_STREAM = REPO / "logs" / "exit_stream.jsonl"
+EXIT_CHAIN_BUDGET_X = 2.0            # the whole chain fits two executor timeouts
+DRILL_MCP = REPO / "deploy" / "drill_mcp.json"
+
+
+def _spawn_executor(argv: list, prompt: str, env: dict, timeout_secs: int,
+                    stream_path: Path) -> tuple:
+    """ONE executor spawn. -> (rc, stream text, stderr). Never raises."""
+    stream_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(stream_path, "w") as sfh:
+            cp = subprocess.run(argv, input=prompt, text=True, cwd=str(REPO), env=env,
+                                timeout=timeout_secs, stdout=sfh, stderr=subprocess.PIPE,
+                                check=False)
+        rc, err = cp.returncode, cp.stderr or ""
+    except subprocess.TimeoutExpired:
+        rc, err = -1, f"timed out after {timeout_secs}s"
+    except Exception as e:                            # noqa: BLE001
+        rc, err = -1, f"spawn failed: {type(e).__name__}: {e}"
+    try:
+        out = stream_path.read_text()
+    except OSError:
+        out = ""
+    return rc, out, err
+
+
+def _executor_judge(rc: int, out: str, err: str) -> tuple:
+    """The RESULT FILE is the verdict, never the exit code (see run_executor)."""
+    if EXIT_RES.exists():
+        return True, None
+    tail = (err or "").strip() or fallback.result_text(out).strip()
+    return False, f"exit {rc}: {tail[-300:] or 'no result file'}"
+
+
+def _journal_fallback(role: str, frm: str, to, reason, attempt: int,
+                      drill: bool = False) -> None:
+    """One journal event + one phone push per chain transition. Never raises."""
+    rec = {"event": "model_fallback",
+           "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "role": role, "mode": "exit", "from": frm, "to": to,
+           "reason": reason, "attempt": attempt}
+    if drill:
+        rec["drill"] = True
+    try:
+        store.append_journal(rec)
+    except Exception as e:                            # noqa: BLE001
+        print(f"  model_fallback journal write failed: {e}")
+    body = f"{frm} → {to or 'EXHAUSTED'} ({reason}) attempt {attempt}"
+    print(f"  model fallback: {body}")
+    notify(f"FALLBACK {role}" + (" (DRILL)" if drill else ""), body,
+           tags="warning" if to else "rotating_light")
+
+
 def run_executor(req_id: str, timeout_secs: int = 300) -> dict:
     """Fire the headless exit executor and return its result file ([] on failure).
+
+    ⛔ SINCE 2026-09-04 THIS WALKS THE MODEL CHAIN (config/models.toml,
+    src/fallback.py): one spawn per model, the next ONLY when the previous
+    spawn failed with ZERO tool calls in its transcript. A failure after any
+    tool call is ambiguous -- it may have placed the sell -- and stops here,
+    exactly as before the chain existed. The verdict per spawn is the result
+    file below; each transition is journalled and pushed.
 
     Deliberately reads the RESULT FILE rather than trusting the subprocess exit
     code: the sell is step 4 of an 8-step prompt and the tail is bookkeeping, so a
@@ -1319,10 +1384,20 @@ def run_executor(req_id: str, timeout_secs: int = 300) -> dict:
         # failed exit. scripts/session.py:784 records the same failure for the
         # trading sessions; this path inherits the lesson rather than the bug.
         # (It also sidesteps MAX_ARG_STRLEN, 128KiB per argument.)
-        subprocess.run(executor_argv(models.primary("exit")),
-                       input=(REPO / "prompts" / "exit.md").read_text(),
-                       text=True, cwd=str(REPO), env=executor_env(req_id),
-                       timeout=timeout_secs, check=False)
+        prompt = (REPO / "prompts" / "exit.md").read_text()
+        env = executor_env(req_id)
+        walk = fallback.run_chain(
+            models.chain("exit"),
+            lambda m: _spawn_executor(executor_argv(m), prompt, env, timeout_secs, EXIT_STREAM),
+            _executor_judge,
+            per_attempt_s=timeout_secs, budget_s=timeout_secs * EXIT_CHAIN_BUDGET_X,
+            cli_retry_after_s=models.cli_retry_after_s(),
+            on_fallback=lambda frm, to, reason, n: _journal_fallback("exit", frm, to, reason, n))
+        last = walk["attempts"][-1]
+        # the executor's final text used to reach journald via inherited stdout;
+        # with stream-json on disk, print it here so the log stays readable
+        print(f"  executor [{last.model}] rc={last.rc} tool_calls={last.tool_calls} "
+              f"chain={walk['stopped']}:\n{fallback.result_text(last.out)[:3000]}")
     except Exception as e:                            # never let execution crash the monitor
         print(f"  executor error: {e}")
     return _load(EXIT_RES, {"sold": []})
@@ -2256,10 +2331,32 @@ def main():
     ap.add_argument("--once", action="store_true", help="single pass then exit")
     ap.add_argument("--force", action="store_true", help="ignore the market-hours gate")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--executor-drill", action="store_true",
+                    help="walk the exit executor's model chain with a no-tool prompt: "
+                         "no request, no broker, no MCP. Proves the chain, not the exit.")
+    ap.add_argument("--drill-chain", default="",
+                    help="comma-separated model ids for --executor-drill (default: the "
+                         "configured exit chain); a bogus first id is the test")
     args = ap.parse_args()
     if args.selftest:
         _selftest()
         return
+    if args.executor_drill:
+        chain = [m.strip() for m in args.drill_chain.split(",") if m.strip()] or models.chain("exit")
+        walk = fallback.run_chain(
+            chain,
+            lambda m: _spawn_executor(fallback.drill_argv(m, str(DRILL_MCP)), fallback.DRILL_PROMPT,
+                                      executor_env(""), 120, EXIT_STREAM),
+            lambda rc, out, err: (rc == 0, None if rc == 0 else f"exit {rc}: {(err or '').strip()[-300:]}"),
+            per_attempt_s=120, budget_s=120 * len(chain) + 60,
+            cli_retry_after_s=models.cli_retry_after_s(),
+            on_fallback=lambda frm, to, reason, n: _journal_fallback("exit", frm, to, reason, n, drill=True))
+        print(json.dumps({"ok": walk["ok"], "drill": True, "chain": chain, "stopped": walk["stopped"],
+                          "attempts": [{"model": a.model, "rc": a.rc, "reason_class": a.reason_class,
+                                        "tool_calls": a.tool_calls,
+                                        "answer": fallback.result_text(a.out)[:60]}
+                                       for a in walk["attempts"]]}, indent=2))
+        raise SystemExit(0 if walk["ok"] else 1)
     cfg = strat.load()
     poll = cfg["monitor"]["poll_secs"]
     client = quote_ctx()
