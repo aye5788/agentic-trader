@@ -47,6 +47,7 @@ from research_store import read_current, store   # noqa: E402
 from adapters.moomoo import prices as mmp        # noqa: E402
 from adapters.moomoo.client import quote_ctx     # noqa: E402
 from notify import push as notify               # noqa: E402  shared ntfy helper
+import exit_bookkeeping                          # noqa: E402  monitor-owned exit recording (§4, 2026-09-03)
 # ⛔ ONE DEFINITION OF "THE SAME REQUEST", shared with the gate that enforces it.
 # The producer of the identity and its verifier must never drift into two
 # implementations, so the stamp the executor is launched with and the check the
@@ -1173,8 +1174,11 @@ def drop_wakes_for(symbol: str) -> list:
 #: ONLY is enforced mechanically by scripts/hooks/pretooluse_exit_scope.py.
 #:
 #: ⛔ THE BUILT-INS ARE DELIBERATELY ABSENT FROM THIS LIST, AND MUST STAY ABSENT.
-#: prompts/exit.md does need Bash, Read and Write — it drives deterministic
-#: recording scripts and writes its own result/reconciliation files, and this is
+#: prompts/exit.md needs Read and Write — it writes its own result file and the
+#: staging files the monitor's recorders consume (src/exit_bookkeeping.py). It
+#: no longer needs Bash: until 2026-09-03 it ran the four recorder scripts
+#: itself under exact-match grants, and one un-retried refusal left a filled
+#: sale unrecorded. This is
 #: NOT the sessions' MCP architecture (do not quietly convert it into one). But
 #: a BARE tool name in --allowedTools is a BLANKET grant that overrides the
 #: narrow `Bash(...)` / `Write(...)` rules in the settings file: probed on this
@@ -1231,10 +1235,12 @@ def executor_argv() -> list:
         following argument as a tool name.
 
     ⚠️ NOT `--tools ""`. The sessions disable every built-in because they need
-    no shell. This executor DOES: steps 6, 7c, 7d and 7e of prompts/exit.md run
-    `.venv/bin/python scripts/record_*.py`, and it writes its own result file.
-    Removing the built-ins here would break exit recording in the direction that
-    looks like a quiet day.
+    no shell. This executor still needs Read and Write: it writes its own
+    result file and the staging files (fills.json, broker_state.json,
+    exit_closes.json, partial_closes.json, orders_dump.json) that the monitor
+    hands to the recorder scripts after this process returns. It does NOT run
+    those scripts any more — see exit_bookkeeping.record_exits — so it holds
+    no Bash grant at all.
     """
     return ["claude", "-p",
             # model pinned — the exit path must never break because a default
@@ -2150,6 +2156,30 @@ def check_once(cfg, client) -> int:
                               int(m.get("executor_timeout_secs", 300)))
         result_present = EXIT_RES.exists()
         sold = {s["symbol"] for s in result.get("sold", [])}
+        # ⛔ THE MONITOR RECORDS THE EXIT, NOT THE EXECUTOR (2026-09-03). The
+        # executor writes staging files; the four recorder scripts run HERE,
+        # whichever path sold, so a filled sale with a silent ledger/snapshot
+        # is impossible — including when the executor dies after placing.
+        bk = exit_bookkeeping.record_exits(sold, ts=ts)
+        for r in bk["ran"]:
+            print(f"  bookkeeping ok: {r['script']} -> archived {r['archived'].name if r['archived'] else '-'}")
+        for r in bk["failed"]:
+            print(f"  bookkeeping FAILED: {r['script']} rc={r['rc']}: {r['tail']}")
+            notify("Exit bookkeeping FAILED",
+                   f"{r['script']} rc={r['rc']}\n{r['tail']}\nStaging file kept for retry.",
+                   tags="warning")
+        for w in bk["warnings"]:
+            print(f"  bookkeeping warning: {w}")
+        if bk["gap"]:
+            store.append_journal({"event": "exit_bookkeeping_gap", "ts": ts,
+                                  "sold": sorted(sold),
+                                  "reason": "executor reported a sale but wrote no staging "
+                                            "file — ledger and positions.json NOT updated"})
+            notify("EXIT BOOKKEEPING INCOMPLETE",
+                   f"{', '.join(sorted(sold))} SOLD but the executor staged nothing: "
+                   f"ledger + positions.json are stale until reconciled. The 08:00 "
+                   f"health check will flag unrecorded fills.",
+                   tags="rotating_light")
         failed = {t["symbol"] for t in act} - sold
         if failed:
             notify("Exit executor result",
