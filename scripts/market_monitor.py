@@ -1386,18 +1386,53 @@ def run_executor(req_id: str, timeout_secs: int = 300) -> dict:
         # (It also sidesteps MAX_ARG_STRLEN, 128KiB per argument.)
         prompt = (REPO / "prompts" / "exit.md").read_text()
         env = executor_env(req_id)
+        seller = models.terminal("exit") == "code_seller"
+        held_back: list = []          # the walk's final "→ EXHAUSTED" event, if any
+
+        def _on_fallback(frm, to, reason, n):
+            # When the code seller is configured, the chain's end is not the
+            # end: hold the EXHAUSTED event and let the seller transition below
+            # be the one event/push, so the phone never reads "EXHAUSTED" and
+            # then "→ code_seller" seconds apart. An AMBIGUOUS stop still pages.
+            if to is None and seller:
+                held_back.append((frm, to, reason, n))
+                return
+            _journal_fallback("exit", frm, to, reason, n)
+
         walk = fallback.run_chain(
             models.chain("exit"),
             lambda m: _spawn_executor(executor_argv(m), prompt, env, timeout_secs, EXIT_STREAM),
             _executor_judge,
             per_attempt_s=timeout_secs, budget_s=timeout_secs * EXIT_CHAIN_BUDGET_X,
             cli_retry_after_s=models.cli_retry_after_s(),
-            on_fallback=lambda frm, to, reason, n: _journal_fallback("exit", frm, to, reason, n))
+            on_fallback=_on_fallback)
         last = walk["attempts"][-1]
+        if held_back and not (walk["stopped"] in ("exhausted", "budget")):
+            _journal_fallback("exit", *held_back[-1])   # ambiguous: page as before
         # the executor's final text used to reach journald via inherited stdout;
         # with stream-json on disk, print it here so the log stays readable
         print(f"  executor [{last.model}] rc={last.rc} tool_calls={last.tool_calls} "
               f"chain={walk['stopped']}:\n{fallback.result_text(last.out)[:3000]}")
+        # ⛔ THE TERMINAL STEP: the model-free code seller (scripts/code_seller.py,
+        # spec §3). Reached ONLY when every model failed CLEANLY -- an ambiguous
+        # failure stops above, because the model may already have sold. The
+        # seller carries the same request id, so the request on disk must still
+        # hash to it; it refuses on HALT/SHADOW/live_approved and bounds every
+        # order with the exit-scope hook's own verdict. Its verdict is the same
+        # result file. Drilled 2026-09-04 08:33 ET (review only) before wiring.
+        if (not walk["ok"] and walk["stopped"] in ("exhausted", "budget")
+                and models.terminal("exit") == "code_seller"):
+            _journal_fallback("exit", last.model, "code_seller", last.reason_class,
+                              len(walk["attempts"]) + 1)
+            try:
+                cp = subprocess.run([str(REPO / ".venv" / "bin" / "python"),
+                                     str(REPO / "scripts" / "code_seller.py")],
+                                    cwd=str(REPO), env=env, capture_output=True, text=True,
+                                    timeout=timeout_secs, check=False)
+                print(f"  code_seller rc={cp.returncode}:\n{(cp.stdout or '')[-2000:]}"
+                      f"{(cp.stderr or '')[-500:]}")
+            except Exception as e:                        # noqa: BLE001
+                print(f"  code_seller error: {e}")
     except Exception as e:                            # never let execution crash the monitor
         print(f"  executor error: {e}")
     return _load(EXIT_RES, {"sold": []})

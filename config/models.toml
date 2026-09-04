@@ -31,11 +31,12 @@ fallbacks = ["claude-sonnet-5", "claude-fable-5-1"]
 cli_retry_after_s = 30
 
 [terminal]
-# The model-free last step of each role's chain. "none" until it exists:
-#   exit    -> "code_seller"  (spec §3)
+# The model-free last step of each role's chain, reached only after every
+# model failed CLEANLY (zero tool calls). "none" until the step exists.
+#   exit    -> "code_seller"  scripts/code_seller.py (spec §3; live 2026-09-04)
 #   session -> "custody"      (spec §5)
 session = "none"
-exit    = "none"
+exit    = "code_seller"
 
 [budget]
 # Budget-independent step for a SUBSCRIPTION usage cap (spec §2, added
