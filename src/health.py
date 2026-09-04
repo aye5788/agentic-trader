@@ -146,6 +146,7 @@ class Check:
 DERIVED_KEYS = frozenset({
     "unprotected_positions", "unrecorded_fills", "snapshot_identity",
     "positions_snapshot", "unreadable_artifacts", "py310_compatible",
+    "claude_binary", "claude_models",
 })
 KEY_PREFIXES = ("deployed_", "repo_check:")
 
@@ -472,6 +473,49 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
         out.append(Check("py310_compatible", "Monitor interpreter (py3.10)",
                          None, "ok",
                          "every module the monitor imports parses under python3.10"))
+
+    # ⛔ ONE CLAUDE CLI, THE SAME ONE EVERYWHERE (2026-09-04). The box had two:
+    # cron/systemd resolved an April 2.1.100 that nothing could update, the
+    # shell an auto-updating nvm install. "It works when I run it" then proved
+    # nothing about cron -- the 2026-08-13 codex-PATH class -- and the first
+    # relaunch of the 09-03 session died on "version too old". This compares
+    # what the SESSION UNIT resolves against what a login shell resolves, and
+    # the installed version against every pinned model's floor (config/models.toml).
+    _cli = probes.get("claude_cli")
+    if _cli == SKIPPED:
+        out.append(Check("claude_binary", "Claude CLI (one install)", None, "unknown",
+                         "not checked here"))
+        out.append(Check("claude_models", "Model pins vs CLI", None, "unknown",
+                         "not checked here"))
+    elif _cli is not None:
+        if _cli.get("error"):
+            out.append(Check("claude_binary", "Claude CLI (one install)", None, "blocked",
+                             f"could not resolve the CLI: {_cli['error']}"))
+        elif _cli.get("unit_path") != _cli.get("shell_path") or \
+                _cli.get("unit_version") != _cli.get("shell_version"):
+            out.append(Check(
+                "claude_binary", "Claude CLI (one install)", None, "blocked",
+                f"the session unit resolves {_cli.get('unit_path')} "
+                f"{_cli.get('unit_version')} but a login shell resolves "
+                f"{_cli.get('shell_path')} {_cli.get('shell_version')} — two installs "
+                f"again; what works in the shell proves nothing about cron"))
+        else:
+            out.append(Check("claude_binary", "Claude CLI (one install)", None, "ok",
+                             f"unit and shell both resolve {_cli.get('unit_path')} "
+                             f"{_cli.get('unit_version')}"))
+        unmet = _cli.get("unmet") or []
+        chains = "; ".join(f"{r}: {' → '.join(c)}" for r, c in (_cli.get("chains") or {}).items())
+        prov = " (models.local.toml override ACTIVE)" if _cli.get("local_override") else ""
+        if unmet:
+            out.append(Check(
+                "claude_models", "Model pins vs CLI", None, "blocked",
+                f"{len(unmet)} pinned model(s) need a newer CLI than the installed "
+                f"{_cli.get('unit_version')}: " + ", ".join(f"{m} needs {v}" for m, v in unmet)
+                + f". Chains: {chains}{prov}"))
+        else:
+            out.append(Check("claude_models", "Model pins vs CLI", None, "ok",
+                             f"every pinned model is accepted by the installed CLI. "
+                             f"Chains: {chains}{prov}"))
 
     _bad = probes.get("unreadable_artifacts")
     if _bad:
@@ -942,6 +986,86 @@ def _py310_probe(root: pathlib.Path, run: bool) -> object:
     return bad
 
 
+SESSION_UNIT = "agentic-session@open.service"
+
+
+def _version_tuple(text: str) -> tuple:
+    """'2.1.260 (Claude Code)' -> (2, 1, 260); anything unparseable -> ()."""
+    head = (text or "").strip().split(" ")[0]
+    try:
+        return tuple(int(p) for p in head.split("."))
+    except ValueError:
+        return ()
+
+
+def _resolve_claude(path_env: str) -> tuple:
+    """(real path, version line) for `claude` under PATH=path_env, or (None, error)."""
+    env = {"PATH": path_env, "HOME": "/root"}
+    try:
+        which = subprocess.run(["bash", "-c", "command -v claude"], env=env,
+                               capture_output=True, text=True, timeout=10)
+        found = which.stdout.strip()
+        if which.returncode != 0 or not found:
+            return None, f"no `claude` on PATH={path_env}"
+        ver = subprocess.run([found, "--version"], env=env, capture_output=True,
+                             text=True, timeout=30)
+        line = (ver.stdout or ver.stderr or "").strip().splitlines()
+        return str(pathlib.Path(found).resolve()), (line[0] if line else f"rc {ver.returncode}")
+    except Exception as e:                               # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _unit_path_env(unit: str) -> str | None:
+    """The PATH the systemd unit runs under, from `systemctl show`."""
+    try:
+        cp = subprocess.run(["systemctl", "show", unit, "-p", "Environment", "--value"],
+                            capture_output=True, text=True, timeout=10)
+        for tok in (cp.stdout or "").split():
+            if tok.startswith("PATH="):
+                return tok[len("PATH="):]
+    except Exception:                                    # noqa: BLE001
+        pass
+    return None
+
+
+def claude_cli_verdict(unit: tuple, shell: tuple, requires: dict, chains: dict,
+                       local_override: bool) -> dict:
+    """Pure: the probe record from two resolutions + the models config."""
+    unit_path, unit_ver = unit
+    shell_path, shell_ver = shell
+    if unit_path is None:
+        return {"error": f"session unit: {unit_ver}"}
+    if shell_path is None:
+        return {"error": f"login shell: {shell_ver}"}
+    installed = _version_tuple(unit_ver)
+    unmet = [(m, v) for m, v in sorted(requires.items())
+             if installed and _version_tuple(v) > installed]
+    return {"unit_path": unit_path, "unit_version": unit_ver,
+            "shell_path": shell_path, "shell_version": shell_ver,
+            "unmet": unmet, "chains": chains, "local_override": local_override}
+
+
+def _claude_cli_probe(root: pathlib.Path, run: bool) -> object:
+    """Which `claude` do the unattended path and a login shell resolve, and
+    does the installed version accept every pinned model? SKIPPED unless run."""
+    if not run:
+        return SKIPPED
+    try:
+        sys.path.insert(0, str(root / "src"))
+        import models                                    # noqa: PLC0415
+        cfg = models.load()
+        chains = {r: models.chain(r, cfg) for r in models.ROLES}
+        unit_env = _unit_path_env(SESSION_UNIT) or \
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        login = subprocess.run(["bash", "-lc", "printf %s \"$PATH\""],
+                               capture_output=True, text=True, timeout=10).stdout.strip()
+        return claude_cli_verdict(_resolve_claude(unit_env), _resolve_claude(login or unit_env),
+                                  models.requires(cfg), chains,
+                                  models.provenance()["local"] is not None)
+    except Exception as e:                               # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dict:
     """Collect the timestamps evaluate() judges. All failures degrade to None."""
     root = root or REPO
@@ -979,6 +1103,8 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "unreadable_artifacts": _unreadable_probe(root),
         # Expensive: rides use_network so the dashboard render skips it.
         "py310_compatible": _py310_probe(root, use_network),
+        # Execs the CLI twice: rides use_network for the same reason.
+        "claude_cli": _claude_cli_probe(root, use_network),
     }
 
 
@@ -1480,6 +1606,32 @@ def _selftest() -> None:
     assert _ago(dt.timedelta(minutes=30)) == "30m"
     assert _ago(dt.timedelta(hours=5)) == "5h"
     assert _ago(dt.timedelta(days=2, hours=12)) == "2.5d"
+
+    # ---- one Claude CLI, and the pins it accepts (2026-09-04) ----
+    assert _version_tuple("2.1.260 (Claude Code)") == (2, 1, 260) and _version_tuple("x") == ()
+    same = ("/root/.nvm/v22/bin/claude", "2.1.260 (Claude Code)")
+    chains = {"session": ["claude-a", "claude-b"], "exit": ["claude-c", "claude-b"],
+              "newsletter": ["claude-a"]}
+    v = claude_cli_verdict(same, same, {"claude-b": "2.1.251"}, chains, False)
+    r = {c.key: c for c in evaluate(now, {"claude_cli": v})}
+    assert r["claude_binary"].status == "ok" and r["claude_models"].status == "ok", r
+    assert "session: claude-a → claude-b" in r["claude_models"].detail
+    # two installs -> blocked, naming both
+    other = ("/usr/lib/node_modules/x/cli.js", "2.1.100 (Claude Code)")
+    r = {c.key: c for c in evaluate(now, {"claude_cli": claude_cli_verdict(other, same, {}, chains, False)})}
+    assert r["claude_binary"].status == "blocked" and "2.1.100" in r["claude_binary"].detail, r
+    # a pinned model the installed CLI is too old for -> blocked, naming the floor
+    v = claude_cli_verdict(other, other, {"claude-b": "2.1.251"}, chains, True)
+    r = {c.key: c for c in evaluate(now, {"claude_cli": v})}
+    assert r["claude_models"].status == "blocked" and "claude-b needs 2.1.251" in r["claude_models"].detail, r
+    assert "override ACTIVE" in r["claude_models"].detail
+    # the CLI could not be resolved at all -> blocked, never a crash
+    r = {c.key: c for c in evaluate(now, {"claude_cli": claude_cli_verdict((None, "no claude"), same, {}, chains, False)})}
+    assert r["claude_binary"].status == "blocked" and "no claude" in r["claude_binary"].detail
+    # skipped on the dashboard render -> unknown, never paging
+    r = {c.key: c for c in evaluate(now, {"claude_cli": SKIPPED})}
+    assert r["claude_binary"].status == "unknown" and r["claude_models"].status == "unknown"
+    assert is_known_key("claude_binary") and is_known_key("claude_models")
 
     print("health selftest: PASS")
 
