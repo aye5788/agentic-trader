@@ -558,8 +558,23 @@ research_store/rh/positions.json
                         went, nothing took over.
                         ⛔ EVERY writer goes through _write_broker_snapshot(), and
                         the one that journals the fill passes it the SAME ts, so
-                        snapshot and journal can never disagree. The EXIT path
-                        reaches it via scripts/record_fills.py +
+                        THE FILL AND ITS OWN SNAPSHOT can never disagree.
+                        ⛔ THAT GUARANTEE COVERS ONE WRITER, NOT THE PATH
+                        (2026-09-04). Freshness is snapshot_ts vs the newest
+                        JOURNALLED execution ts — any ts, not just this fill's —
+                        and exit_bookkeeping runs reconcile_ledger LAST, which
+                        journals back-filled orders under ts=now(). So a healed
+                        fill lands AFTER the snapshot every time, and a correct
+                        snapshot reads stale. It happened 2 seconds after the MU
+                        exit: a 2026-07-08 buy back-filled under today's clock
+                        stood the monitor down — ownership filter off,
+                        take-profits suppressed, trailing pass skipped on every
+                        tick — and does NOT self-heal, because the journal ts
+                        never moves. Repair is any refresh_broker_snapshot();
+                        the fix to heal_event's timestamp is OPEN. See OPSLOG
+                        2026-09-04, "a July fill back-filled under today's
+                        clock".
+                        The EXIT path reaches it via scripts/record_fills.py +
                         research_store/rh/broker_state.json — RUN BY THE MONITOR
                         (src/exit_bookkeeping.py, 2026-09-03), not by the
                         executor: the executor writes the staging files and

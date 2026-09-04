@@ -8,6 +8,101 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-04 — a July fill back-filled under today's clock read as "stale after fill": the monitor stood down for 7 minutes of RTH
+
+**What the principal saw:** a phone push at 15:48:34 ET — *"🚨 Broker positions
+snapshot stale after a fill"* — and asked what it was.
+
+**The sale itself was clean.** MU target1 fired 15:46: sold 0.006421 sh @
+$1009.5501, order `6a9b201a…`, filled, and the MONITOR recorded it exactly as
+the 09-03 design intends — `record_fills` republished the snapshot at
+`19:48:17Z`, `record_partial_outcome` wrote the label, every staging file
+archived to `consumed/`. Three `bookkeeping ok` lines, no failures.
+
+**Then the last step invalidated the first.** `reconcile_ledger.py` ran last,
+found one filled broker order absent from the journal, and journalled it with
+`ts = now()` = `19:48:19Z`. That order is a **MU BUY from 2026-07-08** —
+0.004463 sh @ $941.0436, order `6a4e9a3e…`, from the first-deployment batch that
+predates the Decision→Outcome Ledger (07-22).
+
+`snapshot_freshness.status()` flags stale iff `snapshot_ts < newest journalled
+execution ts`. `19:48:17 < 19:48:19`. **Two seconds, and the snapshot was
+CORRECT** — read live from Robinhood two seconds earlier, and it already
+contained that July buy. Robinhood's own `average_buy_price` for MU is 945.19,
+a figure that only reconciles WITH the July fill included.
+
+### This was predicted in writing six hours earlier, in this log
+
+The 09:56 entry below ("first two monitor-recorded exits") ends:
+
+> **Not reconciled, deliberately.** The dump's one order absent from the journal
+> is an INTC BUY from 2026-07-08 — before the Decision→Outcome Ledger existed
+> (07-22). `heal_event` would journal it under TODAY's timestamp and the weekly
+> letter would count a July buy as this week's trade. […] whether pre-ledger
+> orders should be backfilled (with their own dates) is the principal's call.
+
+The hazard was named, the harm was named, and the reconcile was declined **by
+hand** — the dump archived as `orders_dump.….NOT-RECONCILED.json`. Six hours
+later `exit_bookkeeping` ran the same script UNATTENDED after the MU exit and
+back-filled that order's sibling from the same 07-08 batch.
+
+**A judgement that exists only as a human declining to run a script is not a
+control.** `exit_bookkeeping` runs `reconcile_ledger` on every exit; nothing in
+that path can consult a decision recorded in prose in this file. The morning's
+restraint protected exactly one dump.
+
+### What it cost, which the morning entry did not foresee
+
+Not just a mis-counted letter. Snapshot freshness is what gates the stop
+watcher's ownership filter. From 15:48:34 to 15:55:47 the monitor:
+
+- printed `⚠ trailing pass skipped — ownership snapshot is stale, empty, or
+  malformed` on **every one of 29 consecutive 15-second ticks**;
+- **disabled the ownership filter** (fail-open: watching every eligible thesis,
+  held or not);
+- **suppressed take-profit triggers** — `suppress_unowned_targets`; stops still
+  fire, profit-taking waits, and the asymmetry is deliberate.
+
+~7 minutes of RTH with no trailing pass. And it does not self-heal: the journal
+timestamp never moves again, so it would have stood through the long weekend and
+into **Tuesday 09-08's open — ~65 minutes of RTH** — until the 10:35 session's
+start-of-session refresh happened to write a newer `ts`.
+
+### The repair (done, at the principal's instruction, with minutes of RTH left)
+
+`refresh_broker_snapshot()` republished `positions.json` at `19:55:47Z`: 11
+positions, `cash_delta 0.00`, `account_value_delta +0.22` (marks only), **no
+external flow**. `status()` → `stale: False`. The monitor's per-tick skip line
+stopped at 15:55:36 and printed nothing afterwards — verified twice ~90s apart
+with the service `active`. Read-only against the broker; no order was placed.
+
+### The class, and what was already written that is now wrong
+
+2026-08-25 fixed the two-clock problem for the fill's OWN writer: `record_fills`
+computes one `ts` and passes it to both the snapshot and the journal, "immune by
+construction". That does not cover a **third writer journalling a different,
+older fill afterwards** — and `exit_bookkeeping` runs reconcile LAST by design,
+so it lands after the snapshot every time it heals anything. CLAUDE.md's "EVERY
+writer goes through `_write_broker_snapshot()` … so snapshot and journal can
+never disagree" was true of the writer it described and false of the path as a
+whole; amended there.
+
+### Open, deliberately not fixed today (principal: "address the rest later")
+
+1. **`heal_event()` (`scripts/reconcile_ledger.py:111`) stamps `ts = now()`.**
+   On a back-fill that is a WRITE time attached to a historical fill, and
+   comparing it against a snapshot clock is meaningless. Stamping the order's own
+   `last_transaction_at` is the obvious fix — but `ts` is read as a write time
+   elsewhere and every consumer needs checking first, which is what the 08-25
+   review caught the assistant getting wrong by assuming.
+2. **The 09-06 letter will count a 2026-07-08 MU buy as this week's trade** —
+   `letter_facts._in_window` times an event by its `ts` whenever it has one, and
+   this event now has today's. Precisely the miscount the morning entry avoided
+   by hand. (Fixing (1) moves it back out, which is the wanted direction.)
+3. **Why a July fill went eight weeks unjournalled at all.** The broker had it
+   throughout — `average_buy_price` 945.19 — while the 15:15 close session
+   reasoned from cost 895.43. The journal had the hole, not Robinhood.
+
 ## 2026-09-04 — the trade record is cut at 2026-08-20: a retired executor's trades are not the agent's
 
 **What the principal asked:** review the morning session's behaviour transcript
