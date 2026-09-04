@@ -111,6 +111,12 @@ two-install problem and the pin-in-code problem are NOT fixed by the revert;
 they are items 6 and 1 of the design spec written the same afternoon
 (`docs/superpowers/specs/2026-09-03-model-fallback-and-exit-bookkeeping-design.md`).
 
+**DELL partial_outcome recorded by hand ~13:30 ET** (fraction 0.5, entry
+444.38, exit 510.7964, target1) via `scripts/record_partial_outcome.py`; the
+10:27–10:28 staging files (`fills.json`, `broker_state.json`) and yesterday's
+`orders_dump.json`/`partial_closes.json` moved to `research_store/rh/consumed/`
+so no later run can re-feed them. The ledger for 09-03 is now whole.
+
 
 ## 2026-09-02 — "a bug report, not a trading report" — the agent read the display 4 seconds early
 
