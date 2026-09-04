@@ -296,7 +296,14 @@ Codex failure banners.
   installed CLI version ≥ the minimum recorded per model in `models.toml`
   (`[requires] "claude-fable-5-1" = "2.1.251"`). Static, no network.
 - Auto-update stays ON for the nvm install; the health line makes a version
-  change visible the next morning. The trade-off is recorded: a retired
+  change visible the next morning. ⚠️ Observed 2026-09-04 08:07: during the
+  self-update to 2.1.260 the wrapper reported "claude native binary not
+  installed" for a few seconds. Once the unattended path uses this install
+  (§6), a spawn inside that window is a clean failure on EVERY chain step
+  (same binary) — so the runner must treat `native binary not installed` as
+  a `version_too_old`-class reason and RE-TRY THE SAME MODEL ONCE after 30 s
+  before walking the chain. Or pin the update hour outside RTH; the
+  implementer decides in plan 2 and records which. The trade-off is recorded: a retired
   model breaks a pinned unattended path harder than an updated CLI does, and
   09-03's failure was "too old".
 
