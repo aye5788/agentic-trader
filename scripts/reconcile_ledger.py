@@ -23,6 +23,45 @@ from notify import push           # noqa: E402
 ORDERS_DUMP = REPO / "research_store" / "rh" / "orders_dump.json"
 
 
+def unwrap_orders(dump):
+    """The order list from either accepted shape. Pure.
+
+    prompts/exit.md step 7e says "the raw get_equity_orders response shape",
+    which is {"data": {"orders": [...]}}; this script demanded a bare array.
+    The two agreed only while the EXECUTOR ran this script and happened to
+    write arrays. On 2026-09-04, the first day the MONITOR ran it, the
+    executor wrote the raw shape as told and the reconcile refused it — a
+    contract contradiction, not a broker problem. Both shapes are the same
+    evidence; both are accepted.
+    """
+    if isinstance(dump, list):
+        return [_normalize_order(o) for o in dump]
+    if isinstance(dump, dict):
+        inner = dump.get("data") if isinstance(dump.get("data"), dict) else dump
+        orders = inner.get("orders")
+        if isinstance(orders, list):
+            return [_normalize_order(o) for o in orders]
+    return dump
+
+
+def _normalize_order(o):
+    """A raw broker order in this script's field names. Pure.
+
+    The broker calls the id `id` and the EXECUTED size `cumulative_quantity`
+    (`quantity` is what was asked for). The executor's old jq reshaping did
+    exactly this mapping before running the script; now the script does it,
+    so a raw dump and a reshaped one are the same evidence.
+    """
+    if not isinstance(o, dict):
+        return o
+    n = dict(o)
+    if not n.get("order_id") and n.get("id"):
+        n["order_id"] = str(n["id"])
+    if n.get("cumulative_quantity") not in (None, ""):
+        n["quantity"] = n["cumulative_quantity"]
+    return n
+
+
 def journaled_order_ids(journal: list) -> set:
     """Every order_id already recorded in an execution event."""
     ids = set()
@@ -84,10 +123,13 @@ def main() -> None:
         push("Agentic: ledger reconcile FAILED",
              f"orders_dump.json unreadable: {e}", tags="rotating_light")
         sys.exit(f"malformed orders_dump.json: {e}")
+    rh_orders = unwrap_orders(rh_orders)
     if not isinstance(rh_orders, list):
         push("Agentic: ledger reconcile FAILED",
-             "orders_dump.json is not a JSON array", tags="rotating_light")
-        sys.exit("orders_dump.json must be a JSON array of order objects")
+             "orders_dump.json is neither an array nor a get_equity_orders response",
+             tags="rotating_light")
+        sys.exit("orders_dump.json must be a JSON array of order objects, or the "
+                 "raw get_equity_orders response ({\"data\": {\"orders\": [...]}})")
     journal = store.read_journal()
     journaled = journaled_order_ids(journal)
 
@@ -115,6 +157,14 @@ def main() -> None:
 
 
 def _selftest() -> None:
+    # both accepted shapes yield the same list; anything else passes through untouched
+    raw = {"data": {"orders": [{"id": "a", "state": "filled", "quantity": "1", "cumulative_quantity": "0.5"}]}}
+    u = unwrap_orders(raw)
+    assert u[0]["order_id"] == "a" and u[0]["quantity"] == "0.5", u   # id -> order_id, executed size
+    assert unwrap_orders({"orders": [{"order_id": "b"}]})[0]["order_id"] == "b"
+    assert unwrap_orders([{"order_id": "c"}]) == [{"order_id": "c"}]
+    assert unwrap_orders({"x": 1}) == {"x": 1}
+    assert unidentified_fills(u) == []
     jrnl = [
         {"event": "execution", "fills": [
             {"symbol": "XLE", "side": "buy", "order_id": "o1", "avg_price": 100.0}]},

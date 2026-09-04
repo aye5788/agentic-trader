@@ -64,11 +64,14 @@ PROCEDURE — follow exactly:
    already be complete from step 4; confirm it rather than writing it fresh.
    Everything after this point is bookkeeping — if you run out of time here, the
    trade is still correctly recorded.
-6. Write those same fills to `research_store/rh/fills.json`. Each entry needs
-   `quantity` — the EXECUTED SHARE COUNT from the broker's order record, not the
-   dollar notional and not `amount / avg_price`. A sell without it leaves the
-   ledger unable to see the position reach zero, which is exactly the event that
-   closes its lifecycle.
+6. Write those same fills to `research_store/rh/fills.json` — a JSON array, one
+   object per sell, with EXACTLY these fields:
+   `{"symbol","side":"sell","quantity","avg_price","amount","order_id","status":"filled"}`
+   - `quantity`  = the EXECUTED SHARE COUNT from the broker's order record
+     (`cumulative_quantity`), not the dollar notional and not `amount / avg_price`.
+     A sell without it leaves the ledger unable to see the position reach zero.
+   - `avg_price` = the order's `average_price`; `amount` = quantity × avg_price.
+   - `status`    = `"filled"` (this array holds only what executed).
    You do not run any recorder. The monitor runs them after you exit (see
    step 7). Your job is the files.
 7. **Reconcile.** If you sold anything, re-fetch `get_equity_positions` (from the

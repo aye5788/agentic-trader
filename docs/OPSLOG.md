@@ -8,6 +8,40 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-04 — first two monitor-recorded exits: the sales were whole, one contract was not
+
+09:36 ET SNDK target1 (sold 0.002953 sh) and 09:56 ET INTC target1 (sold
+0.038188 sh), both by the executor on Opus 4.8 first try, both recorded by
+the MONITOR (record_fills → snapshot republished; partial_outcome labels
+written; files archived to `consumed/`). That is the 09-03 design working on
+its first live day. Two defects surfaced by the second exit, both in the
+handoff between the prompt and the recorder scripts, neither in the sale:
+
+1. **`orders_dump.json` was refused.** `prompts/exit.md` 7e says "the raw
+   `get_equity_orders` response shape" ({"data":{"orders":[…]}}) and
+   `reconcile_ledger.py` demanded a bare array of rows carrying `order_id`.
+   They agreed only while the EXECUTOR ran the script and reshaped the dump
+   with jq first (id → order_id, cumulative_quantity → quantity). The script
+   now accepts both shapes and does that mapping itself (`unwrap_orders`,
+   `_normalize_order`). The refusal paged twice (the script's own push and
+   the monitor's "Exit bookkeeping FAILED"); my hand retry paged a third time
+   ("LEDGER DIVERGENCE: 6 unidentified") before the mapping fix — that third
+   push was mine.
+2. **The fill row used the broker's field names.** `average_price`, no
+   `amount`, no `status`: the journal carried `avg_price: None` for both
+   sales and the phone read "SELL INTC $? (?)". `record_fills.normalize_fill`
+   now aliases `average_price`, derives `amount`, and stamps `filled` on a row
+   that has an order id and an executed quantity; exit.md step 6 names the
+   fields exactly. The two execution events already written keep
+   `avg_price: None`; the prices are in their `partial_outcome` events.
+
+**Not reconciled, deliberately.** The dump's one order absent from the
+journal is an INTC BUY from 2026-07-08 — before the Decision→Outcome Ledger
+existed (07-22). `heal_event` would journal it under TODAY's timestamp and
+the weekly letter would count a July buy as this week's trade. The dump is
+archived as `orders_dump.….NOT-RECONCILED.json`; whether pre-ledger orders
+should be backfilled (with their own dates) is the principal's call.
+
 ## 2026-09-04 — the detectors stop spending the principal's model budget
 
 **What the principal noticed:** "Scheduled job unhealthy" keeps getting

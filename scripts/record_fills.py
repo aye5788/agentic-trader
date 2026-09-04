@@ -57,6 +57,37 @@ REENTRY_DECISIONS = REPO / "research_store" / "rh" / "reentry_decisions.json"
 BROKER_STATE = REPO / "research_store" / "rh" / "broker_state.json"
 
 
+def normalize_fill(row) -> dict:
+    """One fill row in the contract's field names. Pure; never raises.
+
+    ⛔ WHY (2026-09-04). The first exits recorded by the MONITOR rather than
+    by the executor arrived with the broker's own field name, `average_price`,
+    no `amount` and no `status` -- the prompt said "write the fills" and named
+    only `quantity`. The journal then carried `avg_price: None` for two real
+    sales and the phone read "SELL INTC $? (?)". The broker's name is accepted
+    as an alias, `amount` is derived when both factors are present, and a row
+    that carries an order id and an executed quantity but no status IS an
+    execution: `filled`. Nothing is invented for a row that lacks the factors.
+    """
+    if not isinstance(row, dict):
+        return row
+    f = dict(row)
+    if f.get("avg_price") in (None, "") and f.get("average_price") not in (None, ""):
+        f["avg_price"] = f["average_price"]
+    try:
+        px = float(f["avg_price"]) if f.get("avg_price") not in (None, "") else None
+        qty = float(f["quantity"]) if f.get("quantity") not in (None, "") else None
+    except (TypeError, ValueError):
+        px = qty = None
+    if px is not None:
+        f["avg_price"] = px
+    if f.get("amount") in (None, "") and px is not None and qty is not None:
+        f["amount"] = round(px * qty, 6)
+    if not f.get("status") and f.get("order_id") and qty:
+        f["status"] = "filled"
+    return f
+
+
 def publish_snapshot(state: dict, ts: str) -> dict:
     """Publish positions.json through the SAME validated writer the MCP uses.
 
@@ -97,6 +128,7 @@ def main() -> None:
     fills = json.loads(FILLS.read_text())
     if not isinstance(fills, list):
         sys.exit("fills.json must be a JSON array of fill objects")
+    fills = [normalize_fill(f) for f in fills]
     # ONE timestamp for the snapshot AND the journal entry below.
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -210,6 +242,13 @@ def _selftest() -> None:
                               "quantity": None}]) == ["EEE"]
     assert missing_quantity([{"symbol": "FFF", "status": "unconfirmed"}]) == ["FFF"]
     # the real 2026-08-07 fills.json shape, which predates the field
+    # the executor's own field names (2026-09-04 INTC trim): alias + derive, no invention
+    n = normalize_fill({"symbol": "INTC", "side": "sell", "quantity": "0.038188",
+                        "average_price": "94.510600", "order_id": "6a9a", "reason": "target1"})
+    assert n["avg_price"] == 94.5106 and n["amount"] == round(94.5106 * 0.038188, 6), n
+    assert n["status"] == "filled" and n["quantity"] == "0.038188", n
+    assert normalize_fill({"symbol": "Y", "status": "skipped"}) == {"symbol": "Y", "status": "skipped"}
+    assert normalize_fill({"symbol": "Z", "order_id": "o"}).get("status") is None, "no quantity -> no status invented"
     legacy = [{"symbol": "XLE", "side": "buy", "amount": 5.22, "status": "filled",
                "avg_price": 57.3479}]
     assert missing_quantity(legacy) == ["XLE"], "must flag the legacy shape"
