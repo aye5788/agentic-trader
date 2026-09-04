@@ -60,11 +60,21 @@ ISSUE_TITLE = "\U0001F534 Scheduled job unhealthy"  # "🔴 Scheduled job unheal
 
 # Created idempotently before filing — a fresh repo (or a fresh mirror) may not
 # have these labels yet, and `gh issue create --label` needs them to exist.
+# ⛔ NEVER `auto-fix` FROM THE BOX (2026-09-04). That label is claude.yml's
+# trigger: a full Claude Code run on GitHub Actions, billed to the principal's
+# subscription. Eight times since 2026-08-10 it fired on this check's issues
+# and every run concluded "operational, not a code defect — no PR"; the last
+# one spent a run discovering the Codex review had been switched off on
+# purpose. A liveness finding is ops by construction: nothing a model can fix
+# in code. So the issue is filed for the record under `ops`, the phone push
+# and the dashboard stay the live channels, and the agent runs ONLY when a
+# human @-mentions it on the issue (claude.yml's interactive job).
 ISSUE_LABELS = [
     ("bug", "d73a4a", "Something isn't working"),
-    ("auto-fix", "0e8a16",
-     "Filed by the automated oversight loop for an agent to propose a fix"),
+    ("ops", "fbca04",
+     "Filed by the daily health check for the operator — no agent run"),
 ]
+ISSUE_LABEL = "ops"
 
 # Printed verbatim in every filed issue. The issue body is PUBLIC (this repo's
 # issue tracker), so this line is what tells a reader — human or agent — that
@@ -311,7 +321,7 @@ def _gh(args: list[str]) -> tuple[bool, str, str]:
 
 
 def _ensure_labels() -> None:
-    """Create `bug` / `auto-fix` idempotently. Best-effort: a label that
+    """Create `bug` / `ops` idempotently. Best-effort: a label that
     already exists returns a 422 from the API, which we swallow; any other
     failure just prints a diagnostic (the labels may already exist from a
     prior run, or `gh issue create --label` may fail below — either way we
@@ -350,10 +360,10 @@ def _find_open_issue(title: str) -> int | None:
     than server-side searches on title so we don't depend on GitHub search
     query syntax behaving a particular way across `gh` versions.
 
-    Filtered to the `auto-fix` label (present on this box's gh v2.4.0, and on
+    Filtered to the `ops` label (present on this box's gh v2.4.0, and on
     any modern `gh`): cheap, shrinks the `--limit 100` pagination surface, and
     rules out an unrelated same-titled issue colliding with our dedupe."""
-    ok, out, err = _gh(["issue", "list", "--state", "open", "--label", "auto-fix",
+    ok, out, err = _gh(["issue", "list", "--state", "open", "--label", ISSUE_LABEL,
                          "--json", "number,title", "--limit", "100"])
     if not ok:
         print(f"gh: could not list issues for dedupe (continuing): {err.strip()[:200]}")
@@ -399,7 +409,7 @@ def file_issue(to_alert, *, dry: bool) -> bool:
         _ensure_labels()
         ok, out, err = _gh(["issue", "create", "--title", ISSUE_TITLE,
                              "--body", body, "--label", "bug",
-                             "--label", "auto-fix"])
+                             "--label", ISSUE_LABEL])
         if ok:
             print(f"gh: filed issue {out.strip()}")
             return True

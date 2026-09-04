@@ -620,8 +620,15 @@ scripts/health_check.py THE UPKEEP REMINDER (daily 08:00). Runs health.checks() 
                         was the only one and it is gone. Most checks ask "did this
                         job leave evidence it ran"; since 2026-08-31 two ask
                         whether what it produced is USABLE — see src/health.py.
-                        `--open-issue` also routes findings into the oversight
-                        loop below (deduped `bug`+`auto-fix` GitHub issue).
+                        `--open-issue` files a deduped `bug`+`ops` GitHub issue
+                        FOR THE RECORD. ⛔ NEVER `auto-fix` (2026-09-04): that
+                        label runs a Claude Code session on Actions billed to
+                        the principal's subscription, and 9 such runs since
+                        08-10 all ended "ops, no PR". The agent runs only when
+                        a human @-mentions it. A job the operator switched off
+                        on purpose is marked by research_store/disabled/<key>
+                        (the review, since 08-19, via deploy/run_session.sh)
+                        and reads `disabled`: never alerts, never files.
 scripts/reload_stale.py RUN THIS AFTER EDITING REPO PYTHON (see "CHANGING CODE
                         IS NOT DONE UNTIL THE SERVICES RELOAD" above). Restarts
                         exactly the long-running services whose code no longer
@@ -643,11 +650,15 @@ src/repo_checks.py      Static repo-state validator — FIVE filesystem-only che
                         switch via ledger-mirror freshness, 72h — the ONE
                         check that survives the droplet dying) and `checks`
                         (runs src/repo_checks.py). Each files/updates its own
-                        deduped `bug`+`auto-fix` GitHub issue; `deadman` also
-                        phones NTFY_TOPIC_OPS on droplet death.
+                        deduped `bug`+`ops` GitHub issue (⛔ not `auto-fix`,
+                        and no `repository_dispatch` — removed 2026-09-04, see
+                        the file's header); `deadman` also phones
+                        NTFY_TOPIC_OPS on droplet death.
 .github/workflows/claude.yml  The agent half of the oversight loop — fires on
                         a GitHub issue carrying BOTH `bug` and `auto-fix`
-                        labels, runs a 6-stage protocol (triage ops-vs-code,
+                        labels (⛔ SINCE 2026-09-04 ONLY A HUMAN ADDS THAT
+                        LABEL — no detector does; it is the principal's
+                        subscription being spent), runs a 6-stage protocol (triage ops-vs-code,
                         minimal fix, MANDATORY adversarial self-review,
                         re-verify, open a PR written for a non-coder) and
                         opens a PR against `main` (never pushes to it). Also

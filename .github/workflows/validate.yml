@@ -37,21 +37,17 @@ name: validate
 # repo-config defect are different conditions with different fixes) and phones
 # the ops ntfy topic, which is the alarm you must not miss in an inbox.
 #
-# ⚠️ WHY EACH JOB ALSO EMITS A `repository_dispatch`:
-# GitHub documents that events triggered with the automatic `GITHUB_TOKEN` do
-# NOT create new workflow runs — the anti-recursion rule — with exactly TWO
-# exceptions: `workflow_dispatch` and `repository_dispatch`. So the
-# `gh issue create --label bug --label auto-fix` below CANNOT fire claude.yml's
-# `issues: labeled` trigger: both of these detectors would file an issue, email
-# you, and then dead-end, never drawing a PR. (The droplet's
-# `scripts/health_check.py --open-issue` is unaffected — it uses a USER-
-# authenticated `gh`, so its label DOES fire the trigger normally.)
-# The fix is the documented exception: after filing/updating, POST a
-# `repository_dispatch` of type `auto-fix` carrying the issue number, which
-# claude.yml accepts as a second entrance into the SAME auto-fix job. That is
-# also why the workflow-level `contents` permission below is `write` rather
-# than `read`: `POST /repos/{owner}/{repo}/dispatches` requires it. Neither
-# job checks out the repo for the dispatch, and nothing here pushes anything.
+# ⛔ NO AGENT HAND-OFF FROM HERE (2026-09-04). Both jobs used to label their
+# issue `auto-fix` and POST a `repository_dispatch` so claude.yml would run a
+# Claude Code session on the finding — billed to the principal's subscription.
+# Nine such runs since 2026-08-10, on liveness and config-drift findings, and
+# every one ended "operational, not a code defect — no PR"; one spent a run
+# discovering the Codex review had been switched off on purpose. A detector
+# finding is ops by construction. So the issues are filed under `bug` + `ops`
+# for the record, the phone push stays the alarm, and the agent runs ONLY
+# when a human @-mentions it on the issue (claude.yml's interactive job) or
+# adds the `auto-fix` label by hand. `contents` is back to `read`: nothing
+# here dispatches or pushes.
 #
 # Requires repo secret LEDGER_TOKEN: a fine-grained PAT with READ (Contents)
 # on aye5788/agentic-trader-ledger. If it is empty or the clone fails, this
@@ -75,7 +71,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write   # ONLY so `POST /repos/{owner}/{repo}/dispatches` is allowed
+  contents: read
   issues: write
 
 # A push that lands while the scheduled run is in flight would run both jobs
@@ -198,8 +194,11 @@ jobs:
           TITLE: "🔴 Droplet dead-man's switch tripped"
         run: |
           # -R everywhere: this job has no checkout, so `gh` cannot infer the repo.
-          gh label create bug      -R "$GITHUB_REPOSITORY" --color d73a4a --description "confirmed defect"       2>/dev/null || true
-          gh label create auto-fix -R "$GITHUB_REPOSITORY" --color 0e8a16 --description "let Claude attempt a PR" 2>/dev/null || true
+          # ⛔ `ops`, NEVER `auto-fix` (2026-09-04): auto-fix is claude.yml's trigger, a
+          # Claude Code run billed to the principal's subscription. A dead droplet is
+          # ops by construction; the agent runs only when a human @-mentions it.
+          gh label create bug -R "$GITHUB_REPOSITORY" --color d73a4a --description "confirmed defect" 2>/dev/null || true
+          gh label create ops -R "$GITHUB_REPOSITORY" --color fbca04 --description "for the operator — no agent run" 2>/dev/null || true
 
           {
             echo "The off-box dead-man's switch could not confirm the droplet is alive, $(date -u '+%Y-%m-%d %H:%M UTC')."
@@ -221,7 +220,7 @@ jobs:
           EXISTING=""
           LIST_OK=0
           for attempt in 1 2; do
-            if gh issue list -R "$GITHUB_REPOSITORY" --state open --label auto-fix \
+            if gh issue list -R "$GITHUB_REPOSITORY" --state open --label ops \
                  --json number,title --limit 100 > issues.json 2> gh_err.txt; then
               LIST_OK=1
               break
@@ -241,46 +240,15 @@ jobs:
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" -R "$GITHUB_REPOSITORY" --body-file issue_body.md
             echo "commented on existing issue #$EXISTING"
-            NUMBER="$EXISTING"
           else
             gh issue create -R "$GITHUB_REPOSITORY" --title "$TITLE" --body-file issue_body.md \
-              --label bug --label auto-fix > issue_url.txt
-            # `gh issue create` prints the issue URL; the trailing path segment
-            # is the number. Kept in a $( ) so a read failure cannot go unseen
-            # as an "empty answer" — the case guard below rejects anything that
-            # is not a plain integer.
-            NUMBER="$(tr -d '[:space:]' < issue_url.txt | awk -F/ '{print $NF}')"
+              --label bug --label ops
           fi
-          case "$NUMBER" in
-            ''|*[!0-9]*)
-              echo "::warning::could not determine the issue number, so the agent half cannot be dispatched for this finding — the issue itself was still filed/updated."
-              NUMBER=""
-              ;;
-          esac
-          echo "issue #${NUMBER:-unknown} is the open record for this condition"
-          echo "issue_number=$NUMBER" >> "$GITHUB_OUTPUT"
 
-      # See the block comment at the top of this file: an issue labelled by
-      # GITHUB_TOKEN does not fire claude.yml's `issues: labeled` trigger.
-      # `repository_dispatch` is one of the two documented exceptions that does.
-      - name: Hand the issue to the agent half (repository_dispatch)
-        if: steps.deadman.outcome == 'failure' && steps.file_issue.outputs.issue_number != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ steps.file_issue.outputs.issue_number }}
-        run: |
-          if gh api -X POST "repos/$GITHUB_REPOSITORY/dispatches" \
-               -f "event_type=auto-fix" \
-               -F "client_payload[issue_number]=$ISSUE_NUMBER"; then
-            echo "dispatched auto-fix for issue #$ISSUE_NUMBER"
-          else
-            # Non-fatal, and deliberately loud: the finding is already on the
-            # issue and (for this job) on your phone. Losing the agent half
-            # degrades to detector-only oversight, which is the pre-existing
-            # behaviour — it must not mask the finding itself.
-            echo "::warning::repository_dispatch did not go through — issue #$ISSUE_NUMBER is filed but no agent run was started. To start one by hand: remove and re-add the auto-fix label on that issue."
-          fi
+      # (The `repository_dispatch` hand-off to the agent half was REMOVED
+      # 2026-09-04: a dead droplet is never a code fix, and every unasked agent
+      # run is billed to the principal. To ask the agent anyway, @-mention it
+      # on the issue — claude.yml's interactive job.)
 
       - name: Fail the run if the dead-man's switch tripped
         if: steps.deadman.outcome == 'failure'
@@ -349,8 +317,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TITLE: "🔴 Repo-state check failed"
         run: |
-          gh label create bug      -R "$GITHUB_REPOSITORY" --color d73a4a --description "confirmed defect"       2>/dev/null || true
-          gh label create auto-fix -R "$GITHUB_REPOSITORY" --color 0e8a16 --description "let Claude attempt a PR" 2>/dev/null || true
+          # ⛔ `ops`, NEVER `auto-fix` (2026-09-04) — see the deadman job. Nine
+          # agent runs since 08-10 on these issues; not one produced a PR.
+          gh label create bug -R "$GITHUB_REPOSITORY" --color d73a4a --description "confirmed defect" 2>/dev/null || true
+          gh label create ops -R "$GITHUB_REPOSITORY" --color fbca04 --description "for the operator — no agent run" 2>/dev/null || true
 
           {
             echo "The static repo-state check (src/repo_checks.py) reported findings on $(date -u '+%Y-%m-%d %H:%M UTC')."
@@ -359,9 +329,10 @@ jobs:
             cat checks_output.txt 2>/dev/null || echo "(no output captured)"
             echo '```'
             echo ""
-            echo "> If this found a real code/config defect, the \`auto-fix\` label triggers"
-            echo "> Claude to open a PR (which you review & merge). Some findings are **ops**"
-            echo "> (a cron never armed on the box) — those are fixed on the droplet."
+            echo "> Filed for the operator. No agent run is started by this issue; to ask"
+            echo "> Claude to look at it, @-mention it in a comment (claude.yml's interactive"
+            echo "> job). Most of these are **ops** (a cron never armed on the box) and are"
+            echo "> fixed on the droplet."
           } > issue_body.md
 
           # Exact client-side title match; see the same block in the `deadman`
@@ -369,7 +340,7 @@ jobs:
           EXISTING=""
           LIST_OK=0
           for attempt in 1 2; do
-            if gh issue list -R "$GITHUB_REPOSITORY" --state open --label auto-fix \
+            if gh issue list -R "$GITHUB_REPOSITORY" --state open --label ops \
                  --json number,title --limit 100 > issues.json 2> gh_err.txt; then
               LIST_OK=1
               break
@@ -385,37 +356,13 @@ jobs:
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" -R "$GITHUB_REPOSITORY" --body-file issue_body.md
             echo "commented on existing issue #$EXISTING"
-            NUMBER="$EXISTING"
           else
             gh issue create -R "$GITHUB_REPOSITORY" --title "$TITLE" --body-file issue_body.md \
-              --label bug --label auto-fix > issue_url.txt
-            NUMBER="$(tr -d '[:space:]' < issue_url.txt | awk -F/ '{print $NF}')"
+              --label bug --label ops
           fi
-          case "$NUMBER" in
-            ''|*[!0-9]*)
-              echo "::warning::could not determine the issue number, so the agent half cannot be dispatched for this finding — the issue itself was still filed/updated."
-              NUMBER=""
-              ;;
-          esac
-          echo "issue #${NUMBER:-unknown} is the open record for this condition"
-          echo "issue_number=$NUMBER" >> "$GITHUB_OUTPUT"
 
-      # Same reason as the `deadman` job's dispatch step — see the block comment
-      # at the top of this file. Without it this issue never draws a PR.
-      - name: Hand the issue to the agent half (repository_dispatch)
-        if: steps.checks.outcome == 'failure' && steps.file_issue.outputs.issue_number != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ steps.file_issue.outputs.issue_number }}
-        run: |
-          if gh api -X POST "repos/$GITHUB_REPOSITORY/dispatches" \
-               -f "event_type=auto-fix" \
-               -F "client_payload[issue_number]=$ISSUE_NUMBER"; then
-            echo "dispatched auto-fix for issue #$ISSUE_NUMBER"
-          else
-            echo "::warning::repository_dispatch did not go through — issue #$ISSUE_NUMBER is filed but no agent run was started. To start one by hand: remove and re-add the auto-fix label on that issue."
-          fi
+      # (The `repository_dispatch` hand-off to the agent half was REMOVED
+      # 2026-09-04 — see the deadman job.)
 
       - name: Fail the run if the repo-state check failed
         if: steps.checks.outcome == 'failure'

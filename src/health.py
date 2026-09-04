@@ -68,6 +68,11 @@ SKIPPED = "__skipped__"
 # operator's intent, not a fault, and nagging daily about a switch someone chose to
 # throw is exactly the cry-wolf noise this module is supposed to avoid.
 HALTED = "__halted__"
+#: Probe value prefix for a job the OPERATOR switched off: research_store/
+#: disabled/<key> exists; the rest of the string is the marker's first line
+#: (when / why), shown in the detail. Never alerts, never files an issue.
+DISABLED = "__disabled__:"
+DISABLED_DIR = pathlib.Path("research_store") / "disabled"
 
 # Kill-switch path, mirroring [governance].kill_switch_file in config/strategy.toml.
 # Hardcoded rather than read from the config on purpose: this module keeps its
@@ -114,7 +119,7 @@ BLOCKED_GAP = dt.timedelta(hours=12)
 # ⛔ Non-alerting is not the same as harmless, and it is never a way to quiet a
 # condition somebody could act on. It is only for conditions where NO operator
 # action exists. A finding with a remedy belongs in the push channel.
-NON_ALERTING = ("ok", "unknown", "unverified")
+NON_ALERTING = ("ok", "unknown", "unverified", "disabled")
 
 # Non-alerting AND settled -> safe to clear a stale flag in health_state.json.
 # "unknown" is deliberately absent: see scripts/health_check.py:diff().
@@ -358,6 +363,17 @@ def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
         if ts == HALTED:
             out.append(Check(key, label, None, "unknown",
                              "kill-switch engaged — job intentionally stopped"))
+            continue
+        if isinstance(ts, str) and ts.startswith(DISABLED):
+            # ⛔ SWITCHED OFF BY THE OPERATOR IS A STATE, NOT A FAULT (2026-09-04).
+            # The Codex review was disabled on purpose in deploy/run_session.sh
+            # on 08-19; this check read the missing artifact as `stale` every
+            # day, filed a public issue, and the auto-fix agent spent a model
+            # run per issue to conclude "switched off on purpose". A marker
+            # file names the intent; `disabled` never alerts and never files.
+            out.append(Check(key, label, None, "disabled",
+                             f"switched off by the operator ({ts[len(DISABLED):]}) — "
+                             f"not alerting; delete research_store/disabled/{key} to watch again"))
             continue
 
         # unprotected_positions carries a different probe SHAPE (content, not
@@ -1108,10 +1124,29 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
     }
 
 
+def apply_disabled(root: pathlib.Path, probes: dict) -> dict:
+    """Overlay operator markers: research_store/disabled/<key> turns that SPECS
+    key's probe into DISABLED + the marker's first line. Pure over the dir."""
+    d = root / DISABLED_DIR
+    if not d.is_dir():
+        return probes
+    out = dict(probes)
+    for key in SPECS:
+        m = d / key
+        if m.is_file():
+            try:
+                why = (m.read_text().strip().splitlines() or ["no reason recorded"])[0][:120]
+            except OSError:
+                why = "unreadable marker"
+            out[key] = DISABLED + why
+    return out
+
+
 def checks(now: dt.datetime | None = None, root: pathlib.Path | None = None,
            *, use_network: bool = True) -> list[Check]:
     now = now or dt.datetime.now(dt.timezone.utc)
-    return evaluate(now, gather(root, use_network=use_network))
+    root = root or REPO
+    return evaluate(now, apply_disabled(root, gather(root, use_network=use_network)))
 
 
 # ---------------------------------------------------------------- selftest
@@ -1632,6 +1667,21 @@ def _selftest() -> None:
     r = {c.key: c for c in evaluate(now, {"claude_cli": SKIPPED})}
     assert r["claude_binary"].status == "unknown" and r["claude_models"].status == "unknown"
     assert is_known_key("claude_binary") and is_known_key("claude_models")
+
+    # ---- switched off by the operator is a state, not a fault (2026-09-04) ----
+    r = {c.key: c for c in evaluate(now, {"review": DISABLED + "2026-08-19 budget"})}
+    assert r["review"].status == "disabled" and "2026-08-19 budget" in r["review"].detail, r["review"]
+    assert not r["review"].alertable and not r["review"].healthy
+    import tempfile  # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+        assert apply_disabled(root, {"review": now - 9 * day})["review"] == now - 9 * day
+        (root / DISABLED_DIR).mkdir(parents=True)
+        (root / DISABLED_DIR / "review").write_text("2026-08-19 second model budget\nmore\n")
+        p = apply_disabled(root, {"review": now - 9 * day, "monitor": now - day})
+        assert p["review"] == DISABLED + "2026-08-19 second model budget" and p["monitor"] == now - day, p
+        r = {c.key: c for c in evaluate(now, p)}
+        assert r["review"].status == "disabled" and r["monitor"].status == "ok"
 
     print("health selftest: PASS")
 

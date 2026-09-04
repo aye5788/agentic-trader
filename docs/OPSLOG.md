@@ -8,6 +8,40 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-04 — the detectors stop spending the principal's model budget
+
+**What the principal noticed:** "Scheduled job unhealthy" keeps getting
+filed and the auto-fix agent keeps being invoked to say the same thing.
+
+**What the record shows.** The 08:00 health check filed issues labelled
+`bug`+`auto-fix`; that label is claude.yml's trigger, a full Claude Code run
+on GitHub Actions billed to the principal's subscription. Since 2026-08-10:
+nine agent runs across issues 5–15, every one concluding "operational, not a
+code defect — no PR". The repo's only merged PR is the principal's own (#4).
+The open one, #15 (09-02), flagged the independent review as 12.6 days
+stale; the review was switched off on purpose in `deploy/run_session.sh` on
+08-19 with a comment the health check cannot see, so an agent run was spent
+rediscovering that comment.
+
+**The class:** operational findings routed into a channel built for code
+defects, so a model run is spent each time to decide it is not one — and
+the box, not the human, decides to spend it.
+
+**Fixed, two parts.**
+1. No detector triggers the agent. `scripts/health_check.py --open-issue`
+   and both jobs of `.github/workflows/validate.yml` now file `bug`+`ops`;
+   the `repository_dispatch` hand-off is deleted and the workflow's
+   `contents` permission is back to `read`. claude.yml is unchanged: it
+   still runs when a human @-mentions it or adds `auto-fix` by hand.
+2. Switched-off-on-purpose is a state. `research_store/disabled/<key>`
+   turns a `health.SPECS` job into status `disabled` (non-alerting, never
+   filed, shown dim as "OFF (operator)" on the dashboard, the marker's first
+   line as the reason). `deploy/run_session.sh` writes the review's marker
+   on every run next to its commented-out invocation, and says to delete
+   both when re-enabling. Health now reads `review -> disabled`.
+
+Issue #15 closed with a note pointing here.
+
 ## 2026-09-04 — the model chain is live on both paths, and it was seen to fire
 
 Spec §1, §2, §6, §8.1–8.3 (plan 2 of the 2026-09-03 design), landed before

@@ -76,6 +76,16 @@ rc=$?
 # a second model budget after every session. Re-enable this invocation only
 # after the operator confirms capacity is available again.
 # systemctl start --wait agentic-review.service || true
+#
+# ⛔ SAY SO WHERE HEALTH CAN SEE IT (2026-09-04). A commented-out line is
+# invisible to src/health.py, which read the missing review as `stale` every
+# day, filed a public issue, and the auto-fix agent spent a model run per issue
+# to rediscover this comment. The marker turns the check into `disabled`
+# (never alerts, never files). WHEN RE-ENABLING: uncomment the line above AND
+# delete these three lines, or health keeps reading the review as off.
+mkdir -p research_store/disabled
+printf '%s — Codex review switched off in deploy/run_session.sh: second model budget (principal, 2026-08-19)\n' \
+  "$(date '+%F')" > research_store/disabled/review
 
 # Score BOTH parties against the panel. Pure pandas, no model, ~1s — and it is
 # what stops the reviewer being decoration: a verdict nobody prices is a second
