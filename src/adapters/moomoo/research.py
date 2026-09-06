@@ -1,10 +1,15 @@
 """Data-only moomoo research calls for universe maintenance."""
 import csv
+import datetime as dt
 import time
 
-from moomoo import RET_OK, Market, PeriodType, SimpleFilter, SortDir, StockField
+from moomoo import (RET_OK, Market, PeriodType, SecurityType, SimpleFilter,
+                    SortDir, StockField)
 
 from .client import quote_ctx
+
+# moomoo's "listing date unknown" placeholder — see listing_dates().
+_UNKNOWN_LISTING = dt.date(1970, 1, 1)
 
 
 def _us(ticker: str) -> str:
@@ -239,6 +244,52 @@ def snapshot_fields(ctx, tickers):
         return out
     except Exception:
         return {}
+
+
+def listing_dates(tickers=None, ctx=None) -> dict:
+    """{bare_ticker: datetime.date | None} from get_stock_basicinfo. UNMETERED.
+
+    ⛔ THIS EXISTS SO NOBODY SPENDS HISTORY QUOTA TO DISCOVER A NAME IS YOUNG.
+    `request_history_kline` is capped at 100 DISTINCT stocks account-wide, so
+    "pull the bars and see how many come back" costs a scarce unit per name and
+    charges the most for exactly the case where the answer is "none exist".
+    `get_stock_basicinfo` answers it for the whole market in ONE unmetered call.
+
+    ⛔ moomoo returns 1970-01-01 for an UNKNOWN listing date, not an IPO on that
+    day — 76.7% of US names carry it. It is mapped to None, and callers must
+    treat None as "age unknown", never as "listed in 1970" and never as young.
+    The sentinel is still useful negative evidence: of 466 US listings under 400
+    days old (measured 2026-09-06) every one carried a real date and none
+    carried the sentinel, so a sentinel means the name is NOT a recent listing.
+
+    Returns {} on any failure — the caller must degrade to "age unknown for
+    everything", which fails toward attempting a real backfill rather than
+    silently leaving a mature name unscoreable.
+    """
+    own = ctx is None
+    q = ctx or quote_ctx()
+    try:
+        ret, df = q.get_stock_basicinfo(Market.US, SecurityType.STOCK)
+        if ret != RET_OK or df is None or not len(df):
+            return {}
+    except Exception:  # noqa: BLE001 — offline batch: age unknown is a safe answer
+        return {}
+    finally:
+        if own:
+            q.close()
+    want = None if tickers is None else {_bare(_us(t)) for t in tickers}
+    out = {}
+    for rec in df.to_dict("records"):
+        t = _bare(str(rec.get("code", "")))
+        if want is not None and t not in want:
+            continue
+        raw = str(rec.get("listing_date") or "").strip()[:10]
+        try:
+            d = dt.date.fromisoformat(raw)
+        except ValueError:
+            d = None
+        out[t] = None if d == _UNKNOWN_LISTING else d
+    return out
 
 
 def _selftest() -> None:

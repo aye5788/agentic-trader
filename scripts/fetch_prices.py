@@ -14,7 +14,17 @@ pulls. moomoo meters `request_history_kline` against a hard **100 distinct stock
 account-wide**, so a full re-pull of a 168-name universe is IMPOSSIBLE — do not
 reintroduce one.
 
-    /usr/bin/python3 scripts/fetch_prices.py              # append today's bar
+PLUS A TARGETED REPAIR (2026-09-06, `_repair_incomplete`). That is not a re-pull
+and does not weaken the rule above: it asks the history API ONLY for universe
+members whose panel column cannot satisfy `momentum.compute()`'s window, and
+never for a name too young to have that history at all. On a healthy panel it
+costs zero calls. It exists because `universe_refresh.py` became UNATTENDED
+while the manual `--backfill` that used to follow it did not — so auto-admitted
+mature names (ARM, ABNB, SLB, SNPS, HPE) sat accumulating one bar a day and the
+signal silently dropped them. See src/history_repair.py for the invariant.
+
+    /usr/bin/python3 scripts/fetch_prices.py              # append + repair gaps
+    /usr/bin/python3 scripts/fetch_prices.py --no-repair  # append only
     /usr/bin/python3 scripts/fetch_prices.py --backfill 30  # gap-fill, <=100 names
     /usr/bin/python3 scripts/fetch_prices.py --selftest
 
@@ -188,17 +198,104 @@ def _field_panels(raw: dict) -> dict:
     return {f: pd.DataFrame(series).sort_index() for f, series in out.items()}
 
 
+def _repair_incomplete(panels: dict, tickers, ctx, mmp, mmr, today, dry=False):
+    """Give every universe member the history `momentum.compute()` needs — or
+    establish that it is too young to have it. Returns (panels, plan).
+
+    ⛔ WHY THIS RUNS ON THE DAILY PATH AND NOT IN universe_refresh. The refresh
+    fires once a week (Fri 17:00); this runs before every ranking, so a name is
+    repaired before the FIRST `slow_loop.py` that would have to score it, and a
+    repair that fails on Friday is retried Monday instead of waiting a week. It
+    also keeps the refresh doing one job — deciding MEMBERSHIP — rather than
+    owning the price panel as well.
+
+    Quota discipline, all of it load-bearing (see src/history_repair.py):
+      - the window test runs FIRST, so a complete panel costs zero calls;
+      - listing ages are fetched only when something is actually missing, and
+        `get_stock_basicinfo` is UNMETERED — no history unit is ever spent to
+        discover that a name is young;
+      - names positively known to be too young are never requested, so a fresh
+        listing cannot burn a unit a day fetching bars that do not exist;
+      - re-requesting a symbol already inside moomoo's rolling window costs no
+        additional quota (verified 2026-09-06: a second NVDA pull left
+        used_quota unchanged), so a name whose repair fails is retried without
+        compounding cost;
+      - the request is capped by the SAME MOOMOO_HISTORY_QUOTA the --backfill
+        path uses, and the overflow is NAMED rather than silently dropped.
+    """
+    import history_repair as hr                        # noqa: PLC0415
+
+    close = panels.get("close")
+    # ⛔ REPAIR FIXES NAMES, IT DOES NOT REBUILD PANELS. If the panel itself is
+    # shorter than one momentum window, EVERY name reads incomplete and this
+    # would quietly spend the entire 100-symbol quota trying to rebuild from a
+    # missing or truncated parquet. A rebuild is a deliberate `--backfill`, run
+    # by a human who has looked at research_store/prices/backup/.
+    if close is None or close.empty or len(close) < hr.REQUIRED_ROWS:
+        rows = 0 if close is None or close.empty else len(close)
+        print(f"  repair SKIPPED: panel has {rows} rows, fewer than the "
+              f"{hr.REQUIRED_ROWS}-session window — that is a panel rebuild, "
+              f"not a per-name gap. Use --backfill deliberately.")
+        return panels, None
+
+    need = hr.incomplete(close, tickers)
+    if not need:
+        return panels, None
+
+    ages = mmr.listing_dates(need, ctx=ctx)
+    if not ages:
+        print("  ⚠️ listing dates unavailable — treating every age as UNKNOWN, "
+              "which attempts a real backfill rather than assuming youth")
+    plan = hr.plan_repair(close, need, ages, today, quota=MOOMOO_HISTORY_QUOTA)
+
+    if plan["seasoning"]:
+        print(f"  seasoning ({len(plan['seasoning'])}): too young for a "
+              f"{hr.REQUIRED_ROWS}-session window — intentionally unscoreable, "
+              f"not a gap: " + " ".join(plan["seasoning"]))
+    if plan["deferred"]:
+        print(f"  DEFERRED past the {MOOMOO_HISTORY_QUOTA}-symbol history quota "
+              f"({len(plan['deferred'])}): " + " ".join(plan["deferred"])
+              + " — re-run to continue")
+    if not plan["repair"]:
+        return panels, plan
+
+    start_d, end_d = hr.backfill_window(today)
+    print(f"repairing {len(plan['repair'])} incomplete name(s) via the history "
+          f"API ({start_d} .. {end_d}): " + " ".join(plan["repair"]))
+    if dry:
+        print("  [dry] no history requested, nothing written")
+        return panels, plan
+
+    raw, rerrs = mmp.daily_panel(plan["repair"], start_d, end_d, ctx=ctx)
+    if raw:
+        fetched = _field_panels(raw)
+        for f in _FIELDS:
+            base = panels.get(f)
+            panels[f] = (fetched[f] if base is None or base.empty
+                         else fetched[f].combine_first(base).sort_index())
+    for t in plan["repair"]:
+        n = len(raw.get(t, ()))
+        ok = hr.window_complete(panels["close"][t]) if t in panels["close"] else False
+        print(f"    {t:7s} {n:4d} bars -> {'scoreable' if ok else 'STILL INCOMPLETE'}"
+              + (f"  ({str(rerrs[t])[:70]})" if t in rerrs else ""))
+    return panels, plan
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--backfill", type=int, metavar="DAYS",
                     help="gap-fill DAYS of history via request_history_kline. "
                          "Capped by moomoo at 100 DISTINCT stocks account-wide.")
     ap.add_argument("--dry", action="store_true", help="show the change, write nothing")
+    ap.add_argument("--no-repair", action="store_true",
+                    help="skip the automatic history repair of universe members "
+                         "the signal cannot score (see _repair_incomplete)")
     args = ap.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     sys.path.insert(0, str(REPO / "src"))
     from adapters.moomoo import prices as mmp          # noqa: PLC0415
+    from adapters.moomoo import research as mmr        # noqa: PLC0415
     from adapters.moomoo.client import OpenDUnavailable, quote_ctx  # noqa: PLC0415
 
     tickers = universe_tickers()
@@ -256,6 +353,12 @@ def main() -> None:
                 raise SystemExit(2)
             panels = _merge_bars(panels, bars)
             meta = [(t, 1, "ok") for t in bars]
+            # Repair AFTER the append, so today's bar is already in place and a
+            # name that needs only today is not counted as needing history.
+            if not args.no_repair:
+                panels, _ = _repair_incomplete(
+                    panels, tickers, ctx, mmp, mmr,
+                    dt.datetime.now(MARKET_TZ).date(), dry=args.dry)
         # Ask the calendar while the context is still open, so this costs no
         # extra connection. None = could not tell -> the weekend test still
         # applies; only weekday HOLIDAYS go unrecognised.

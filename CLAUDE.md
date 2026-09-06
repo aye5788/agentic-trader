@@ -719,6 +719,29 @@ scripts/fetch_prices.py APPENDS the current session's OHLC row to the cached pan
                         100 distinct stocks, so a 168-name re-pull cannot succeed;
                         that also makes the deep panel non-regenerable → backup/).
                         `--backfill N` gap-fills via the metered history API.
+                        ⛔ SINCE 2026-09-06 THE DEFAULT RUN ALSO REPAIRS HISTORY
+                        (_repair_incomplete → src/history_repair.py). That is
+                        NOT the re-pull banned above: it asks the history API
+                        only for universe members whose column cannot satisfy
+                        momentum.compute()'s window, and never for a name too
+                        young to have that history. A healthy panel costs ZERO
+                        calls. It exists because universe_refresh became
+                        UNATTENDED while the manual --backfill that used to
+                        follow it did not, so auto-admitted MATURE names (ARM —
+                        three years listed — plus ABNB, SLB, SNPS, HPE) sat
+                        gaining one bar a day while the signal silently dropped
+                        them. ⛔ Sufficiency is a WINDOW test, never "does the
+                        column exist" or "how many closes are there": a name
+                        that LEAVES the universe keeps a frozen column, so a
+                        re-admitted name can carry 280 observations and still be
+                        unscoreable (DE/ROST measured exactly that). Youth is
+                        established from get_stock_basicinfo (UNMETERED) — never
+                        by spending a history unit to discover a name is young —
+                        and moomoo's 1970-01-01 is UNKNOWN, not an IPO date, so
+                        unknown age fails toward attempting a real backfill.
+                        `--no-repair` opts out. A panel shorter than one window
+                        is a REBUILD and is refused (that is `--backfill`, by a
+                        human, against prices/backup/).
                         _drop_unsettled_session() still discards the current row
                         before 16:15 ET (a snapshot mid-RTH is a PARTIAL bar whose
                         close is just the last trade) and keeps it after — that
