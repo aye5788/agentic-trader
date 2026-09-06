@@ -155,11 +155,21 @@ architecture in `docs/DESIGN.md` (Layer 1). Summary:
 
 ## ⚙️ Runtimes, OpenD & sibling repos on the box  (READ — easy to get wrong)
 
-- **Two Python runtimes.** The core system runs under the repo **`.venv` (Python
-  3.12)**. The **moomoo SDK is installed ONLY in system `/usr/bin/python3`
-  (3.10)** — so anything importing `moomoo` MUST run under `/usr/bin/python3`
-  (`deploy/run_universe_refresh.sh` does this deliberately). A `.venv` script
-  **cannot** `import moomoo`.
+- **THREE Python runtimes** (it was two until 2026-09-06). The core system runs
+  under the repo **`.venv` (Python 3.12)**. Everything that touches moomoo runs
+  under system **`/usr/bin/python3` (3.10)** — `deploy/run_universe_refresh.sh`
+  and `run_slow_loop.sh` do this deliberately. The third is **`./v2env` (3.10,
+  protobuf 4.25.9)**, which exists solely to run moomoo's **V2 screen**
+  (`scripts/v2_screen.py`, called as a SUBPROCESS by the weekly universe
+  refresh): the V2 decoder calls `FieldDescriptor.label`, removed in protobuf
+  6/7, and the box runs 7.35.1. It is git-ignored — rebuild with
+  `deploy/setup_v2env.sh`.
+  ⚠️ **CORRECTED 2026-09-06: this file used to say a `.venv` script "cannot
+  `import moomoo`". That is false** — `.venv` carries moomoo-api 10.9.6908 and a
+  live V1 `get_stock_filter` succeeds from it (verified). Nothing scheduled uses
+  it that way and V2 fails there exactly as under system python, so keep moomoo
+  work on `/usr/bin/python3`; just do not rely on the import failing to enforce
+  that.
 - **OpenD gateway.** moomoo data flows through a local **OpenD** daemon on
   `127.0.0.1:11111` (`opend.service`), **shared** with the sibling repos — never
   launch a second one. Data needs only the quote channel (`qot_logined: True`).
@@ -778,6 +788,13 @@ scripts/fetch_prices.py APPENDS the current session's OHLC row to the cached pan
                         before 16:15 ET (a snapshot mid-RTH is a PARTIAL bar whose
                         close is just the last trade) and keeps it after — that
                         guard predates the feed switch and is unchanged.
+src/history_repair.py   The pure invariant behind that repair (window test vs
+                        momentum's own mask, listing-age exemption). Described
+                        at fetch_prices above — not restated here.
+scripts/v2_screen.py    The moomoo V2 screen worker, run under ./v2env as a
+                        subprocess by the weekly universe refresh. Described at
+                        src/adapters/moomoo/ above; built by
+                        deploy/setup_v2env.sh + deploy/v2env-requirements.txt.
                         (risk_review, retired 2026-08-13, read highs.parquet and
                         folded in today's session high from a live snapshot.)
 scripts/backtest.py     Weekly walk-forward sim of the 70/30 book/sleeve vs SPY.

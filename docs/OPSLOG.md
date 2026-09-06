@@ -8,6 +8,173 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-06 — the weekly screen was ranking the wrong 400 names: discovery moves to 20-day liquidity (moomoo V2)
+
+**The mechanism, as it had been since inception.** `universe_refresh.py` asked
+moomoo for the top **400 US names by MARKET CAP** above a $2B floor, then ranked
+that pond on **one Friday session's** dollar volume. Both halves were wrong in
+ways that cancelled out into "looks fine".
+
+**Measured on the live feed:**
+
+- Sorting by market cap and truncating at 400 put the 400th name at **$57.45B**.
+  So `screen_min_mktcap = $2B` was **inert** — the effective floor was ~$57B, a
+  number written nowhere and chosen by nobody.
+- **1,084 names** met BOTH standing policies (cap ≥ $2B, ≥ $50M/day of 20-day
+  turnover) and were outside that cut, i.e. structurally invisible to weekly
+  discovery: MSTR ($3.3B/day, cap rank 418), CRWV, SMCI, IREN, COIN, CBRS, CRCL,
+  AAOI, PATH, RDDT. NKE missed by ONE rank (401).
+- Of the names in that set that ARE in the universe, **23 of 30 are human
+  seeds**. The screen did not find them; Aaron did.
+- **100 of the 400 slots** went to foreign OTC ADR lines — TCEHY, RHHBY, NSRGY,
+  LVMUY, SIEGY, SFTBY — whose home-market caps rank them into a US screen and
+  which cannot even return a turnover quote. All 100 were `US_PINK`. A quarter
+  of the screen's capacity was spent on names it could not rank and we cannot
+  trade, and isolating them by bisection is why a legacy run takes >5 minutes.
+- The 25 names the old funnel would actually have proposed were all $57B–$285B
+  industrials and defensives (MRNA, CDNS, VLO, CEG, TMO, DE, AMGN, SHEL, PM…).
+  **A momentum book's screen could not propose a momentum name.**
+
+**What changed — the mechanism only.** Universe size 150, keep band 180, add
+rank 150, the $2B cap floor and the $50M/day add floor are all untouched, as are
+momentum, eligibility, sizing and execution. Discovery is now: whole US market,
+cap ≥ $2B as a **floor**, sorted SERVER-SIDE by 20-day cumulative dollar
+turnover, venue-filtered to NYSE/NASDAQ/AMEX, converted to $/day, into the
+existing membership rules. Retrieval is deliberately shallow — membership needs
+exact ranks only through `max(add_rank_max, keep_rank_max)`, so **one 200-row
+page** normally suffices — all 200 of the top 200 survived the venue filter on
+the day, against a keep boundary of 180, because OTC lines have negligible US
+turnover and never reach the top of a liquidity ranking. One screen call replaces a 2-page V1 screen plus ~430
+snapshot codes.
+
+⛔ **`CumulativeProperty.AVG_TURNOVER` IS NOT AN AVERAGE.** With `days=20` it
+returns the 20-day CUMULATIVE total. Verified against single-session snapshots:
+NVDA $569.44B/20 = $28.5B/day vs a $31.4B session (0.91x), AAPL 0.98x, F 0.99x,
+KO 0.84x. Undivided it reads **20x too liquid**, and the add floor is stated per
+DAY — so an undivided comparison would admit names at $2.5M/day.
+`universe_maint.to_avg_daily()` divides in exactly ONE place; **$1B cumulative
+IS the $50M/day floor**, and a regression case pins it so nobody "corrects" the
+divisor later.
+
+⛔ **Venue comes from explicit metadata, never a ticker suffix.** V2's own
+`SimpleField.EXCHANGE` does not accept `ExchType` values — probed, and both the
+allowlist and pink-only returned `all_count=0` — so venue is post-filtered on
+`get_stock_basicinfo` `exchange_type`. **That map is built from the STOCK *and*
+ETF rosters**, because moomoo files REITs under `SecurityType.ETF`: EQIX, PLD and
+DLR are absent from the STOCK roster entirely, and a STOCK-only map would have
+deleted them as "unknown venue". Exchange says WHERE a name trades, never WHAT it
+is. For the same reason `SecurityType.ETF -> reject` is refused in comments: it
+would delete ~126 REIT operating companies. Funds are still excluded by the
+positive market-cap test, which genuine funds fail (moomoo serves them no market
+cap) — SPY, QQQ, IWM, VOO, GLD and ARKK are all absent from a cap-floored screen.
+
+**A V2 failure never falls back.** Duplicates, unusable turnover, a sort that is
+not descending, a null cap on a row that passed the cap floor, or too few
+venue-clean rows to reach the keep boundary all become NO_CHANGE — the
+last-known-good universe stands and the condition self-clears. Falling back to
+the legacy funnel would run a different strategy under the same name. Verified by
+pointing `AGENTIC_V2_PYTHON` at a missing interpreter: NO_CHANGE, named reason,
+nothing applied.
+
+**Runtime.** The V2 decoder calls `FieldDescriptor.label`, removed in protobuf
+6/7; the box runs 7.35.1 and the system moomoo install is shared with
+`moomoo-vol-desk`, so no global downgrade is available. `scripts/v2_screen.py`
+runs under `./v2env` in a subprocess and returns JSON **via a file** — the first
+version wrote to stdout and the SDK's own connection logging corrupted the
+document. `v2env` is git-ignored, so it is now a reproducible artefact
+(`deploy/setup_v2env.sh` + `deploy/v2env-requirements.txt`) and
+`run_universe_refresh.sh` refuses to start without it rather than reporting
+"changed nothing" every week on a rebuilt droplet.
+
+**Staged, not flipped blind.** Both backends were dry-run the same day:
+
+| backend | pond | result |
+| --- | --- | --- |
+| `legacy_v1` | 433 ranked 333 (100 unquotable) | AUTO_APPLY **+MRNA −SLB** |
+| `v2_turnover` | all_count 3062, retrieved 200 in 1 page, ranked 200, 0 integrity problems, 0 venue-excluded | AUTO_APPLY **+0 −0** |
+
+**SLB is the illustration**: legacy drops it on ONE session's turnover; over 20
+sessions it sits comfortably inside the keep band. The switch is
+membership-neutral today (all 150 retained, 0 open slots), so no off-schedule
+rotation was forced — the next scheduled Friday run does the normal maintenance.
+Screening spent **zero history quota** (11/100 before and after); it is
+server-side and unrelated to the `request_history_kline` meter.
+
+Commit `8881d28`. The old funnel is retained only as
+`screen_backend = "legacy_v1"` / `--backend legacy_v1` for comparison.
+
+---
+
+## 2026-09-06 — five mature names sat unscoreable because the refresh was automated and the backfill was not
+
+**The state.** Seven of the 150 universe members could not be scored by
+`momentum.compute()`: HPE (1 close), SLB, ARM, ABNB, SNPS (6 each), SKHY (41),
+SPCX (59). Six had been admitted by the weekly screen. `config/universe.csv` is
+also the order-gate whitelist, so the book was being told to consider names the
+signal was silently dropping.
+
+**Two different things wearing the same symptom.** SPCX (listed 2026-06-12) and
+SKHY (2026-07-10) hold **every bar that exists for them** — their panel columns
+start at their listing dates. That is correct seasoning, not a gap, and commit
+`dbaf602` had already said so in writing. The other five are mature: **ARM has
+been listed 1,088 calendar days (~751 sessions)**, ABNB 2,096. Their columns
+start **exactly on their admission date** — nothing had ever fetched history for
+them.
+
+**Root cause, from git and the panel.** The 2026-08-21 rotation was applied BY
+HAND and followed by a manual `fetch_prices.py --backfill`; that is why its eight
+rotated-in names all begin 2025-07-23 with 277–283 closes. The refresh later
+became unattended (`run_universe_refresh.sh`: "APPLIES the rescreen unattended…
+There is NO human approval step any more"). **The backfill did not.** The 08-28
+cohort (SLB, ARM, ABNB, SNPS) and 09-04 (HPE) were auto-admitted with nobody
+there to run it. `--backfill` appears in no cron entry, no deploy script, and
+nowhere in `universe_refresh.py`.
+
+**The fix, in the daily price path rather than the weekly screen** — so a name is
+repaired before the FIRST ranking that would have to score it, and a failure is
+retried tomorrow rather than next week. `src/history_repair.py` is pure and
+decides three things:
+
+- ⛔ **Sufficiency is a WINDOW test**, never "does the column exist" or "how many
+  closes are there". A name that LEAVES the universe keeps its column, frozen at
+  its departure date (20 such orphans today); re-admitted it is present, long,
+  and stale in the middle of the window the signal reads. **DE and ROST measure
+  exactly that: 277 and 282 observations, both unscoreable.** The predicate
+  mirrors `momentum.compute()`'s own `valid` mask and IMPORTS `LOOKBACK`/
+  `TREND_MA` from it, so the repair target cannot drift from what the signal reads.
+- ⛔ **Youth is not a defect.** A name positively known to be too young is never
+  requested, so a fresh listing cannot burn a metered quota unit per day fetching
+  bars that do not exist.
+- ⛔ **Age comes from UNMETERED metadata** (`get_stock_basicinfo`), never from
+  spending a history unit to discover a name is young. moomoo's **1970-01-01 is
+  UNKNOWN, not an IPO date** (76.7% of US names carry it), and unknown age is NOT
+  given the young exemption — it fails toward attempting a real backfill, because
+  leaving a mature name silently unscoreable is the worse error.
+
+**`fresh-ipo` was deliberately left alone.** It stays a documentation column no
+code reads; the mechanical distinction is the listing date, recomputed every run.
+So a stale label cannot strand a seasoned name, nobody has to remember to clear
+one, and SPCX/SKHY will be repaired automatically once they season.
+
+**Result.** ABNB, ARM, HPE, SLB, SNPS repaired (290 bars each); unscoreable
+universe members **7 → 2** (SKHY and SPCX, both correctly seasoning). SNPS is
+scoreable but not *eligible* — R = −0.346 — which is the signal's verdict, not a
+data gap. History quota 6/100 → 11/100, exactly one unit per real repair; a
+second consecutive run requested nothing and held at 11.
+
+⚠️ **A correction this work forced onto `docs/DATA_SOURCES.md`.** §5a said "every
+moomoo time-series feed is ~1–2.5 years deep", which swept in the daily K-line
+and made the price panel look irreplaceable. Measured: NVDA returned **2,753
+daily bars back to 2015-09-24** (~11 years), and a symbol never pulled before
+returned 823 bars for one quota unit. Daily OHLC is DEEP and the panel is
+regenerable at 100 distinct symbols per rolling window (the window recycles —
+100/100 on 2026-07-29, 5/100 on 2026-09-06). The *edge* signals are still
+shallow and are still forward-logged, never backtested.
+
+Commit `589a6bd`.
+
+---
+
 ## 2026-09-04 — a July fill back-filled under today's clock read as "stale after fill": the monitor stood down for 7 minutes of RTH
 
 **What the principal saw:** a phone push at 15:48:34 ET — *"🚨 Broker positions

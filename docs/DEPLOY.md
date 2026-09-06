@@ -32,7 +32,19 @@ sudo git clone <repo> /opt/agentic-trader          # deploy key or PAT (private 
 cd /opt/agentic-trader
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt           # pandas/numpy/pyarrow now included
+
+# ⛔ THIRD INTERPRETER — the weekly universe screen does not run without it.
+deploy/setup_v2env.sh                               # builds ./v2env (protobuf < 5)
 ```
+
+⛔ **`v2env` is not optional and it is git-ignored, so a fresh clone has none.**
+The Friday universe screen runs moomoo's V2 `get_stock_screen` in a subprocess
+under `./v2env`, because that decoder calls `FieldDescriptor.label` — removed in
+protobuf 6/7, and the box runs 7.35.1 everywhere else (the system moomoo install
+is shared with `moomoo-vol-desk`, so it cannot be downgraded). Without `v2env`
+the screen reports NO_CHANGE every week and the universe silently stops being
+maintained; `deploy/run_universe_refresh.sh` refuses to start and says so.
+Recipe: `deploy/v2env-requirements.txt`.
 
 ## Phase 2 — secrets + auth (all git-ignored → copy securely, never commit)
 
@@ -62,11 +74,20 @@ systemctl status opend                     # must be up on 127.0.0.1:11111
 /usr/bin/python3 scripts/fetch_prices.py   # smoke test: appends today's OHLC row
 ```
 
-⚠️ Two things that are easy to get wrong:
-- The moomoo SDK is installed **only in system `/usr/bin/python3` (3.10)**, not
-  the `.venv` (3.12). Anything importing `moomoo` must run under system python.
+⚠️ Things that are easy to get wrong:
+- The moomoo SDK the repo *uses* is the one in system `/usr/bin/python3` (3.10).
+  Anything importing `moomoo` runs under system python — except the V2 screen,
+  which runs under `./v2env` (see Phase 1). ⚠️ `.venv` may also have a `moomoo`
+  installed; it imports and V1 works there, but nothing scheduled uses it, and
+  V2 fails there exactly as it does under system python.
 - OpenD is **shared with the sibling repo `moomoo-vol-desk`**, which owns the
-  login. Never start a second instance.
+  login. Never start a second instance. The V2 subprocess uses that SAME
+  gateway — never launch a second one for it.
+
+```bash
+# verify the V2 screen runtime (no history quota, no orders):
+./v2env/bin/python -c "import google.protobuf as p; assert int(p.__version__.split('.')[0])<5; print('v2env protobuf', p.__version__)"
+```
 
 ## Phase 4 — dry run, THEN schedule
 

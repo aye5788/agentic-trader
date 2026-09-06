@@ -25,7 +25,7 @@ through the order gate.
 | 10:35 | `agentic-session@open` — the agent decides and trades |
 | 15:15 | `agentic-session@close` — the agent reviews and trades |
 | 16:15 | equity logged for the dashboard curve |
-| Fri 17:00 | `run_universe_refresh.sh` — **rescreens the 150-name candidate pool** on trailing dollar-volume. Routine changes auto-apply and commit; anything anomalous HOLDs and phones you. ⚠️ Weekly since 2026-08-20 — it was quarterly and had never once fired. |
+| Fri 17:00 | `run_universe_refresh.sh` — **rescreens the 150-name candidate pool**, ranked on **20-day average dollar turnover** (since 2026-09-06; it was the top 400 by market cap ranked on ONE session). Changes auto-apply and commit. ⛔ The only other outcome is NO_CHANGE, when the screen's own data contradicts itself — it self-clears, the old universe stands, and **there is nothing for you to approve**. It phones you either way. ⚠️ Weekly since 2026-08-20 — it was quarterly and had never once fired. |
 | 18:00 (Sun 20:00) | `run_slow_loop.sh` — ranks candidates, records the regime, supplies default stop/target geometry, and **records the ranking so the next brief can show what moved**. **It does not decide the book and nothing executes its output.** |
 | always | `agentic-monitor.service` — watches stops/targets every 15s during RTH. **This IS the stop.** |
 
@@ -222,12 +222,20 @@ Push = something changed. Dashboard = current state.
 cd /opt/agentic-trader
 /usr/bin/python3 scripts/fetch_prices.py --backfill 10    # system python3, NOT .venv
 ```
-⚠️ There is no `--force` any more, and no way to re-pull the whole panel: moomoo
-caps history at **100 distinct stocks account-wide**, so a full 168-name re-pull
-cannot succeed. The panel is **appended to, never rebuilt**, which makes the deep
-Schwab-era history on disk **non-regenerable** — that is why
-`research_store/prices/backup/` exists. `--backfill N` fills the last N sessions
-through the metered history API; keep N small.
+⚠️ There is no `--force` any more, and no way to re-pull the whole panel in one
+go: moomoo meters history at **100 distinct stocks per rolling window**, so a
+168-name re-pull cannot succeed at once. `--backfill N` fills the last N sessions
+through that metered API; keep N small. `research_store/prices/backup/` exists
+because rebuilding is slow and rationed, not because it is impossible — the
+window recycles (it read 100/100 on 2026-07-29 and 5/100 on 2026-09-06), and
+moomoo serves ~11 years of daily bars per symbol (measured).
+
+✅ **You should rarely need this now.** Since 2026-09-06 the ordinary daily run
+repairs itself: `fetch_prices.py` (no arguments, which is what the slow loop
+already runs) backfills any universe member whose history cannot satisfy the
+momentum window, and skips names too young to have it. A healthy panel costs
+zero history quota. Use `--backfill` for a deliberate rebuild, not for routine
+gaps.
 
 **moomoo / OpenD re-login** (if you got a "signal panel gap" alert): the moomoo
 session is shared with the `moomoo-vol-desk` project and needs a one-time SMS code

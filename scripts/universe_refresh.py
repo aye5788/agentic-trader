@@ -537,9 +537,11 @@ def _v2_pond(mm, params, incumbents):
 
     ⛔ Retrieval depth is deliberately shallow. Membership needs exact ranks only
     through max(add_rank_max, keep_rank_max); everything past that is unread. One
-    200-row page normally suffices (measured: 199 of the top 200 survive the venue
-    filter, against a keep boundary of 180). A second page is fetched ONLY if the
-    filter leaves too few to establish that boundary.
+    200-row page normally suffices (measured 2026-09-06: all 200 of the top 200
+    survived the venue filter, against a keep boundary of 180 — OTC lines have
+    negligible US turnover and simply do not reach the top of a liquidity
+    ranking). A second page is fetched ONLY if the filter leaves too few to
+    establish that boundary.
     """
     keep_max = int(params["keep_rank_max"])
     add_max = int(params["add_rank_max"])

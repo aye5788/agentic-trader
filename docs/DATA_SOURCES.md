@@ -68,17 +68,44 @@ names. Price is IEX-only (not NBBO); never use for quotes.
 
 ## 5. moomoo (`src/adapters/moomoo/`) — the deep, under-used source
 
-**Wired today (universe maintenance only):** `snapshot_turnover`,
-`screen_top_marketcap`, `candidate_pond`. **Everything below is available but
-UNWIRED.** Quota: re-pulling a known symbol costs **0** (verified); tier cap 100.
+**Wired today (universe maintenance + the price panel):** `screen_by_turnover`
+(the V2 weekly discovery screen, in a subprocess — §5e), `exchange_types` and
+`listing_dates` (both UNMETERED `get_stock_basicinfo` reads), `snapshot_ohlc` /
+`daily_panel` (the price panel), plus `snapshot_turnover`, `screen_top_marketcap`
+and `candidate_pond`, which since 2026-09-06 serve only the retained
+`screen_backend = "legacy_v1"` comparison path. **Everything below is available
+but UNWIRED.**
 
-### 5a. The defining constraint: moomoo history is SHALLOW
+Quota: `request_history_kline` is metered at **100 DISTINCT symbols per rolling
+window**; re-pulling a symbol already inside that window costs **0** (verified
+2026-09-06 — a second NVDA pull left `used_quota` unchanged). The window
+genuinely recycles: it read `100/100` on 2026-07-29 and `5/100` on 2026-09-06.
+⛔ Screening (`get_stock_screen`, `get_stock_filter`, `get_stock_basicinfo`,
+`get_market_snapshot`) is **entirely unmetered against that cap** — a weekly
+universe screen spends ZERO history quota.
 
-Every moomoo time-series/event feed is **~1 year to at most ~2.5 years** deep. It
-is a real-time/recent feed, **not** a backtest archive. **Consequence:** moomoo
-signals **cannot be rigorously backtested** across regimes — the methodology is to
-**forward-log them into the ledger** at each weekly decision and validate
-prospectively (meta-labeling), NOT to fit a 1-year backtest.
+### 5a. The defining constraint: moomoo's EDGE feeds are SHALLOW
+
+Every moomoo **signal/event** feed in §5b is **~1 year to at most ~2.5 years**
+deep — capital flow ~252 daily, short interest ~10 readings, earnings-price-move
+~10 quarters. Those are real-time/recent feeds, **not** a backtest archive.
+**Consequence, unchanged:** moomoo *edge* signals **cannot be rigorously
+backtested** across regimes — the methodology is to **forward-log them into the
+ledger** at each weekly decision and validate prospectively (meta-labeling), NOT
+to fit a 1-year backtest.
+
+⛔ **THE DAILY K-LINE IS THE EXCEPTION, AND THIS PAGE USED TO GET IT WRONG.**
+Until 2026-09-06 the sentence above read "Every moomoo time-series/event feed",
+which swept in `request_history_kline` and made the price panel look
+irreplaceable. Measured live 2026-09-06: NVDA returned **2,753 daily bars back
+to 2015-09-24 (~11 years)** on a 4,000-day request, and a symbol never pulled
+before (PATH) returned **823 bars** for one quota unit. So daily OHLC is DEEP,
+the ~10y panel is **regenerable** at 100 distinct symbols per rolling window,
+and a newly admitted universe member can be given the 253 closes
+`momentum.compute()` needs — which is exactly what
+`fetch_prices._repair_incomplete` now does (invariant in
+`src/history_repair.py`). None of that licenses backtesting the edge signals
+above; their depth is unchanged.
 
 ### 5b. Verified endpoints (2026-07-23, US.AAPL), depth, and use
 

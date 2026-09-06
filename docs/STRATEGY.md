@@ -34,12 +34,21 @@ breaks, since long-only has no short leg to hedge you.
 one: the single-name book. Equities only.
 
 - **Single-name book** — the 150 in [`config/universe.csv`](../config/universe.csv),
-  **rescreened every Friday** (17:00 ET) on trailing dollar-volume by
-  `scripts/universe_refresh.py`. ⚠️ This was a QUARTERLY job that had never once
-  fired (armed 2026-07-20, zero runs), so the pool was frozen at its inception
-  list; changed 2026-08-20. Seeds are protected, incumbents are kept while their
-  $-vol rank holds, and a routine change auto-applies while anything anomalous
-  HOLDs for your review — it is a liquidity screen, not a signal.
+  **rescreened every Friday** (17:00 ET) by `scripts/universe_refresh.py`. ⚠️ This
+  was a QUARTERLY job that had never once fired (armed 2026-07-20, zero runs), so
+  the pool was frozen at its inception list; changed 2026-08-20. Seeds are
+  protected and incumbents are kept while their liquidity rank holds — it is a
+  liquidity screen, not a signal.
+  **Ranked on 20-DAY average dollar turnover since 2026-09-06**, over the whole
+  US market above the market-cap floor, on real US exchanges. It previously took
+  the top 400 names BY MARKET CAP and ranked those on ONE session's volume, which
+  made the effective cap floor ~$57B instead of the configured one and hid 1,084
+  names that met both standing policies. The thresholds themselves did not change
+  — see `[universe_maintenance]` in `config/strategy.toml`, which is authoritative.
+  ⛔ There are exactly two outcomes and NEITHER waits on a human: AUTO_APPLY, or
+  NO_CHANGE when the data contradicts itself (the last-known-good universe then
+  stands and the condition self-clears). There has been no HOLD-for-review state
+  since 2026-08-27; this page claimed otherwise until 2026-09-06.
   Respect the `flag` column: `fresh-ipo` (e.g. SpaceX) has no 12-month history —
   it is **unrankable until it seasons**; skip it, don't crash on it. `adr` /
   `micro` / `spec` are tradeable but note them.
