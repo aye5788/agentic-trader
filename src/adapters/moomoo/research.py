@@ -1,6 +1,7 @@
 """Data-only moomoo research calls for universe maintenance."""
 import csv
 import datetime as dt
+import os
 import time
 
 from moomoo import (RET_OK, Market, PeriodType, SecurityType, SimpleFilter,
@@ -244,6 +245,102 @@ def snapshot_fields(ctx, tickers):
         return out
     except Exception:
         return {}
+
+
+def exchange_types(tickers=None, ctx=None) -> dict:
+    """{bare_ticker: 'US_NYSE'|'US_NASDAQ'|'US_AMEX'|'US_PINK'|...}. UNMETERED.
+
+    ⛔ IT READS THE STOCK **AND** ETF ROSTERS, AND THAT IS NOT AN OVERSIGHT.
+    moomoo files REITs under `SecurityType.ETF` — EQIX, PLD, DLR, AMT, O, SPG
+    and 120 more (measured 2026-09-06). Building this map from the STOCK roster
+    alone silently returns None for every REIT, and a venue allowlist would then
+    delete them from discovery as "unknown venue". Exchange is VENUE metadata and
+    is orthogonal to moomoo's security-type label, which is unreliable — so the
+    lookup must span both rosters and must never be used to infer instrument
+    type. Rejecting funds stays the job of the positive market-cap test in
+    scripts/universe_refresh.py::is_equity.
+
+    Returns {} on failure; the caller must treat an empty map as "venue unknown
+    for everything" and refuse to add, never as "everything is allowed".
+    """
+    own = ctx is None
+    q = ctx or quote_ctx()
+    out = {}
+    try:
+        for st in (SecurityType.STOCK, SecurityType.ETF):
+            ret, df = q.get_stock_basicinfo(Market.US, st)
+            if ret != RET_OK or df is None or not len(df):
+                continue
+            for rec in df.to_dict("records"):
+                t = _bare(str(rec.get("code", "")))
+                ex = str(rec.get("exchange_type") or "").strip()
+                if t and ex:
+                    out.setdefault(t, ex)
+    except Exception:  # noqa: BLE001 — offline batch; empty map fails closed
+        return {}
+    finally:
+        if own:
+            q.close()
+    if tickers is None:
+        return out
+    want = {_bare(_us(t)) for t in tickers}
+    return {t: v for t, v in out.items() if t in want}
+
+
+def screen_by_turnover(min_mktcap: float, rows: int = 200, days: int = 20,
+                       python_bin=None, timeout: int = 300) -> dict:
+    """The WEEKLY DISCOVERY SCREEN: US names with market cap >= `min_mktcap`,
+    ranked server-side by `days`-day CUMULATIVE dollar turnover, descending.
+
+    ⛔ RUNS IN A SUBPROCESS UNDER `v2env`, NOT IN THIS INTERPRETER. moomoo's V2
+    decoder needs protobuf < 5 and this box runs 7.35.1 everywhere else (the SDK
+    install is shared with the sibling repo `moomoo-vol-desk`, so downgrading it
+    is not available). scripts/v2_screen.py carries the full explanation and
+    deploy/setup_v2env.sh rebuilds the interpreter. Everything else in this
+    module is V1 and runs in-process.
+
+    ⛔ `turnover_20d_cum` IS CUMULATIVE, NOT A DAILY AVERAGE, despite moomoo
+    naming the field AVG_TURNOVER — see universe_maint.to_avg_daily(), which is
+    the ONE place the division happens.
+
+    Spends NO history quota: a server-side screen is unrelated to the 100-
+    distinct-symbol `request_history_kline` meter.
+
+    Raises RuntimeError on any failure. The caller must let that become
+    NO_CHANGE — never a silent fall back to a different discovery mechanism,
+    which would quietly run a different strategy.
+    """
+    import json          # noqa: PLC0415 — local: this is the only user
+    import subprocess    # noqa: PLC0415
+    import tempfile      # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    repo = Path(__file__).resolve().parents[3]
+    py = Path(python_bin or os.environ.get("AGENTIC_V2_PYTHON")
+              or repo / "v2env" / "bin" / "python")
+    if not py.exists():
+        raise RuntimeError(
+            f"V2 interpreter missing at {py} — rebuild it with "
+            f"deploy/setup_v2env.sh (or set AGENTIC_V2_PYTHON)")
+    worker = repo / "scripts" / "v2_screen.py"
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "screen.json"
+        cmd = [str(py), str(worker), "--min-mktcap", repr(float(min_mktcap)),
+               "--rows", str(int(rows)), "--days", str(int(days)),
+               "--out", str(out)]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"V2 screen timed out after {timeout}s") from e
+        if not out.exists():
+            raise RuntimeError(
+                f"V2 screen produced no result (exit {proc.returncode}): "
+                f"{(proc.stderr or proc.stdout or '')[-300:]}")
+        data = json.loads(out.read_text())
+    if not data.get("ok"):
+        raise RuntimeError(f"V2 screen failed: {data.get('error')}")
+    return data
 
 
 def listing_dates(tickers=None, ctx=None) -> dict:

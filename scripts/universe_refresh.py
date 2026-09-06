@@ -200,6 +200,135 @@ def _selftest() -> None:
     os.remove(tmp)
     print("universe_maint selftest OK: csv round-trip + as_of stamp")
 
+    # ================= V2 liquidity screen (2026-09-06) =====================
+    NY, PINK = "US_NYSE", "US_PINK"
+
+    def _rows(n, start=4.0e9, step=-1.0e7, **over):
+        """n synthetic rows in descending 20d CUMULATIVE turnover order."""
+        out = []
+        for i in range(n):
+            out.append({"symbol": f"T{i:03d}", "name": f"n{i}",
+                        "market_cap": 5e9, "turnover_20d_cum": start + i * step})
+            out[-1].update(over.get(f"T{i:03d}", {}))
+        return out
+
+    def _ex(rows, venue=NY, **over):
+        m = {r["symbol"]: venue for r in rows}
+        m.update(over)
+        return m
+
+    # ---- 1. cumulative -> daily average. THE trap: the field is misnamed. ----
+    assert um.to_avg_daily(1_000_000_000) == 50_000_000, \
+        "$1B cumulative over 20 sessions IS the $50M/day add floor"
+    assert um.V2_TURNOVER_DAYS == 20, "the divisor is the screen's own period"
+    assert um.to_avg_daily(1e9, days=10) == 1e8, "days must drive the divisor"
+    # unusable values must NOT become 0.0 -- a silent 0 fails the add floor
+    # quietly instead of surfacing as an integrity problem.
+    for bad in (None, "", "abc", 0, -5, float("nan"), float("inf")):
+        assert um.to_avg_daily(bad) is None, f"{bad!r} must be unusable, not 0"
+
+    # ---- 2. ranking + the add/keep boundaries ------------------------------
+    rows = _rows(200)
+    ranked, to, rep = um.build_ranked_screen(rows, _ex(rows), 180)
+    assert rep["problems"] == [], rep
+    assert ranked[:3] == ["T000", "T001", "T002"], ranked[:3]
+    assert ranked == sorted(ranked, key=lambda t: -to[t]), "rank must follow turnover"
+    assert to["T000"] == um.to_avg_daily(4.0e9), "turnover handed on as $/day"
+
+    P = {"target_size": 150, "keep_rank_max": 180, "add_rank_max": 150,
+         "add_dvol_floor_usd": 50_000_000}
+    # fill at rank 180 is KEPT, at 181 is DROPPED
+    cur = [{"ticker": "T179", "source": "fill_dvol", "sector": "", "exchange": "",
+            "flag": "", "as_of": ""},
+           {"ticker": "T180", "source": "fill_dvol", "sector": "", "exchange": "",
+            "flag": "", "as_of": ""}]
+    p = um.propose_membership(ranked, to, cur, [], P, is_equity=lambda t: True)
+    assert "T179" in p["keep"] and "T180" in p["drop_fills"], (p["keep"][:3], p["drop_fills"])
+    # add at rank 150 allowed, 151 not
+    assert "T149" in p["add"] and "T150" not in p["add"], p["add"][:3]
+
+    # ---- 3. seeds are protected regardless of rank ------------------------
+    seed_cur = [{"ticker": "ZZZZ", "source": "seed", "sector": "", "exchange": "",
+                 "flag": "", "as_of": ""}]
+    p = um.propose_membership(ranked, to, seed_cur, [], P, is_equity=lambda t: True)
+    assert "ZZZZ" in p["keep"], "an unranked seed must survive"
+    assert "ZZZZ" not in p["drop_fills"], p["drop_fills"]
+
+    # ---- 4. the $50M/day add floor, at the boundary ------------------------
+    # 20d cumulative of exactly $1.0B == $50M/day -> allowed; a hair under -> not.
+    edge = [{"symbol": "EDGE", "name": "e", "market_cap": 5e9,
+             "turnover_20d_cum": 1_000_000_000},
+            {"symbol": "UNDER", "name": "u", "market_cap": 5e9,
+             "turnover_20d_cum": 999_999_980}]
+    er, eto, _ = um.build_ranked_screen(edge, _ex(edge), 0)
+    assert eto["EDGE"] == 50_000_000 and eto["UNDER"] < 50_000_000
+    p = um.propose_membership(er, eto, [], [], P, is_equity=lambda t: True)
+    assert p["add"] == ["EDGE"], f"the floor is >= $50M/day: {p['add']}"
+
+    # ---- 5. integrity refusals --------------------------------------------
+    dup = _rows(5) + [{"symbol": "T000", "name": "d", "market_cap": 5e9,
+                       "turnover_20d_cum": 1e9}]
+    _, _, r_dup = um.build_ranked_screen(dup, _ex(dup), 0)
+    assert any("duplicate" in p for p in r_dup["problems"]), r_dup
+
+    mal = _rows(5, **{"T002": {"turnover_20d_cum": None}})
+    _, mto, r_mal = um.build_ranked_screen(mal, _ex(mal), 0)
+    assert any("unusable" in p for p in r_mal["problems"]), r_mal
+    assert "T002" not in mto, "a malformed row must not receive a rank"
+
+    unsorted_rows = _rows(5, **{"T003": {"turnover_20d_cum": 9.9e9}})
+    _, _, r_srt = um.build_ranked_screen(unsorted_rows, _ex(unsorted_rows), 0)
+    assert any("not sorted descending" in p for p in r_srt["problems"]), r_srt
+
+    # a row that passed the cap FLOOR but reports no cap is incoherent
+    nocap = _rows(3, **{"T001": {"market_cap": None}})
+    _, _, r_cap = um.build_ranked_screen(nocap, _ex(nocap), 0)
+    assert any("cap" in p for p in r_cap["problems"]), r_cap
+
+    # ---- 6. insufficient rank depth -> NO_CHANGE, never a partial ranking --
+    short = _rows(50)
+    _, _, r_short = um.build_ranked_screen(short, _ex(short), 180)
+    assert any("keep_rank_max" in p for p in r_short["problems"]), r_short
+    d = um.classify({"add": [], "drop_fills": [], "flagged_seeds": []},
+                    50, P, coverage={"v2_problems": r_short["problems"]})
+    assert d["decision"] == "NO_CHANGE", d
+    assert any("V2 screen integrity" in r for r in d["reasons"]), d
+    # ...and a clean screen still applies.
+    assert um.classify({"add": [], "drop_fills": [], "flagged_seeds": []},
+                       200, P, coverage={"v2_problems": []})["decision"] == "AUTO_APPLY"
+
+    # ---- 7. venue allowlist -----------------------------------------------
+    vrows = _rows(4)
+    vex = _ex(vrows, **{"T001": PINK})          # an OTC line
+    del vex["T002"]                             # unknown venue
+    vranked, _, vrep = um.build_ranked_screen(vrows, vex, 0)
+    assert vranked == ["T000", "T003"], vranked
+    assert vrep["excluded_venue"] == ["T001"] and vrep["unknown_venue"] == ["T002"], vrep
+    # ⛔ but the allowlist is a DISCOVERY constraint: an INCUMBENT is never
+    # evicted by it, or a metadata gap would silently de-list a whitelisted name.
+    iranked, _, _ = um.build_ranked_screen(vrows, vex, 0, incumbents=["T001", "T002"])
+    assert iranked == ["T000", "T001", "T002", "T003"], iranked
+
+    # ---- 8. stocks-only sanity, and REITs are NOT funds --------------------
+    fund = [{"symbol": "SPY", "name": "f", "market_cap": 5e9,
+             "turnover_20d_cum": 4e9},
+            {"symbol": "PLD", "name": "r", "market_cap": 130e9,
+             "turnover_20d_cum": 3e9}]
+    fr, fto, _ = um.build_ranked_screen(fund, _ex(fund), 0)
+    # the venue filter does NOT reject either -- venue says where, not what
+    assert fr == ["SPY", "PLD"], fr
+    # the name-shape/denylist backstop catches the fund...
+    assert not um._looks_like_common_stock("SPY")
+    # ...and must NOT catch the REIT, which moomoo mislabels SecurityType.ETF.
+    for reit in ("PLD", "EQIX", "AMT", "DLR", "SPG", "O"):
+        assert um._looks_like_common_stock(reit), f"{reit} is an operating company"
+    # a fund never reaches `add`, and is reported rather than silently dropped
+    p = um.propose_membership(fr, fto, [], [], P,
+                              is_equity=um._looks_like_common_stock)
+    assert p["add"] == ["PLD"] and p["rejected_non_equity"] == ["SPY"], p
+    print("universe_maint selftest OK: V2 screen (cumulative/20, rank bands, "
+          "seed protection, venue allowlist, integrity refusals, REIT != fund)")
+
 
 def _render_md(proposal, decision, asof) -> str:
     L = [f"# Universe proposal {asof}", "",
@@ -207,6 +336,17 @@ def _render_md(proposal, decision, asof) -> str:
     if decision["reasons"]:
         L += ["", "**Changed nothing because:** (self-clears — no action required)"] \
              + [f"- {r}" for r in decision["reasons"]]
+        # ⛔ SAY THAT THE DIFF BELOW IS NOT A RECOMMENDATION. The add/drop lists
+        # are computed from the same ranking the reasons above just declared
+        # untrustworthy: when the screen is unavailable the ranking is empty, so
+        # every fill reads as "rank > keep_rank_max" and the report lists ~98
+        # drops that nothing would ever apply. `_validate_before_write` refuses
+        # such a proposal (it is not `target_size` rows), but a human reading
+        # the push or the dashboard should not have to know that to avoid alarm.
+        L += ["", "> ⚠️ The add/drop lists below were computed from the ranking "
+                  "this run just rejected. They are a diagnostic, NOT a proposal, "
+                  "and cannot be applied — the write gate refuses any universe "
+                  "that is not the configured size."]
     rej = proposal.get("rejected_non_equity") or []
     if rej:
         L += ["", "**Rejected (not common stock):** " + ", ".join(rej)]
@@ -332,7 +472,7 @@ def apply_from_file(asof, cfg) -> None:
     (PROP_DIR / f"{asof}.json").write_text(json.dumps(data, indent=2))
 
 
-def run(asof: str, dry: bool) -> dict:
+def run(asof: str, dry: bool, backend: str = None) -> dict:
     from adapters.moomoo import research as mm  # lazy: moomoo SDK is system-python-only
 
     cfg = strategy.load()
@@ -342,6 +482,31 @@ def run(asof: str, dry: bool) -> dict:
     watch = json.loads(WATCH.read_text()) if WATCH.exists() else {}
     seed_flags = um.flag_stale_seeds(watch, params)
 
+    backend = str(backend or params.get("screen_backend", "v2_turnover")).strip().lower()
+    if backend == "v2_turnover":
+        ranked, turnovers, coverage, screen_note = _v2_pond(mm, params, incumbents)
+    elif backend == "legacy_v1":
+        ranked, turnovers, coverage, screen_note = _legacy_pond(mm, params, incumbents)
+    else:
+        raise SystemExit(f"unknown [universe_maintenance] screen_backend={backend!r} "
+                         f"(expected 'v2_turnover' or 'legacy_v1')")
+    print(screen_note)
+    return _finish(mm, cfg, params, current, incumbents, seed_flags,
+                   ranked, turnovers, coverage, asof, dry)
+
+
+def _legacy_pond(mm, params, incumbents):
+    """THE ORIGINAL V1 FUNNEL — top-`screen_top_n` by MARKET CAP, then ranked on
+    a SINGLE SESSION's dollar volume. Retained as an explicitly selected debug /
+    comparison path (`screen_backend = "legacy_v1"`); it is no longer scheduled.
+
+    ⛔ Why it was replaced (measured 2026-09-06): sorting by market cap and
+    truncating at 400 made the effective floor ~$57B rather than the configured
+    $2B, so 1,084 names with cap >= $2B and >= $50M/day of turnover were
+    invisible to discovery — MSTR, CRWV, SMCI, IREN, COIN and RKLB among them,
+    all of which only reached the universe because a human seeded them. A
+    further 100 of the 400 slots went to foreign OTC ADR lines that could not
+    even return a turnover quote."""
     pond = mm.candidate_pond(incumbents, str(POOL), params)
     # ⛔ COVERAGE, NOT LENGTH. `len(ranked)` counts names that came back with a
     # positive turnover; it cannot tell a complete 150 from a truncated 400. A
@@ -354,12 +519,92 @@ def run(asof: str, dry: bool) -> dict:
         print(f"  feed incomplete: {len(coverage['missing'])} of "
               f"{len(coverage['requested'])} pond names unaccounted for")
     ranked = um.rank_pond(turnovers)
+    return ranked, turnovers, coverage, (
+        f"  [legacy_v1] pond={len(pond)} ranked={len(ranked)} "
+        f"(single-session turnover)")
 
-    # ⛔ EQUITIES ONLY. The pond is moomoo's market-cap screen (documented as
-    # UNFILTERED — funds, preferred shares and SPAC units all rank) or, on
-    # failure, config/pit_pool.csv. An ADD lands in config/universe.csv, which
+
+def _v2_pond(mm, params, incumbents):
+    """THE SCHEDULED SCREEN (2026-09-06): the whole US market above the market-cap
+    FLOOR, ranked server-side by 20-day CUMULATIVE dollar turnover, venue-filtered
+    to real US exchanges, converted to $/day.
+
+    ⛔ A FAILURE HERE MUST NOT FALL BACK. Returning the legacy funnel or a stale
+    pool on error would run a different strategy under the same name and rewrite
+    the order-gate whitelist from it. Every failure becomes an integrity problem,
+    which `classify` turns into NO_CHANGE — the last-known-good universe stands
+    and the condition self-clears on the next healthy run.
+
+    ⛔ Retrieval depth is deliberately shallow. Membership needs exact ranks only
+    through max(add_rank_max, keep_rank_max); everything past that is unread. One
+    200-row page normally suffices (measured: 199 of the top 200 survive the venue
+    filter, against a keep boundary of 180). A second page is fetched ONLY if the
+    filter leaves too few to establish that boundary.
+    """
+    keep_max = int(params["keep_rank_max"])
+    add_max = int(params["add_rank_max"])
+    need = max(keep_max, add_max)
+    rows_wanted = int(params.get("screen_rows", 200))
+    note_bits = []
+    try:
+        data = mm.screen_by_turnover(float(params["screen_min_mktcap"]),
+                                     rows=rows_wanted,
+                                     days=um.V2_TURNOVER_DAYS)
+        exchanges = mm.exchange_types()
+        if not exchanges:
+            raise RuntimeError("exchange metadata unavailable — cannot verify "
+                               "venue, and an unverified venue must not add")
+        ranked, turnovers, rep = um.build_ranked_screen(
+            data["rows"], exchanges, keep_max, days=um.V2_TURNOVER_DAYS,
+            incumbents=incumbents)
+        # One retry at greater depth ONLY if the venue filter left us short of
+        # the rank boundary -- not a routine second page.
+        if rep["ranked_count"] < need and not data.get("last_page"):
+            note_bits.append(f"depth retry: {rep['ranked_count']} < {need}")
+            data = mm.screen_by_turnover(float(params["screen_min_mktcap"]),
+                                         rows=rows_wanted * 2,
+                                         days=um.V2_TURNOVER_DAYS)
+            ranked, turnovers, rep = um.build_ranked_screen(
+                data["rows"], exchanges, keep_max, days=um.V2_TURNOVER_DAYS,
+                incumbents=incumbents)
+    except Exception as e:  # noqa: BLE001 — every failure is an integrity refusal
+        return [], {}, {"v2_problems": [f"V2 screen unavailable: "
+                                        f"{type(e).__name__}: {e}"]}, \
+            f"  [v2_turnover] FAILED: {type(e).__name__}: {e}"
+
+    coverage = {"v2_problems": rep["problems"]}
+    note_bits.append(f"all_count={data['all_count']} retrieved={data['returned_rows']} "
+                     f"pages={data['pages']} ranked={rep['ranked_count']}")
+    if rep["excluded_venue"]:
+        note_bits.append(f"venue-excluded {len(rep['excluded_venue'])}: "
+                         + " ".join(rep["excluded_venue"][:10]))
+    if rep["unknown_venue"]:
+        note_bits.append(f"venue-unknown {len(rep['unknown_venue'])}: "
+                         + " ".join(rep["unknown_venue"][:10]))
+    if rep["problems"]:
+        note_bits.append("PROBLEMS: " + "; ".join(rep["problems"][:5]))
+    return ranked, turnovers, coverage, "  [v2_turnover] " + " | ".join(note_bits)
+
+
+def _finish(mm, cfg, params, current, incumbents, seed_flags,
+            ranked, turnovers, coverage, asof, dry):
+    """Membership decision + write. Backend-agnostic: everything above this line
+    only decides WHAT the ranked liquidity list is."""
+
+    # ⛔ EQUITIES ONLY, AND THIS TEST IS BACKEND-INDEPENDENT. Both ranking
+    # sources are UNFILTERED as to instrument type: the legacy pond is moomoo's
+    # market-cap screen (funds, preferred shares and SPAC units all rank) or
+    # config/pit_pool.csv, and the V2 liquidity screen is likewise a screen over
+    # instruments, not over common stock — its venue allowlist proves WHERE a
+    # name trades, never WHAT it is. An ADD lands in config/universe.csv, which
     # IS the order-gate whitelist, so a fund reaching `add` would quietly make
     # itself buyable and undo the sleeve deletion by another route.
+    #
+    # ⛔ DO NOT "IMPROVE" THIS INTO `SecurityType.ETF -> reject`. moomoo files
+    # REITs under that type — EQIX, PLD, DLR, AMT, O and SPG among ~126 measured
+    # 2026-09-06 — so that test would delete legitimate single-name operating
+    # equities from the universe. The market-cap test below is the one that
+    # actually separates funds from companies.
     #
     # The positive test: moomoo serves NO `total_market_val` for a fund — the
     # documented cause of the capital-flow ETF null (OPSLOG 2026-07-28).
@@ -508,6 +753,10 @@ def main() -> None:
                     help="run even when today is not the configured screen_day")
     ap.add_argument("--dry-run", action="store_true", help="compute + write proposal, change nothing")
     ap.add_argument("--asof", default=None, help="YYYY-MM-DD stamp (default: today UTC)")
+    ap.add_argument("--backend", default=None, choices=["v2_turnover", "legacy_v1"],
+                    help="override [universe_maintenance] screen_backend for THIS "
+                         "run — for comparing the scheduled V2 liquidity screen "
+                         "against the legacy market-cap funnel side by side")
     ap.add_argument("--apply", metavar="ASOF", default=None,
                     help="apply a stored proposal by its YYYY-MM-DD id (re-validated "
                          "against the live feed before the write)")
@@ -531,15 +780,22 @@ def main() -> None:
             print(f"not the screen day (today={today:%A}, screen_day={want}) — "
                   f"nothing done. Use --force to override, or --dry-run to look.")
             return
-        # ⛔ --force MAY NOT WRITE (2026-08-27). The screen ranks the pond on
-        # `snapshot_turnover`, a SINGLE-SESSION dollar-volume figure. The
-        # scheduled run is Friday 17:00 ET, after the close, so its session is
-        # complete. --force exists to run OFF-cadence — which is exactly when
+        # ⛔ --force MAY NOT WRITE (2026-08-27). The legacy screen ranked the
+        # pond on `snapshot_turnover`, a SINGLE-SESSION dollar-volume figure.
+        # The scheduled run is Friday 17:00 ET, after the close, so its session
+        # is complete. --force exists to run OFF-cadence — which is exactly when
         # the session may be partial, and a partial session is not a broken
         # feed: every name returns a number, so the coverage gate passes and the
         # ranking is quietly wrong. Measured 2026-08-27 07:49 ET pre-market: a
         # forced dry run proposed dropping FTNT and MNST, both held, purely on
         # pre-market turnover.
+        #
+        # ⚠️ The V2 backend (2026-09-06) ranks on TWENTY sessions, so a partial
+        # final session moves a name's figure by at most ~1/20 and this hazard
+        # is much weaker. The restriction is KEPT anyway: it is not zero, it
+        # costs nothing (the scheduled post-close run applies normally), and
+        # relaxing a write guard is a separate decision from changing how the
+        # ranking is computed.
         #
         # The boundary between a partial and a settled session is already
         # defined ONCE in this repo — fetch_prices._drop_unsettled_session()
@@ -556,7 +812,7 @@ def main() -> None:
                   "from a settled session (it is re-validated before the write).")
             return
         asof = args.asof or datetime.now(timezone.utc).date().isoformat()
-        run(asof, dry=args.dry_run)
+        run(asof, dry=args.dry_run, backend=args.backend)
         return
 
 

@@ -50,6 +50,134 @@ def rank_pond(turnovers: dict) -> list:
     return sorted(valid, key=lambda t: valid[t], reverse=True)
 
 
+# --------------------------------------------------------------------------
+#  V2 liquidity screen (2026-09-06) — the weekly discovery ranking
+# --------------------------------------------------------------------------
+
+# ⛔ DO NOT "CORRECT" THIS TO 1. moomoo's V2 field is named
+# `CumulativeProperty.AVG_TURNOVER`, and the name is WRONG: with `days=N` the
+# server returns the N-day CUMULATIVE dollar turnover, not a daily average.
+# Verified live 2026-09-06 against single-session snapshots — NVDA
+# $569.44B/20 = $28.5B/day against a $31.4B session (0.91x), AAPL 0.98x,
+# F 0.99x, KO 0.84x; undivided it would read 20x too liquid.
+#
+# The whole liquidity policy rides on this number: `add_dvol_floor_usd` is
+# $50M/DAY, so an undivided comparison would admit names at $2.5M/day. Divide
+# in ONE place — here — and never again downstream.
+V2_TURNOVER_DAYS = 20
+
+# Venue allowlist for DISCOVERY. moomoo's `Market.US` includes the OTC pink
+# sheets, which is what filled 100 of the old V1 screen's 400 slots with foreign
+# ADR lines that could not even return a turnover quote. Values are moomoo's own
+# `ExchType` strings from get_stock_basicinfo.
+#
+# ⚠️ This is a VENUE test, never an instrument test — see
+# adapters.moomoo.research.exchange_types() for why the map must span the ETF
+# roster too (moomoo files REITs there).
+ALLOWED_VENUES = ("US_NYSE", "US_NASDAQ", "US_AMEX")
+
+
+def to_avg_daily(cumulative, days: int = V2_TURNOVER_DAYS):
+    """N-day cumulative dollar turnover -> average dollars per day.
+
+    Returns None for anything that is not a usable positive number, so a
+    malformed row cannot be silently scored as zero (which would quietly fail
+    the add floor instead of raising an integrity problem)."""
+    try:
+        v = float(cumulative)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float("inf"), float("-inf")) or v <= 0:
+        return None
+    return v / float(days)
+
+
+def build_ranked_screen(rows, exchanges: dict, keep_rank_max: int,
+                        days: int = V2_TURNOVER_DAYS, allowed=ALLOWED_VENUES,
+                        incumbents=()) -> tuple:
+    """V2 screen rows -> (ranked, avg_daily_turnover, report). Pure.
+
+    `rows` arrive in the server's own descending-turnover order. This function
+    verifies that order rather than trusting it, applies the venue allowlist,
+    and converts cumulative turnover to the daily average the membership rules
+    are written in.
+
+    ⛔ INTEGRITY PROBLEMS ARE RETURNED, NOT SWALLOWED. Every entry in
+    report["problems"] must become NO_CHANGE at the caller. This function must
+    never fall back to another ranking source: a screen that quietly ranks on
+    something else is a different strategy wearing the same name.
+
+    ⛔ THE VENUE ALLOWLIST IS A DISCOVERY CONSTRAINT AND MUST NOT EVICT
+    INCUMBENTS. An incumbent whose venue is unknown or disallowed keeps its
+    rank, because dropping it from `ranked` would push it past keep_rank_max and
+    silently de-list a name already in the whitelist on nothing more than a
+    metadata gap. New names still need an allowed venue to be discoverable.
+    """
+    problems, excluded_venue, unknown_venue = [], [], []
+    incumbents = set(incumbents)
+    allowed = set(allowed)
+
+    seen, ordered = set(), []
+    prev = None
+    for i, row in enumerate(rows):
+        sym = (row.get("symbol") or "").strip()
+        if not sym:
+            problems.append(f"row {i} has no symbol")
+            continue
+        if sym in seen:
+            problems.append(f"duplicate symbol in screen result: {sym}")
+            continue
+        seen.add(sym)
+        cum = row.get("turnover_20d_cum")
+        adtv = to_avg_daily(cum, days)
+        if adtv is None:
+            problems.append(f"{sym}: unusable {days}d turnover ({cum!r})")
+            continue
+        cap = row.get("market_cap")
+        try:
+            capf = float(cap)
+        except (TypeError, ValueError):
+            capf = None
+        if capf is None or capf != capf or capf <= 0:
+            # It passed a server-side market-cap FLOOR, so a null cap is
+            # incoherent rather than merely absent.
+            problems.append(f"{sym}: passed the cap floor but reports cap {cap!r}")
+            continue
+        # The server was asked to sort descending; prove it did.
+        if prev is not None and cum > prev:
+            problems.append(
+                f"screen not sorted descending at {sym}: {cum} > {prev} — "
+                f"server-side ordering cannot be trusted for ranking")
+        prev = cum
+        ordered.append((sym, adtv, capf))
+
+    keep = []
+    for sym, adtv, capf in ordered:
+        venue = exchanges.get(sym)
+        if sym in incumbents:
+            keep.append((sym, adtv))
+            continue
+        if venue is None:
+            unknown_venue.append(sym)
+            continue
+        if venue not in allowed:
+            excluded_venue.append(sym)
+            continue
+        keep.append((sym, adtv))
+
+    if len(keep) < keep_rank_max:
+        problems.append(
+            f"only {len(keep)} ranked name(s) on allowed venues, fewer than "
+            f"keep_rank_max={keep_rank_max} — cannot establish the rank "
+            f"boundary membership decisions depend on")
+
+    ranked = [s for s, _ in keep]
+    turnovers = {s: v for s, v in keep}
+    report = {"problems": problems, "excluded_venue": excluded_venue,
+              "unknown_venue": unknown_venue, "ranked_count": len(ranked)}
+    return ranked, turnovers, report
+
+
 def propose_membership(ranked, turnovers, current_rows, seed_flags, params,
                        is_equity=None) -> dict:
     """Seeds always kept; fills kept while $-vol rank <= keep_rank_max; open slots
@@ -187,6 +315,10 @@ def classify(proposal, pond_count, params, coverage=None) -> dict:
         It is likewise reported, not blocking.
 
     WHAT STILL REFUSES, and why each is about a mechanism rather than a taste:
+      - `coverage["v2_problems"]`: the liquidity screen contradicted itself —
+        duplicate rows, unusable turnover, an order that is not descending, or
+        too few venue-clean names to reach keep_rank_max. See
+        build_ranked_screen().
       - `coverage["missing"]`: the feed did not account for every pond name.
         Ranking an incomplete panel silently de-lists whatever is absent.
       - short pond: fewer usable names than the target the screen must fill.
@@ -195,6 +327,14 @@ def classify(proposal, pond_count, params, coverage=None) -> dict:
     if the data is still broken.
     """
     reasons = []
+    # ⛔ V2 SCREEN INTEGRITY. build_ranked_screen() reports duplicates, unusable
+    # turnover values, a server sort that is not actually descending, and too few
+    # venue-clean rows to establish the keep boundary. Each is direct evidence
+    # the ranking cannot be trusted, so each refuses — and refusing means the
+    # last-known-good universe stands, never a fall back to another discovery
+    # mechanism (that would run a different strategy under the same name).
+    for p in list((coverage or {}).get("v2_problems") or []):
+        reasons.append(f"V2 screen integrity: {p}")
     missing = list((coverage or {}).get("missing") or [])
     if missing:
         head = ", ".join(missing[:8]) + ("…" if len(missing) > 8 else "")

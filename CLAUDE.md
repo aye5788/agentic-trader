@@ -277,11 +277,43 @@ src/adapters/moomoo/    Data-only moomoo client via OpenD — RUNS UNDER SYSTEM
                         Consumers: fetch_prices, market_monitor — both on system
                         python3. (fast_loop deleted 2026-08-14; risk_review retired
                         into the sessions 2026-08-13.)
-                        research.py serves scripts/universe_refresh.py (snapshot_turnover,
-                        screen_top_marketcap, candidate_pond — WEEKLY universe
-                        maintenance, Fridays 17:00 ET, `[universe_maintenance]
-                        screen_day`. ⚠️ WAS QUARTERLY and had NEVER once run
-                        (armed 2026-07-20, zero fires); changed 2026-08-20)
+                        research.py serves scripts/universe_refresh.py (WEEKLY
+                        universe maintenance, Fridays 17:00 ET,
+                        `[universe_maintenance] screen_day`. ⚠️ WAS QUARTERLY and
+                        had NEVER once run (armed 2026-07-20, zero fires);
+                        changed 2026-08-20)
+                        ⛔ DISCOVERY IS THE V2 LIQUIDITY SCREEN SINCE 2026-09-06
+                        (`screen_backend = "v2_turnover"`): screen_by_turnover()
+                        ranks the whole US market above the $2B cap FLOOR by
+                        20-day CUMULATIVE dollar turnover, SERVER-SIDE, and reads
+                        only ~200 rows — ranks are needed only through
+                        max(add_rank_max, keep_rank_max). Venue is post-filtered
+                        to NYSE/NASDAQ/AMEX via exchange_types().
+                        ⚠️ THE POLICY NUMBERS DID NOT CHANGE — $2B cap, $50M/DAY
+                        add floor — only the mechanism. moomoo's field is named
+                        AVG_TURNOVER but returns a CUMULATIVE total;
+                        universe_maint.to_avg_daily() divides by 20 in exactly
+                        ONE place and nothing downstream may divide again ($1B
+                        cumulative == the $50M/day floor).
+                        ⛔ It runs in a SUBPROCESS under ./v2env (scripts/
+                        v2_screen.py): the V2 decoder needs protobuf < 5 and the
+                        box runs 7.35.1 everywhere else (the SDK is shared with
+                        ~/moomoo-vol-desk, so no global downgrade). v2env is
+                        GIT-IGNORED — rebuild with deploy/setup_v2env.sh, and
+                        run_universe_refresh.sh refuses to run without it.
+                        ⛔ A V2 FAILURE NEVER FALLS BACK. Duplicates, unusable
+                        turnover, a non-descending sort, or too few venue-clean
+                        rows to reach keep_rank_max all become NO_CHANGE, so the
+                        last-known-good universe stands. Falling back to the
+                        legacy funnel would run a different strategy under the
+                        same name. The OLD funnel (screen_top_marketcap +
+                        candidate_pond + snapshot_turnover, top-400 by MARKET CAP
+                        then one session's turnover) is retained only as
+                        `screen_backend = "legacy_v1"` / `--backend legacy_v1`:
+                        it truncated at 400 so the effective cap floor was ~$57B
+                        not $2B, hid 1,084 names meeting both policies (MSTR,
+                        CRWV, SMCI, IREN, COIN, RKLB…), and spent 100 of its 400
+                        slots on foreign OTC ADR lines that returned no quote.
                         and scripts/collect_signals.py (capital_flow_daily,
                         short_interest, option_overview, snapshot_fields — the
                         weekly Sun 20:15 forward-log signal panel; running since

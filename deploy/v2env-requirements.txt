@@ -1,0 +1,21 @@
+# Pinned interpreter for moomoo's V2 screen (scripts/v2_screen.py) ONLY.
+#
+# WHY THIS EXISTS: moomoo-api 10.9.6908 declares `protobuf >= 3.20.0` with no
+# upper bound, but its V2 (get_stock_screen) decoder calls
+# `FieldDescriptor.label`, which protobuf 6/7 REMOVED. The box runs protobuf
+# 7.35.1 in system python3 and in .venv, where every V2 call fails with
+#   'google._upb._message.FieldDescriptor' object has no attribute 'label'
+# V1 and the SDK's other ~165 methods are unaffected (explicit field access, not
+# the generic reflection walker), so ONLY the V2 screen needs the old protobuf.
+#
+# Downgrading protobuf globally is NOT available: the system moomoo install is
+# shared with the sibling repo ~/moomoo-vol-desk. Hence this isolated venv.
+#
+# 10.9.6908 was the LATEST release as of 2026-09 — there is no upgrade to wait
+# for. If a later moomoo-api fixes the decoder, this whole environment and
+# scripts/v2_screen.py's subprocess boundary can be deleted and the screen moved
+# in-process.
+moomoo-api==10.9.6908
+protobuf<5
+pandas
+pyarrow

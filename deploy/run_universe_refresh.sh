@@ -18,8 +18,25 @@
 # (universe_maint.screen_due), so the cadence has ONE definition that a reader
 # and a test can both reach. Cron fires this every Friday; if the cron line and
 # the config ever disagree, the config wins and the script says so and exits 0.
+#
+# ⚠️ RUNTIME DEPENDENCY (2026-09-06): with `screen_backend = "v2_turnover"` the
+# refresh shells out to scripts/v2_screen.py under ./v2env, because moomoo's V2
+# decoder needs protobuf < 5 while the rest of the box runs 7.35.1. v2env/ is
+# GIT-IGNORED, so a rebuilt droplet has none and the screen would report
+# NO_CHANGE every week. Rebuild it with deploy/setup_v2env.sh. The pre-flight
+# below states that plainly rather than leaving a future operator to infer it
+# from a weekly "changed nothing" push.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source deploy/alert.sh "universe refresh" "logs/universe.log"   # phone alert if this run dies
 mkdir -p logs
+if ! grep -q 'screen_backend *= *"legacy_v1"' config/strategy*.toml 2>/dev/null; then
+  if [ ! -x v2env/bin/python ]; then
+    echo "MISSING V2 RUNTIME: ./v2env/bin/python not found."
+    echo "  The weekly liquidity screen needs it (protobuf < 5; see"
+    echo "  deploy/v2env-requirements.txt). Rebuild:  deploy/setup_v2env.sh"
+    echo "  The universe is UNCHANGED until then — no rotation has been applied."
+    exit 1
+  fi
+fi
 /usr/bin/python3 scripts/universe_refresh.py --run

@@ -204,9 +204,20 @@ pre-6 protobuf. Blast radius is limited to `get_stock_screen`: V1 and the other
 ✅ **How to actually run V2 — an isolated venv, verified 2026-07-29.** Do NOT pin
 or patch the system install: that SDK is shared with `moomoo-vol-desk`. Stand up a
 separate interpreter and point it at the **same** OpenD (data channel only — never
-launch a second gateway):
+launch a second gateway).
+
+⛔ **THIS IS PRODUCTION SINCE 2026-09-06, NOT A PROBE.** The weekly universe
+screen (`[universe_maintenance] screen_backend = "v2_turnover"`) runs
+`scripts/v2_screen.py` under this interpreter in a subprocess and reads JSON back
+— see `src/adapters/moomoo/research.py::screen_by_turnover()`. Build it with the
+committed recipe, never by hand: **`deploy/setup_v2env.sh`** +
+`deploy/v2env-requirements.txt`. `v2env/` is git-ignored, so a rebuilt droplet has
+no universe screen until that script is run; `deploy/run_universe_refresh.sh`
+refuses to start without it and says so.
 
 ```bash
+deploy/setup_v2env.sh          # the supported path (asserts protobuf < 5)
+# equivalent by hand:
 /usr/bin/python3 -m venv v2env
 ./v2env/bin/pip install "moomoo-api==10.9.6908" "protobuf<5"   # resolves to 4.25.9
 ./v2env/bin/python -c "import google.protobuf as p; print(p.__version__)"
@@ -238,6 +249,18 @@ being empty costs us nothing today.
 — numeric property ids, NOT names. Map with `int(FeaturedProperty.X)` etc.
 `value_type` present with no value field = **missing data** (docs), which is how
 the empties above present. Value types: 1=`sval`, 2=`ival`, 3=`aval`, 4=`dval`.
+
+⛔ **`CumulativeProperty.AVG_TURNOVER` IS NOT AN AVERAGE — IT IS THE N-DAY
+CUMULATIVE TOTAL, in USD.** The name is simply wrong, and it is the field the
+weekly universe screen ranks on. Verified live 2026-09-06 against single-session
+`get_market_snapshot` turnover: NVDA $569.44B/20 = $28.5B/day vs a $31.4B
+session (0.91x), AAPL 0.98x, MSFT 1.26x, KO 0.84x, F 0.99x — undivided it reads
+**20x too liquid**. `AVG_VOLUME` behaves the same way (NVDA 2.58B shares/20 =
+129M/day vs a 135M session). Divide by `days` exactly once:
+`universe_maint.to_avg_daily()` is that one place, and `$1B` cumulative is
+precisely the `$50M/day` add floor. Same trap in the other direction:
+`SimpleProperty.LISTED_DAYS` returns **20702** (a 1970-01-01 epoch default) for
+76.7% of US names — that is UNKNOWN, not a 1970 listing.
 
 ⚠️ **V2 flips two conventions** — do not port a V1 query by hand:
 percentages are **decimals** (`0.05` = 5%, vs V1's `5.0`), and indicator/pattern

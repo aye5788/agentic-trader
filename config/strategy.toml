@@ -314,8 +314,29 @@ target_size            = 150          # universe size
 keep_rank_max          = 180          # incumbent kept while $-vol rank <= this (band)
 add_rank_max           = 150          # non-incumbent eligible to add while rank <= this
 add_dvol_floor_usd     = 50_000_000   # hard min turnover for an ADD (junk gate)
-screen_top_n           = 400          # market-cap screen depth for the pond
+screen_top_n           = 400          # LEGACY-ONLY: market-cap pond depth (see screen_backend)
 screen_min_mktcap      = 2_000_000_000
+# Which discovery mechanism ranks the market. UNCHANGED POLICY, NEW MECHANISM.
+#   "v2_turnover" (scheduled) — moomoo V2 get_stock_screen over the whole US
+#       market above screen_min_mktcap, ranked SERVER-SIDE by 20-day cumulative
+#       dollar turnover, venue-filtered to NYSE/NASDAQ/AMEX.
+#   "legacy_v1" — the original funnel, kept selectable for comparison/debug.
+#       ⛔ It sorted by MARKET CAP and truncated at screen_top_n=400, which made
+#       the effective floor ~$57B instead of the configured $2B and hid 1,084
+#       names that met both the cap and liquidity policies (MSTR, CRWV, SMCI,
+#       IREN, COIN, RKLB…). 100 of its 400 slots went to foreign OTC ADR lines
+#       that could not even return a turnover quote.
+# ⚠️ The thresholds below are NOT changed by the switch: $2B cap floor and
+# $50M/DAY add liquidity are the same numbers, now measured over 20 sessions
+# instead of one Friday. moomoo's V2 field is CUMULATIVE despite being named
+# AVG_TURNOVER — universe_maint.to_avg_daily() divides by 20 in exactly one
+# place, and nothing downstream may divide again.
+screen_backend         = "v2_turnover"
+screen_rows            = 200          # ranked rows retrieved (V2 page max is 200).
+                                      # Only ranks through max(add_rank_max,
+                                      # keep_rank_max) are ever read; a second
+                                      # page is fetched only if the venue filter
+                                      # leaves fewer than that boundary.
 # ⛔ auto_apply_max_changes REMOVED 2026-08-27. It was a churn ceiling (5)
 # justified in code as a data-glitch detector, and it was the wrong instrument:
 # after weeks of a frozen pool a large diff is expected drift, and a genuinely
