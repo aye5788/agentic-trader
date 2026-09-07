@@ -8,6 +8,106 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-06 — issue 011 run: a false drawdown halt, three stale fills replayed into the letter facts, and one fill with no size
+
+Written by the issue 011 newsletter run. `facts.json` had `notes: []`, so none of
+this was flagged upstream — all of it was found by reading the fills and the
+journal against each other. Nothing below changed a position; items 1 and 2 both
+had the potential to put a false statement in front of Aaron.
+
+**1. FALSE DRAWDOWN HALT, 2026-08-31 — the buy side was closed account-wide off a
+stale snapshot.** `check_order(CRWD, buy, 6.50)` returned `allowed:false`,
+verbatim: `"DRAWDOWN halt: -29.5% from peak (limit 25%) — no new buys;
+stop/target exits stay armed."` Funding was not the constraint (`buying_power`
+12.02, `affordable true`). The session did the right thing: it did not retry with
+a smaller size, a split order or a different symbol, and it recorded that the
+number did not reconcile — −29.5% against a 25% limit implies a tracked peak of
+71.31 / 0.705 ≈ $101.15, which no equity point supported. Reconciliation then
+showed the broker holding **$42.02 cash against a snapshot that said $12.02**;
+true NAV was **$101.53, not $71.31**. The halt evaporated and the session
+deployed the unseen cash across six holdings at 14:48Z. Two knock-on effects
+worth keeping: the FCX exit was reversed to a hold *solely* because the buy side
+looked shut, then re-executed the same session once the halt cleared; and CRWD's
+entry carries a superseded `blocked_entry` decision above its `open`.
+
+*Action for a maintainer:* the drawdown gate reads a cached NAV that can lag the
+broker by a full session. A gate that can close every buy in the account should
+refresh or fail open, not fail closed on a stale denominator.
+
+**2. `fills_this_week` REPLAYED THREE ALREADY-REPORTED SELLS.** The letter facts
+carried duplicate sell records that are not this week's trades:
+
+| fill | copies in facts | actually filled |
+|---|---|---|
+| FTNT target2 full exit $3.28 @ 167.12, order `6a9054b5` | 3 | **2026-08-27** — reported in issue 010 |
+| KO stop full exit $5.72 @ 87.8001, order `6a982621` | 3 | 2026-09-02 (real, this week) |
+| CRWD stop full exit $8.29 @ 204.5901, order `6a982c95` | 2 | 2026-09-02 (real, this week) |
+
+Root cause is visible in `research_store/journal.jsonl` at lines 580, 588 and
+617: three separate `execution` events on 2026-09-02 each re-emit a `fills`
+payload whose **first element is the stale 08-27 FTNT fill**. So the KO and CRWD
+duplication and the FTNT time-travel are the same bug — an execution payload
+that is not being trimmed to newly-recorded fills before it is journalled.
+
+The FTNT record is the dangerous one: it says `position fully closed`, while
+`positions[]` in the same facts file shows FTNT held at $8.51 and −5.6% on cost.
+Taken at face value the letter would have reported a sale of a position the
+reader still owns, and issue 010 already narrated that exit ("PANW and FTNT then
+reached their second and closed in full"). It was excluded from issue 011 on the
+journal evidence; `exit_signals_this_week` corroborates, listing only KO, CRWD,
+DELL, SNDK, INTC and MU.
+
+**3. ONE FILL WITH NO SIZE.** `{"symbol": "MU", "side": "buy", "avg_price":
+"941.043600", "order_id": "6a4e9a3e-…"}` — journalled 2026-09-04T19:48:19Z with
+`"source": "reconcile"` and **no `amount` field**. The MU target1 sell in the
+adjacent event carries `"quantity_missing": ["MU"]`. The order id prefix is far
+older than the week's other orders (`6a9b…`, `6a9a…`), so this looks like a
+historical fill surfaced by reconciliation rather than a Friday trade. The letter
+states it exists and says the size was not recorded, rather than guessing at one
+or silently dropping it.
+
+**4. TWO FILLS REACHED THE LETTER WITH NEITHER `note` NOR `agent_reasons`.** AMD
+$3.77 @ 468.69 and LITE $3.79 @ 899.67, both from Monday's six-name top-up. The
+reason exists — the `PORTFOLIO` / `rebalance` entry in
+`portfolio_decisions_this_week` names both by symbol, amount and price — but the
+per-fill join in `letter_facts.py` did not attach it, presumably because the
+decision is filed under `PORTFOLIO` rather than the symbol. This is the same
+class of defect as the issue 007 post-mortem: the reason was recorded, and the
+letter nearly could not see it. Worth teaching the join to fall back to
+session-level decisions that name a symbol in their text.
+
+**5. `trade_pnl_at_stop_pct_cost` IS ABSENT FROM `positions[]`.** Step 1f of the
+newsletter prompt calls for it to rank the `profitable_now_but_loss_at_stop`
+names by how much each would lose. Eight of eleven positions carry that flag this
+week (AMD, DELL, INTC, MU, SNDK, STX, MRVL, MRK), so the ranking mattered and
+could not be produced. The letter used `peak_pct`/`giveback_pct` to name STX as
+the sharpest case instead. Either emit the field or amend the prompt.
+
+**6. $0.04 UNEXPLAINED CASH, 2026-09-04.** The session-opening
+`refresh_broker_snapshot` at 14:35:42Z reported `cash_delta +0.04` against the
+08-31T19:21:57Z snapshot with an `UNEXPLAINED_CASH` banner and no fill of ours in
+between — an external flow, almost certainly a fractional dividend on KO or MRK.
+`net_deposits_this_week` is 0 and `flows_this_week` is empty, so it is not in the
+letter and is not in the equity curve as return. Immaterial at four cents, but
+this is the second flavour of unexplained-cash banner in a week (the 14:48:59Z
++2.44 was fully explained by our own fills) and the two should be distinguishable
+without reading the prose.
+
+**7. SESSION AND FEED INTERRUPTIONS, all recovered.** The 2026-09-04 10:35 ET
+open session died mid-run; `record_fills` in the following session returned
+`recorded:0` ("every filled order in this payload was already journalled"), so
+all four of that morning's fills survived — nothing was lost, and the 15:15 close
+session picked up the review the dead session had not finished. Separately, a
+moomoo feed outage on 08-31 around 14:48Z rejected a CRWD level write with "no
+usable live price to check it against — the guard fails closed"; it was
+re-written unchanged once the feed returned. On 09-02 the pre-order JNJ stop write
+at 14:41Z was rejected the same way, leaving JNJ `watched:false` with targets but
+no stop between the fill and the 14:44Z re-arm. The guard failing closed is
+correct behaviour; the exposure window between a fill and a successful level write
+is not, and is worth a look.
+
+---
+
 ## 2026-09-06 — the weekly screen was ranking the wrong 400 names: discovery moves to 20-day liquidity (moomoo V2)
 
 **The mechanism, as it had been since inception.** `universe_refresh.py` asked
