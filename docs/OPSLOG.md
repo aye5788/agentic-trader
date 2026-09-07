@@ -8,6 +8,100 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-07 — the take-profit latch was keyed to the book date, so it sold MU twice
+
+Labor Day. The market was shut, and at 09:30:40 ET the monitor placed a second
+50% trim of MU that nothing had asked for. It could not fill (the broker queued
+it), the 10:35 session cancelled it at 10:39, and the order died `cancelled` with
+`cumulative_quantity 0.000000` and zero fees. **No money moved.** The holiday is
+not the defect, though — it is what made the defect visible.
+
+**THE DEFECT: `fired` was wiped on every book roll.** `check_once()` opened with
+`if st["book_asof"] != prod.as_of: st = {..., "fired": {}}`. The slow loop rolls
+the book at 18:00 EVERY weekday, so every spent take-profit came back ARMED the
+next morning while its LEVEL sat there unchanged. `[monitor] enable_targets` in
+strategy.toml is "t1 half, t2 rest" — two rungs, each firing ONCE. A third trim
+is not a strategy variant; it is this bug.
+
+Chronology:
+
+| when | what |
+|---|---|
+| 09-04 15:46 ET | MU t1 (1010) fires for real — half sold at 1009.55 |
+| 09-04 15:15–15:22 | close session had ALREADY run; it raised the spent targets on SNDK and INTC by hand, but MU had not hit 1010 yet, so 1010 was left standing |
+| 09-04 18:00 | slow loop rolls the book, `as_of` 09-03 → 09-04 |
+| 09-07 09:30:40 | first tick since. Latch empty, level still 1010, MU quoted at 1016.59 (Friday's close) → fires again |
+
+⛔ **IT WAS ONLY EVER MASKED BY THE AGENT DOING IT BY HAND.** Raising a spent
+target each session is what had been suppressing this, and it is not a mechanism
+— MU slipped through purely because it hit its target half an hour after the
+session that would have moved it had already ended.
+
+**THE FIX: spent is per LEVEL, not per book-day.** `fired` is now
+`{SYM: {tier: level}}` and is CARRIED across ticks (`carry_fired()`,
+`tier_spent()`, both pure). A tier is spent only at the level it fired at, so:
+moving t1 1010 → 1105 re-arms it (this is exactly the repair the close session
+was making by hand); a position that exits and is re-entered re-arms, because
+`clear_levels()` on exit means the stored level cannot match; and the same
+position wobbling back over the same level stays spent. Re-entry is handled by
+the level itself, so this deliberately does NOT prune on "symbol absent from the
+book" — absence is inferred, and a book that flickered for one tick would re-arm
+a spent target, which is the defect again. A full exit clears its own symbol at
+the call site, and only once it actually `sold` — a QUEUED full exit has closed
+nothing, and clearing there would place a second order against a live one.
+
+**THE SECOND DEFECT: an accepted order was reported as a sale.** The loudest
+push of the morning read `EXIT BOOKKEEPING INCOMPLETE — MU SOLD but the executor
+staged nothing`. MU had sold nothing. `sold` was built from `result["sold"]`
+status-blind, and `result["sold"]` is every order PLACED. The exit executor was
+correct throughout: it detected the holiday, wrote `status: "queued"`, and
+refused to fabricate fills. There are THREE outcomes, not two — `sold` (ran the
+recorders), `placed` (accepted, nothing executed: do not record, do not retry,
+do not call it a sale, but DO latch it so the next tick cannot place a second
+order against a live one), and `failed` (nothing placed: back off and retry).
+`UNEXECUTED_STATES` lists the non-executing broker states; anything else,
+INCLUDING an absent or unrecognised status, still counts as sold, because the
+expensive error is the other way round — an unrecorded fill leaves the ledger
+and positions.json stale (the DELL trim, 2026-09-03).
+
+`src/exit_bookkeeping.py` was NOT changed: `plan()` was correct and selftested
+all along; it was being handed a wrong `sold` set by its caller.
+
+**NOT FIXED, DELIBERATELY — the holes this exposed but which nothing fell
+through.** Recorded so the next reader does not think they were missed:
+
+- `market_open()` (`scripts/market_monitor.py`) tests weekday + clock only. It
+  has NO holiday calendar, so it polls all day on a market holiday. One already
+  exists and is unused here: `mmp.is_trading_day()`, written 2026-08-10 for this
+  exact class ("`get_market_snapshot` on a shut market returns the PREVIOUS
+  session's close"). `fetch_prices` adopted it; the monitor never did.
+- **A stale feed silently disables the stop.** `QuoteFeedError` and the feed-down
+  alert fire when the CALL fails. When OpenD answers successfully with yesterday's
+  prices, the monitor compares a stale price to the stop, finds no breach, and
+  logs a healthy tick. Nothing anywhere checks that a quote is CURRENT. Verified
+  2026-09-07: `get_market_snapshot` returned `update_time=2026-09-04 20:02:19` —
+  three days stale, and `live_quotes()` DISCARDS that field, though `snapshot_ohlc`
+  reads it from the same record. This costs zero extra API calls to close and is
+  the bigger of the two holes: the holiday case is harmless (a shut market can
+  breach no stop) and the wedged-OpenD-mid-crash case is not.
+  ⚠️ `update_time`'s timezone is UNRESOLVED — with the market shut, `20:02:19` is
+  equally consistent with 16:02 ET (closing print, UTC-stamped) and 20:02 ET
+  (after-hours end). A DATE comparison is immune and is enough for full-day
+  closures; half-day closures need the minute, so they need that settled first.
+- The session timers are `OnCalendar=Mon-Fri` with no calendar, so both sessions
+  ran today and spent two model runs on a shut market.
+
+**Verification** (a passing suite proves nothing here, and `--selftest` is
+blocked by hook — these are the changed functions replayed against production
+state): the real `state.json` `{"MU": ["t1"]}` migrates to `{"MU": {"t1": null}}`;
+the incident replayed with MU's actual level of 1010 against Friday's actual
+close of 1016.59 is SUPPRESSED; the same latch at 1105 ARMS (the agent's move
+today); today's real `exit_result.json` splits to `sold=set(), placed={'MU'}`,
+so `record_exits` receives nothing and the false SOLD page cannot be sent; and
+sweeping all 11 live positions against the current quotes fires nothing.
+
+---
+
 ## 2026-09-06 — issue 011 run: a false drawdown halt, three stale fills replayed into the letter facts, and one fill with no size
 
 Written by the issue 011 newsletter run. `facts.json` had `notes: []`, so none of

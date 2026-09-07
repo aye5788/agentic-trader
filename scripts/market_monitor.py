@@ -108,6 +108,76 @@ def market_open(now=None) -> bool:
     return 9 * 60 + 30 <= mins < 16 * 60          # 09:30–16:00 ET
 
 
+# ⛔ BROKER STATES IN WHICH NOTHING HAS EXECUTED. Anything NOT listed here —
+# including a missing or unrecognised status — counts as a sale, deliberately:
+# the expensive error is the other way round. An unrecorded fill leaves the
+# ledger and positions.json stale and silently unprotected (the DELL trim,
+# 2026-09-03), whereas a spurious "sold" only runs idempotent recorders.
+UNEXECUTED_STATES = frozenset({
+    "queued", "new", "unconfirmed", "pending", "confirmed",
+    "cancelled", "canceled", "rejected", "failed", "voided",
+})
+
+
+def _lvl(x):
+    """A price level as a stable comparison key. Unparseable/non-finite -> None."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return round(v, 6) if math.isfinite(v) else None
+
+
+def carry_fired(prev) -> dict:
+    """Normalise the `fired` latch, which is now CARRIED, not wiped. Pure.
+
+    ⛔ IT USED TO BE KEYED TO THE BOOK DATE, AND THAT SOLD THE SAME POSITION
+    TWICE (2026-09-07). The old line was `if st["book_asof"] != prod.as_of: st =
+    {..., "fired": {}}`. The slow loop rolls the book at 18:00 EVERY weekday, so
+    every spent take-profit came back ARMED at 09:30 the next morning while its
+    LEVEL sat there unchanged — and the monitor trimmed an already-trimmed name
+    again. Measured: MU target1 1010 fired 2026-09-04 15:46 ET (half sold at
+    1009.55); the book rolled at 18:00; at 09-07 09:30 the latch was empty, 1010
+    was still the level, and it placed a second 50% sale of the remainder.
+    `[monitor] enable_targets` in strategy.toml is "t1 half, t2 rest" — two
+    rungs, each firing ONCE. A third trim is not a strategy variant, it is this
+    bug. (It had been masked because the agent was raising spent targets BY HAND
+    each session — it did exactly that for SNDK and INTC on 09-04. MU slipped
+    through because it hit 1010 half an hour AFTER that session ended.)
+
+    ⛔ SPENT IS PER LEVEL, NOT PER SYMBOL — that is what makes carrying safe:
+      - agent moves t1 1010 -> 1105   -> different level, arms again (this is
+        the repair the close session was making by hand)
+      - position exits and is re-entered -> clear_levels() on exit then new
+        levels on entry, so the stored level cannot match -> arms again
+      - same position, same level, price wobbles back over it -> STAYS SPENT
+
+    Because re-entry is handled by the level itself, this deliberately does NOT
+    prune on "symbol absent from the book". Absence is inferred, and a book that
+    flickered for a single tick would re-arm a spent target — reintroducing the
+    exact defect. A full exit clears its own symbol at the call site instead.
+    """
+    out = {}
+    for sym, tiers in (prev or {}).items():
+        if isinstance(tiers, dict):
+            out[str(sym)] = {str(k): _lvl(v) for k, v in tiers.items()}
+        elif isinstance(tiers, list):
+            # Legacy shape {sym: ["t1"]} — tier known, level NOT. A None level
+            # matches no live level, so it arms once and re-latches with a real
+            # one. That is no worse than the shape it replaces, which re-armed
+            # every single day by construction.
+            out[str(sym)] = {str(k): None for k in tiers}
+    return out
+
+
+def tier_spent(entry, tier, level) -> bool:
+    """True if `tier` was already taken AT THIS LEVEL. Pure. See carry_fired()."""
+    if not isinstance(entry, dict) or tier not in entry:
+        return False
+    stored = entry[tier]
+    return stored is not None and stored == _lvl(level)
+
+
 def _selftest() -> None:
     from research_store.models import Thesis
     held = {"NVDA": Thesis(symbol="NVDA", rank=1, verdict="buy", stop=100.0,
@@ -187,6 +257,51 @@ def _selftest() -> None:
     assert suppress_unowned_targets([], True) == ([], [])
     print("monitor selftest OK: apply_overrides pinned against src/level_rules.CASES")
     print("monitor selftest OK: stale ownership holds targets, never stops")
+
+    # ---- the fired latch: spent PER LEVEL, carried across books -----------
+    # Regression for 2026-09-07: MU t1 1010 fired 09-04, the book rolled that
+    # evening, and the old book_asof reset re-armed it for a second 50% trim.
+    _mu = carry_fired({"MU": {"t1": 1010.0}})
+    assert tier_spent(_mu["MU"], "t1", 1010.0) is True, "a spent level must stay spent"
+    assert tier_spent(_mu["MU"], "t1", 1010.0000001) is True, "float noise must not re-arm"
+    # the repair the close session made BY HAND for SNDK/INTC: move the level
+    assert tier_spent(_mu["MU"], "t1", 1105.0) is False, "a MOVED target must re-arm"
+    # the other rung is untouched, and an unknown symbol is never spent
+    assert tier_spent(_mu["MU"], "t2", 1105.0) is False, "t2 is independent of t1"
+    assert tier_spent(carry_fired({}).get("ZZZ") or {}, "t1", 5.0) is False
+    # legacy {sym: ["t1"]} carries the tier with NO level -> arms once, safely
+    _legacy = carry_fired({"MU": ["t1"]})
+    assert _legacy == {"MU": {"t1": None}}, _legacy
+    assert tier_spent(_legacy["MU"], "t1", 1010.0) is False, "unknown level must not suppress"
+    # junk in state must never raise or silently suppress a stop
+    assert carry_fired({"MU": "garbage"}) == {}, "unparseable entry is dropped"
+    assert tier_spent({"stop": None}, "stop", 910.0) is False
+    assert tier_spent({"stop": float("nan")}, "stop", 910.0) is False
+    assert tier_spent({"stop": 910.0}, "stop", float("nan")) is False, "NaN never matches"
+    print("monitor selftest OK: fired latch is per-level and survives a book roll")
+
+    # ---- an ACCEPTED order is not a SALE ---------------------------------
+    # Regression for 2026-09-07: the executor placed MU into a shut market and
+    # reported status "queued"; reading it status-blind paged "MU SOLD".
+    def _split(rows):
+        p = {r["symbol"] for r in rows
+             if str(r.get("status", "")).strip().lower() in UNEXECUTED_STATES}
+        return {r["symbol"] for r in rows} - p, p
+
+    _s, _p = _split([{"symbol": "MU", "status": "queued"}])
+    assert (_s, _p) == (set(), {"MU"}), (_s, _p)          # THE finding
+    _s, _p = _split([{"symbol": "MU", "status": "filled"}])
+    assert (_s, _p) == ({"MU"}, set()), (_s, _p)
+    _s, _p = _split([{"symbol": "MU", "status": "partially_filled"}])
+    assert (_s, _p) == ({"MU"}, set()), "a partial fill IS a sale — it must be recorded"
+    # ⛔ FAIL TOWARDS RECORDING. An absent/unknown status counts as sold: an
+    # unrecorded fill leaves the ledger stale and the position unprotected,
+    # which is far worse than running an idempotent recorder for nothing.
+    _s, _p = _split([{"symbol": "MU"}])
+    assert (_s, _p) == ({"MU"}, set()), "unknown status must fail towards recording"
+    _s, _p = _split([{"symbol": "MU", "status": "CANCELLED"}])
+    assert (_s, _p) == (set(), {"MU"}), "status match is case-insensitive"
+    print("monitor selftest OK: a queued order is placed, not sold")
 
     # ⛔ WEIGHT 0 MEANS TWO DIFFERENT THINGS. A protective thesis (verdict
     # "hold") is a name the AGENT holds that the ranking did not select --
@@ -1863,8 +1978,10 @@ def check_once(cfg, client) -> int:
         return 0
 
     st = _load(STATE, {})
-    if st.get("book_asof") != prod.as_of:            # new book -> reset fired flags
-        st = {"book_asof": prod.as_of, "fired": {}}
+    # ⛔ book_asof is RECORDED, never used as a latch epoch — see carry_fired().
+    # Resetting `fired` here is what sold MU twice on 2026-09-07.
+    st["book_asof"] = prod.as_of
+    st["fired"] = carry_fired(st.get("fired"))
 
     # A wake can name a symbol we do NOT hold -- that is most of the point ("tell
     # me if NVDA reaches X"). Quoting only holdings would leave those wakes
@@ -1950,8 +2067,9 @@ def check_once(cfg, client) -> int:
         if why:
             suspect[sym] = why
             continue
-        fired = set(st["fired"].get(sym, []))
-        if m.get("enable_stops", True) and px <= th.stop and "stop" not in fired:
+        fired = st["fired"].get(sym) or {}
+        if (m.get("enable_stops", True) and px <= th.stop
+                and not tier_spent(fired, "stop", th.stop)):
             triggers.append({"symbol": sym, "reason": "stop", "fraction": 1.0,
                              "price": px, "level": th.stop})
         # ⛔ ONLY THE AGENT'S TAKE-PROFITS FIRE (2026-08-25, principal's call).
@@ -1971,10 +2089,10 @@ def check_once(cfg, client) -> int:
         elif (m.get("enable_targets") and th.targets
               and isinstance((_ov.get(sym) or {}).get("targets"), list)
               and (_ov.get(sym) or {}).get("targets")):
-            if px >= th.targets[-1] and "t2" not in fired:
+            if px >= th.targets[-1] and not tier_spent(fired, "t2", th.targets[-1]):
                 triggers.append({"symbol": sym, "reason": "target2", "fraction": 1.0,
                                  "price": px, "level": th.targets[-1]})
-            elif px >= th.targets[0] and "t1" not in fired:
+            elif px >= th.targets[0] and not tier_spent(fired, "t1", th.targets[0]):
                 triggers.append({"symbol": sym, "reason": "target1", "fraction": 0.5,
                                  "price": px, "level": th.targets[0]})
 
@@ -2269,7 +2387,22 @@ def check_once(cfg, client) -> int:
         result = run_executor(_exit_request_id(_request),
                               int(m.get("executor_timeout_secs", 300)))
         result_present = EXIT_RES.exists()
-        sold = {s["symbol"] for s in result.get("sold", [])}
+        # ⛔ AN ACCEPTED ORDER IS NOT A SALE (2026-09-07). `result["sold"]` is
+        # every order the executor PLACED; reading it status-blind told the
+        # phone "MU SOLD but the executor staged nothing" when MU had sold
+        # nothing at all — the order was `queued` (placed into a shut market on
+        # Labor Day) and was later cancelled with cumulative_quantity 0.
+        # THREE outcomes, not two, because they need different handling:
+        #   sold   — it executed: run the recorders, clear unresolved
+        #   placed — accepted, nothing executed: the order is LIVE at the
+        #            broker, so do NOT record it (there is no fill), do NOT
+        #            retry it (that places a second order), and do NOT call it
+        #            a sale on the phone
+        #   failed — nothing was placed: back off and retry, as before
+        _placed_rows = result.get("sold", []) or []
+        placed = {s["symbol"] for s in _placed_rows
+                  if str(s.get("status", "")).strip().lower() in UNEXECUTED_STATES}
+        sold = {s["symbol"] for s in _placed_rows} - placed
         # ⛔ THE MONITOR RECORDS THE EXIT, NOT THE EXECUTOR (2026-09-03). The
         # executor writes staging files; the four recorder scripts run HERE,
         # whichever path sold, so a filled sale with a silent ledger/snapshot
@@ -2294,7 +2427,15 @@ def check_once(cfg, client) -> int:
                    f"ledger + positions.json are stale until reconciled. The 08:00 "
                    f"health check will flag unrecorded fills.",
                    tags="rotating_light")
-        failed = {t["symbol"] for t in act} - sold
+        if placed:
+            notify("Exit order placed — NOT yet filled",
+                   f"{', '.join(sorted(placed))}: the broker accepted the order "
+                   f"but nothing has executed. Nothing is recorded and no retry "
+                   f"will be made while it is live. If it fills, the ledger and "
+                   f"positions.json catch up at the next reconcile; if it is "
+                   f"cancelled, the position keeps its current size.",
+                   tags="hourglass")
+        failed = {t["symbol"] for t in act} - sold - placed
         if failed:
             notify("Exit executor result",
                    f"FAILED/skipped (backing off, will retry): {', '.join(sorted(failed))}"
@@ -2312,7 +2453,7 @@ def check_once(cfg, client) -> int:
                 u["paused"] = True
             if sym in escalate:
                 u["escalated"] = True
-        for sym in sold:
+        for sym in sold | placed:        # the breach was acted on either way
             unresolved.pop(sym, None)
         if escalate:                                 # one loud manual-intervention push
             notify("🚨 MANUAL INTERVENTION — stop-sell failing",
@@ -2326,7 +2467,7 @@ def check_once(cfg, client) -> int:
         # silent. A halted breach is the same situation as an exit that keeps
         # failing, so it goes through the SAME unresolved/backoff/escalation path:
         # re-alert on the retry cadence, then one loud manual-intervention push.
-        sold = set()
+        sold, placed = set(), set()
         for t in act:
             u = unresolved.setdefault(t["symbol"],
                                       {"fails": 0, "last_try_ts": ts, "escalated": False})
@@ -2343,18 +2484,34 @@ def check_once(cfg, client) -> int:
                    tags="rotating_light")
     else:
         sold = {t["symbol"] for t in act}            # alert-only: mark seen, don't sell
+        placed = set()
 
     # mark fired + cooldown the stops we acted on
     fired_key = {"stop": "stop", "target1": "t1", "target2": "t2"}
     for t in act:
-        if t["symbol"] in sold:
-            st["fired"].setdefault(t["symbol"], []).append(fired_key[t["reason"]])
+        if t["symbol"] in sold or t["symbol"] in placed:
+            # ⛔ THE LEVEL IS THE LATCH, not the tier name — carry_fired().
+            # A `placed` (accepted, unfilled) order latches too: the order is
+            # LIVE at the broker, so re-triggering it next tick would place a
+            # second one against the same breach (the MRK retry, 2026-08-19).
+            st["fired"].setdefault(t["symbol"], {})[fired_key[t["reason"]]] = \
+                _lvl(t["level"])
             # A full exit ends the position, so any wake guarding it is spent —
             # leaving it armed spends a model session on a name we no longer
             # hold (RTX, 2026-08-20). A partial (target-1 trim) keeps its wakes:
             # the position, and the reason to watch it, both survive.
             if float(t.get("fraction", 1.0) or 1.0) >= 1.0:
                 drop_wakes_for(t["symbol"])
+                # ...and so is the whole ladder — but ONLY once it actually
+                # executed. The position is gone; a later re-entry writes its
+                # own levels, and carrying a dead symbol's tiers could suppress
+                # the first target of that new position if the agent reused a
+                # number. Clear on the event, not by inferring absence.
+                # ⛔ `sold`, NOT `placed`: a QUEUED full exit has closed
+                # nothing yet. Clearing there would re-arm the breach on the
+                # next tick and place a SECOND order against a live one.
+                if t["symbol"] in sold:
+                    st["fired"].pop(t["symbol"], None)
             if t["reason"] == "stop" and armed:
                 add_cooldown(t["symbol"], m.get("cooldown_days", 5))
     _save(STATE, st)

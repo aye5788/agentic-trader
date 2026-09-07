@@ -272,7 +272,13 @@ crontab -l                                    # 10 agentic-trader lines (+3 box-
 #   quarterly/never-fired until 2026-08-20)
 # box-only, NOT this project: moomoo-vol-desk 9:30/9:35, data-collector 16:30
 timedatectl                                   # MUST be America/New_York or cron fires at wrong times
-cat research_store/monitor/state.json         # {"book_asof": <date>, "fired": {}} = monitor polled OK
+cat research_store/monitor/state.json         # book_asof advancing = monitor polled OK.
+                                              # `fired` is {SYM: {tier: level}} and is CARRIED,
+                                              # not emptied nightly — a non-empty one is normal
+                                              # and means "that tier was already taken AT that
+                                              # level". It re-arms when the agent MOVES the level
+                                              # or the position exits. (Until 2026-09-07 it was
+                                              # wiped on every book roll, which trimmed MU twice.)
 tail logs/slow.log logs/fast.log              # last loop runs
 journalctl -u agentic-monitor -n 50           # monitor: silent unless a stop/target tripped (or market closed)
 ```
