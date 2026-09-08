@@ -31,7 +31,7 @@ Nothing-eligible -> an empty book is still a valid, intended state (cash).
 import argparse
 import pathlib
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -87,11 +87,13 @@ def geometry(price: float, sigma: float, stop_mult: float, r_mults: list[float])
             "stop": round(stop, 4), "targets": targets}
 
 
-def build_theses(sel, scored, closes, asof, per_slot, tm, start_rank):
+def build_theses(sel, scored, closes, asof, per_slot, tm, start_rank,
+                 *, review_by: str | None = None):
     """Turn a selection list into weighted Thesis records with geometry, dropping
     any name that can't clear reward:risk >= 2 (it doesn't get held). `tm` is the
     [trade_management] config table (stop_atr_mult, target_r_mults)."""
     held, dropped = [], []
+    rb = review_by or review_label()          # one config read, not one per name
     rank = start_rank
     for sym in sel:
         row = scored.loc[sym]
@@ -109,7 +111,7 @@ def build_theses(sel, scored, closes, asof, per_slot, tm, start_rank):
                             "sigma": round(float(row["sigma"]), 5),
                             "rank": int(row["rank"]), "source": "momentum.compute"},
                    as_of=str(asof.date()),
-                   review_by=f"{(asof + pd.Timedelta(days=7)).date()} (weekly rebalance)")
+                   review_by=rb)
         rr = reward_risk(t)
         if rr is None or rr < strat.load()["risk"]["min_reward_risk"]:
             t.verdict, t.target_weight = "avoid", 0.0
@@ -191,6 +193,57 @@ def rotation_due(cfg: dict, today=None) -> bool:
     return True
 
 
+# The cadence word that goes in a `review_by` label, derived from the SAME knob
+# rotation_due reads -- so a config flipped to nightly cannot leave the book
+# describing itself as weekly.
+_CADENCE_WORD = {"weekly": "weekly", "week": "weekly", "nightly": "nightly",
+                 "daily": "nightly", "session": "nightly", "": "nightly"}
+
+
+def next_rotation(cfg: dict, today=None) -> date:
+    """The next date this loop will actually ROTATE the book. -> date.
+
+    STRICTLY AFTER `today`, so a Sunday run names the FOLLOWING Sunday rather
+    than the rotation it is itself performing -- the same arithmetic
+    scripts/letter_facts.py already uses for the letter's `next_rebalance`.
+
+    Derived by asking rotation_due(), never by hardcoding a weekday: one
+    definition of when a rotation happens, and a cadence change moves both.
+    """
+    start = today or date.today()
+    for i in range(1, 15):
+        d = start + timedelta(days=i)
+        if rotation_due(cfg, d):
+            return d
+    return start + timedelta(days=7)      # unreachable: every cadence
+                                          # rotation_due knows recurs inside 14d
+
+
+def review_label(cfg: dict | None = None, today=None) -> str:
+    """The `review_by` text for a thesis -> "YYYY-MM-DD (weekly rebalance)".
+
+    ⛔ ANCHORED TO THE NEXT ROTATION, NOT TO `asof + 7 days` (fixed 2026-09-08).
+    `asof` is the last PANEL date -- a FRIDAY on a Sunday run -- so every book
+    wrote "2026-09-11 (weekly rebalance)" about a Friday: two days before the
+    Sunday rotation that would actually reconsider the name, and naming a job
+    that does not run that day at all (Friday 17:00 ET is the universe screen,
+    which is a different thing). It was wrong by construction every single week.
+
+    Nothing acted on the field -- its one reader, risk_review's earnings_soon
+    flag, was retired 2026-08-13 and had fired zero times (src/controls.py) --
+    but it is not inert: state.py hands it to every session as
+    `next_scheduled_review`, and letter_facts carries it into the investor
+    letter, where issue 011 narrated the wrong date to the principal.
+
+    It still rolls forward on every healthy run, so what state.py documents
+    about it -- a liveness fact about the LOOP, not a commitment about the
+    position -- is unchanged.
+    """
+    cfg = strat.load() if cfg is None else cfg
+    mode = str((cfg.get("portfolio") or {}).get("rebalance") or "").strip().lower()
+    return f"{next_rotation(cfg, today)} ({_CADENCE_WORD.get(mode, 'next')} rebalance)"
+
+
 def held_positions(path: Path | None = None) -> set[str] | None:
     """Symbols the AGENT actually holds at the broker. -> set, or None if unreadable.
 
@@ -209,7 +262,7 @@ def held_positions(path: Path | None = None) -> set[str] | None:
 
 
 def protective_theses(owned: set, covered: set, scored, closes, asof, tm,
-                      start_rank: int) -> list:
+                      start_rank: int, *, review_by: str | None = None) -> list:
     """Geometry for names the AGENT HOLDS that the ranking did not select.
 
     ⛔ THE BOOK IS WHATEVER THE AGENT HOLDS. This loop ranks candidates and
@@ -229,6 +282,7 @@ def protective_theses(owned: set, covered: set, scored, closes, asof, tm,
     be given geometry; it stays unprotected and the monitor still says so.
     """
     out = []
+    rb = review_by or review_label()          # one config read, not one per name
     rank = start_rank
     for sym in sorted(owned - covered):
         if sym not in scored.index or sym not in closes.columns:
@@ -268,7 +322,7 @@ def protective_theses(owned: set, covered: set, scored, closes, asof, tm,
                      "rank": int(rk) if eligible else None,
                      "eligible": bool(eligible), "source": "protective"},
             as_of=str(asof.date()),
-            review_by=f"{(asof + pd.Timedelta(days=7)).date()} (weekly rebalance)"))
+            review_by=rb))
         rank += 1
     return out
 
@@ -585,8 +639,38 @@ def _selftest() -> None:
     assert hold_selection([], sc, {"CCC", "DELISTED"}) == ["CCC"]
     assert hold_selection([], pd.DataFrame(), {"CCC"}) == []
 
+    # ---- review_by names the next ROTATION, never asof+7 -----------------
+    # The defect this replaced: `asof + 7 days`, where asof is the last PANEL
+    # date, so the Sunday 2026-09-06 run wrote "2026-09-11 (weekly rebalance)"
+    # -- a FRIDAY, two days early, naming a job that does not run that day. It
+    # reached the principal in issue 011 of the investor letter.
+    assert next_rotation(wk, _d(2026, 9, 6)) == _d(2026, 9, 13), \
+        "a Sunday run must name the FOLLOWING Sunday, not the rotation it is running"
+    assert next_rotation(wk, _d(2026, 9, 9)) == _d(2026, 9, 13), "Wednesday -> Sunday"
+    assert next_rotation(wk, _d(2026, 9, 12)) == _d(2026, 9, 13), "Saturday -> Sunday"
+    assert review_label(wk, _d(2026, 9, 6)) == "2026-09-13 (weekly rebalance)"
+    # the cadence word is DERIVED: flip the knob and the label stops lying
+    ntly = {"portfolio": {"rebalance": "nightly"}}
+    assert review_label(ntly, _d(2026, 9, 6)) == "2026-09-07 (nightly rebalance)"
+    # and every label the live config produces is a date rotation_due agrees with
+    for probe in (_d(2026, 9, 6), _d(2026, 9, 9), _d(2026, 9, 12)):
+        d = next_rotation(strat.load(), probe)
+        assert d > probe and rotation_due(strat.load(), d), (probe, d)
+    # end to end: the thesis a Sunday run writes carries the SUNDAY, and the
+    # default path reads the live cadence rather than the panel's asof
+    _rsc = pd.DataFrame({"score": [1.0], "rank": [5], "sigma": [0.02]}, index=["RVW"])
+    _rcl = pd.DataFrame({"RVW": [100.0]}, index=[idx[0]])
+    _sun = protective_theses({"RVW"}, set(), _rsc, _rcl, idx[0], TMx, 300,
+                             review_by=review_label(wk, _d(2026, 9, 6)))[0]
+    assert _sun.review_by == "2026-09-13 (weekly rebalance)", _sun.review_by
+    _dflt = protective_theses({"RVW"}, set(), _rsc, _rcl, idx[0], TMx, 300)[0]
+    assert _dflt.review_by == review_label(), _dflt.review_by
+    assert not _dflt.review_by.startswith(str((idx[0] + pd.Timedelta(days=7)).date())), \
+        "review_by fell back to asof+7 — the defect this test exists for"
+
     print("selftest OK: rebalance=weekly binds (was decorative); non-rotation "
-          "nights hold the book instead of re-ranking it")
+          "nights hold the book instead of re-ranking it; review_by names the "
+          "next rotation (was asof+7 -> a Friday, wrong every week)")
 
 
 def main() -> None:

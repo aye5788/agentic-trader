@@ -243,9 +243,12 @@ def holdings(valued: dict, theses: list, overrides: dict | None = None,
             "eligibility_state": _eligibility,
             "retention_state": _retention,
             # ⛔ WHEN THE LOOP EXPECTS TO LOOK AGAIN — NOT A THESIS DEADLINE.
-            # slow_loop rewrites review_by to `asof + 7 days` on EVERY run, so
-            # it rolls forward and never falls due while the job is healthy; it
-            # only goes stale if the product stops refreshing. Named
+            # slow_loop rewrites review_by on EVERY run to the NEXT ROTATION
+            # DATE (slow_loop.review_label, 2026-09-08 -- it was `asof + 7
+            # days`, which named the Friday two days BEFORE the Sunday that
+            # actually reconsiders the name), so it rolls forward and never
+            # falls due while the job is healthy; it only goes stale if the
+            # product stops refreshing. Named
             # `next_scheduled_review` for exactly that reason: read as a
             # deadline it would imply a position has been reviewed when nothing
             # reviewed it. It is a liveness fact about the LOOP, not a
