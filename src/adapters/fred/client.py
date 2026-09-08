@@ -11,6 +11,7 @@ Auth: a single `api_key` query param (free, no expiry). Rate limit ~120/min; we
 use a handful nightly.
 """
 import json
+import datetime as dt
 import os
 import tempfile
 import time
@@ -114,3 +115,33 @@ def series_latest(series_id: str) -> dict | None:
             _save_cache(cache)
             return {**rec, "stale": False}
     return None
+
+
+def series_window(series_id: str, *, days: int = 400) -> list[dict]:
+    """Observations for the last `days`, OLDEST FIRST: [{date, value}, ...].
+
+    `series_latest` answers "what is it now", which is the whole reason the
+    weekly letter could only ever print a bare level -- "VIX at 14.3 against a
+    ceiling of 28" -- and had to fall back on reciting the gate rule around it.
+    A level means nothing without where it has been, so this returns the window
+    and lets the caller say whether 14.3 is calm or the calmest print of the
+    year.
+
+    Missing observations (FRED's ".") are DROPPED rather than zero-filled: a
+    holiday with no VIX close is not a VIX of zero. Raises FredUnavailable on an
+    outage -- there is no cache fallback here on purpose, because a stale WINDOW
+    would silently mis-state a trend, which is worse than having no trend.
+    """
+    start = (dt.date.today() - dt.timedelta(days=max(1, int(days)))).isoformat()
+    data = get("series/observations", series_id=series_id,
+               observation_start=start, sort_order="asc")
+    out = []
+    for obs in data.get("observations", []):
+        val = obs.get("value")
+        if val in (".", None, ""):
+            continue
+        try:
+            out.append({"date": obs.get("date"), "value": float(val)})
+        except (TypeError, ValueError):
+            continue
+    return out

@@ -118,6 +118,23 @@ def _profit_but_loss(cost, mark, effective_stop):
     return bool(float(mark) > float(cost) and float(effective_stop) < float(cost))
 
 
+def _macro_block(monday, today) -> dict:
+    """The week's macro facts, or a recorded reason there are none.
+
+    ⛔ NEVER RAISES. FRED or Alpaca being down must cost Aaron a paragraph, not
+    his letter -- every other number in this file is already computed by the
+    time we get here. The failure is written INTO the block as an error string
+    rather than left as an empty list, because the prompt has to be able to
+    tell "the week was quiet" from "we could not look".
+    """
+    try:
+        import macro_context                      # noqa: PLC0415
+        return macro_context.build(monday.isoformat(), today.isoformat())
+    except Exception as e:                        # noqa: BLE001
+        return {"error": f"macro gather failed ({type(e).__name__}: {e})",
+                "window": {"from": monday.isoformat(), "to": today.isoformat()}}
+
+
 def main() -> None:
     LETTERS.mkdir(parents=True, exist_ok=True)
     today = date.today()
@@ -475,6 +492,13 @@ def main() -> None:
         "realized": _read_json(RS / "rh" / "realized.json", None),
         "notes": notes,
         "cooldown": list(_read_json(RS / "monitor" / "cooldown.json", {})),
+        # ⛔ THE MACRO BLOCK — the week's ECONOMY AND MARKET, not this system's
+        # calendar. The letter's LOOKING AHEAD section used to recite the next
+        # rebalance date, the review dates and the cooldown count, because that
+        # was all this file gave it: `regime` held two strings and nothing else
+        # here was macro at all. A narrator forbidden from inventing figures and
+        # handed no facts writes plumbing. See src/macro_context.py.
+        "macro": _macro_block(monday, today),
         "next_rebalance": (today + timedelta(days=days_ahead)).isoformat(),
         "kill_switch": (RS / "HALT").exists(),
     }
