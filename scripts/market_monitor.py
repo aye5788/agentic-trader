@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -1148,8 +1149,56 @@ def _load(path, default):
 
 
 def _save(path, obj):
+    """Write JSON state ATOMICALLY — temp file in the same dir, then rename.
+
+    ⛔ IT USED TO BE A BARE write_text (2026-09-08). state.json is the `fired`
+    latch: the ONE record of which take-profit has already been taken. A plain
+    write truncates first, so a crash or an OOM kill mid-write leaves a
+    half-written file, every reader's json.loads raises, the caller substitutes
+    an empty default — and an empty latch re-arms every spent target. That is
+    the same defect the latch exists to prevent, arriving through the file
+    instead of through the code. os.replace is atomic on POSIX: readers see
+    either the old file or the new one, never a partial one.
+    """
     MON.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2))
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2))
+    os.replace(tmp, path)
+
+
+FIRED_KEY = {"stop": "stop", "target1": "t1", "target2": "t2"}
+
+
+def latch_fired(st, act, sold, placed):
+    """Mark every acted-on trigger SPENT AT ITS LEVEL and persist it NOW.
+
+    ⛔ THIS MUST RUN THE INSTANT `sold`/`placed` ARE KNOWN — BEFORE the
+    recorders and before any phone push (2026-09-08). It used to run only at
+    the very END of check_once, downstream of exit_bookkeeping and four
+    notify() calls, so ANY exception in between left a COMPLETED SALE
+    UNLATCHED and the next 15s poll re-fired the same take-profit at the same
+    level. That is not hypothetical: on 2026-09-08 a local `_lvl` shadowing
+    the module helper raised on this very line, and STX target1 866 sold FOUR
+    times in one morning (0.011069 -> 0.001384 sh, ~87% of the position) while
+    state.json's latch stayed empty. Recording what was DONE must never sit
+    downstream of reporting that it was done.
+
+    ⛔ `placed` LATCHES TOO, not just `sold`: an accepted-but-unfilled order is
+    LIVE at the broker, so re-triggering would place a SECOND order against it
+    (the MRK retry, 2026-08-19). THE LEVEL IS THE LATCH, not the tier name —
+    see carry_fired(): moving a spent target re-arms it, the same level does
+    not.
+
+    Idempotent — it writes the same level for the same trigger — so the tail of
+    check_once calls it again after the wake/cooldown work without harm.
+    """
+    for t in act:
+        if t["symbol"] in sold or t["symbol"] in placed:
+            tier = FIRED_KEY.get(t["reason"])
+            if tier:                     # unknown reason: never crash the tick
+                st["fired"].setdefault(t["symbol"], {})[tier] = _lvl(t["level"])
+    _save(STATE, st)
+    return st
 
 
 def _active_lifecycle_state():
@@ -2197,11 +2246,11 @@ def check_once(cfg, client) -> int:
                     _hit = trailing.trail_trigger(sym, px, _st, _sig, _tcfg,
                                                   base_stop=th.stop,
                                                   agent_stop=None)
-                    _lvl, _act = trailing.compute_trail_stop(
+                    _trail_lvl, _act = trailing.compute_trail_stop(
                         _st, _sig, float(_tcfg.get("activation_sigma", 2.5)),
                         float(_tcfg.get("giveback_fraction", 0.35)))
-                    if _lvl is not None:
-                        _st["trail_stop"] = _lvl        # persist the ratchet
+                    if _trail_lvl is not None:
+                        _st["trail_stop"] = _trail_lvl        # persist the ratchet
                     _st["activated"] = bool(_act)
                     _trails[_pid] = _st
                     if _hit and _hit.get("reason") == "trail":
@@ -2403,6 +2452,12 @@ def check_once(cfg, client) -> int:
         placed = {s["symbol"] for s in _placed_rows
                   if str(s.get("status", "")).strip().lower() in UNEXECUTED_STATES}
         sold = {s["symbol"] for s in _placed_rows} - placed
+        # ⛔ LATCH FIRST — BEFORE THE RECORDERS AND BEFORE EVERY PUSH. Nothing
+        # below this line may run while a completed sale is still unrecorded:
+        # the whole block that follows is bookkeeping and reporting, and on
+        # 2026-09-08 an exception inside it re-armed a spent take-profit and
+        # sold STX four times. See latch_fired().
+        latch_fired(st, act, sold, placed)
         # ⛔ THE MONITOR RECORDS THE EXIT, NOT THE EXECUTOR (2026-09-03). The
         # executor writes staging files; the four recorder scripts run HERE,
         # whichever path sold, so a filled sale with a silent ledger/snapshot
@@ -2486,16 +2541,14 @@ def check_once(cfg, client) -> int:
         sold = {t["symbol"] for t in act}            # alert-only: mark seen, don't sell
         placed = set()
 
-    # mark fired + cooldown the stops we acted on
-    fired_key = {"stop": "stop", "target1": "t1", "target2": "t2"}
+    # mark fired + cooldown the stops we acted on.
+    # ⛔ THE LATCH ITSELF IS SET BY latch_fired(), which the armed path already
+    # ran the moment `sold`/`placed` were known. Calling it again here is
+    # deliberate and idempotent: it is what latches the HALTED and ALERT-ONLY
+    # paths, which set `sold` in their own branches below the executor.
+    latch_fired(st, act, sold, placed)
     for t in act:
         if t["symbol"] in sold or t["symbol"] in placed:
-            # ⛔ THE LEVEL IS THE LATCH, not the tier name — carry_fired().
-            # A `placed` (accepted, unfilled) order latches too: the order is
-            # LIVE at the broker, so re-triggering it next tick would place a
-            # second one against the same breach (the MRK retry, 2026-08-19).
-            st["fired"].setdefault(t["symbol"], {})[fired_key[t["reason"]]] = \
-                _lvl(t["level"])
             # A full exit ends the position, so any wake guarding it is spent —
             # leaving it armed spends a model session on a name we no longer
             # hold (RTX, 2026-08-20). A partial (target-1 trim) keeps its wakes:
@@ -2615,7 +2668,16 @@ def main():
                         pass
                     sys.exit(1)
             except Exception as e:
+                # ⛔ THE MESSAGE ALONE IS NOT A DIAGNOSIS (2026-09-08). This
+                # printed "'NoneType' object is not callable" three times while
+                # STX was being sold four times against one take-profit, and
+                # the bare text named no file, no line and no frame — the cause
+                # (a local `_lvl` shadowing the module helper) took an
+                # independent review to find. A traceback would have named it
+                # in seconds. stdout, like every other line here, so it lands
+                # in the same journalctl stream.
                 print(f"loop error (continuing): {e}")
+                traceback.print_exc(file=sys.stdout)
             time.sleep(poll)
         else:
             consec_fail = 0                           # closed — don't carry failures over
