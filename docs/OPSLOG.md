@@ -8,6 +8,102 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-08 — LOOKING AHEAD stops reciting the cron calendar, and `review_by` stops naming a Friday
+
+Two defects in what the system TELLS people, neither of which cost money and
+both of which had been true for weeks.
+
+### 1. `review_by` named a Friday two days before the rotation that reads it
+
+`slow_loop` wrote every thesis's `review_by` as `asof + 7 days`. `asof` is the
+last PANEL date — a **Friday** on the Sunday run — so the whole book said
+"2026-09-11 (weekly rebalance)" about a Friday. The rotation that actually
+reconsiders a name is Sunday (`rotation_due`, weekday 6, cron `0 20 * * 0`), so
+the label was two days early every single week, and it named a weekday on which
+no rebalance runs at all — Friday 17:00 ET is the universe screen, a different
+job.
+
+Nothing acted on it: its one reader, `risk_review`'s `earnings_soon` flag, was
+retired 2026-08-13 having fired zero times (`src/controls.py`). But it is not
+inert. `agent_env/state.py` hands it to every session as
+`next_scheduled_review`, and `letter_facts` carries it into the letter — issue
+011 told Aaron "every position carries a review date of September 11 — the
+weekly pass that precedes it". There is no such pass.
+
+Fixed by anchoring to `slow_loop.next_rotation()`, which asks `rotation_due()`
+rather than hardcoding a weekday, so one definition serves both and a cadence
+change moves the label with it. The cadence word is derived from the same knob,
+so a config flipped to nightly cannot leave the book calling itself weekly.
+`state.py`'s comment describing the old arithmetic was corrected in the same
+pass. The live `current.json` self-healed on the next slow-loop run. (`6f55139`)
+
+### 2. The letter's most-read section was the system's own calendar
+
+`{{OUTLOOK_PARAGRAPHS}}` in `prompts/newsletter.md` read, in full: "1–2
+paragraphs: next_rebalance date, review_by / earnings within the window, the
+standing regime rule." Three plumbing items — in the section Aaron says he most
+looks forward to reading, and in a letter whose standing instruction since
+2026-07-10 is that plumbing belongs in this file instead.
+
+It also had nothing else available. `facts.json` carried 28 keys and **not one
+was macro**: `regime` held two strings, `SPY>50DMA=True` and `VIX 14.3<=28`. A
+narrator forbidden from inventing a figure and handed no facts writes plumbing.
+
+`src/macro_context.py` now gathers the week from two sources already live here,
+needing no new credential and no new egress — `letter_facts` runs before the
+model, so the letter process stays airgapped and gains nothing:
+
+- **FRED** — VIX, the 10y-2y curve, HY OAS, each as a level WITH its recent past
+  (`change_1w`, `change_1m`, `pct_1y`) via the new `series_window()` /
+  `indicators.context()`. `snapshot()` and `get_vix()` are untouched, so
+  agent_env, `fred_scope` and `slow_loop` are unaffected.
+- **Alpaca's WHOLE-MARKET feed** (`get_news(None)`, the untagged wire — not the
+  per-holding one). A week is ~1,300 articles over ~27 calls in under 6s against
+  a ~200/min limit. Headlines rank economic_data > policy_rates > market_wide,
+  because a payrolls print bears on every position at once.
+
+**Four selection defects, every one found only by running it against the live
+feed** — no hand-written fixture would have produced them, and they are now
+pinned in `_selftest()`:
+
+| defect | what it did |
+| ------ | ----------- |
+| substring matching | filed a Strait of Hormuz story as an economic release — "ppi" inside shi**ppi**ng. "ism" inside optim**ism** would have followed |
+| trailing-space needle | `"top 3 "` compiled to a pattern that can never match, since "top 3 stocks" has a word character right after the space |
+| classifying on SUMMARIES | "fiscal Q2" filed four earnings reports as macro policy; "on the Nasdaq" filed sixteen listicles as market news |
+| promo listicles | performance and session-mover pieces took 8 of 12 market slots |
+
+On the week issue 011 covered, the section would have had: 162k payrolls
+flipping Fed **hike** odds above 50%, the 10-year at 4.8%, ISM manufacturing
+down and services up, oil up on Iran strikes — and the transmission into names
+actually held ("Micron, SanDisk Jump 4% Even as Hot Jobs Report Briefly Flips
+Fed Hike Odds Above 50%"; "CrowdStrike Stock Dips as Inflation and Oil Prices
+Pressure Yields").
+
+**And the prompt now addresses the portfolio manager, which is what it is.** An
+earlier draft of the section told the model it was not the session that trades,
+could commit to nothing, and should describe conditions rather than intent —
+mistaking the letter process's lack of broker tools (a capability boundary, and
+one that stays) for the letter's standing. The manager writing on Sunday and the
+manager trading on Monday are the same manager; his forward view is the most
+valuable thing an investor letter carries, and it is now invited rather than
+banned.
+
+The header sentence was corrected in the same pass. It read "the trades were
+made by the systematic dual-momentum loop — explain them as faithful execution
+of the system", describing `scripts/fast_loop.py`, deleted 2026-08-14. It had
+contradicted step 1b of its own file — "THE BOOK IS NOW DECIDED BY THE AGENT",
+since 2026-08-12 — for four weeks.
+
+⚠️ **Note on scope, for whoever wires the next thing:** a forward view stated in
+the letter reaches no session. Nothing reads a letter back (`grep` across
+`agent_env`, `research_store` and `session.py`: zero hits), and the letter
+process holds no MCP, so it cannot record a decision or an open question. If
+that view should reach Monday, it belongs in the brief as a block we choose to
+include — captured structured, not parsed out of prose. Not built. (`45f5e91`)
+
+---
+
 ## 2026-09-07 — the take-profit latch was keyed to the book date, so it sold MU twice
 
 Labor Day. The market was shut, and at 09:30:40 ET the monitor placed a second

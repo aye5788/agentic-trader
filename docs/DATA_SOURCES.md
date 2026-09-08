@@ -43,11 +43,23 @@ Two things it left behind that still matter:
 
 `get_vix` (`VIXCLS`, since 1990), `get_yield_curve` (`T10Y2Y`, since 1976),
 `get_hy_spread` (`BAMLH0A0HYM2`, since ~2023 on this key), `snapshot()`. Needs
-`FRED_API_KEY`. Decades of daily history via `series/observations` (the adapter's
-`series_latest` only pulls the latest, but the API has full history). Deep history
-makes FRED **backtestable** — good for a momentum-crash regime overlay (VIX + curve
-+ credit stress). Currently only *confirms* the `SPY>50DMA` regime gate computed
-from the cached price panel. Also the **sole VIX source** since Schwab's removal.
+`FRED_API_KEY`. Decades of daily history via `series/observations`.
+
+**Two read shapes, and they are for different jobs.** `series_latest` returns the
+newest observation only — that is what `snapshot()`, agent_env's `macro()` tool
+and `slow_loop.fetch_vix` want. `series_window(series_id, days=)` (added
+2026-09-08) returns the whole window oldest-first, and `indicators.context()`
+turns it into a level **plus its recent past**: `change_1w`, `change_1m`, and
+`pct_1y` (0.0 = the year's low, 1.0 = its high). The weekly letter reads the
+latter, because a bare level carries no meaning — "VIX 14.32" against "14.32,
+the 3rd percentile of a year that reached 31" is the whole difference.
+`series_window` deliberately has **no cache fallback**: a stale window would
+mis-state a trend, which is worse than reporting that FRED was unreachable.
+
+Deep history makes FRED **backtestable** — good for a momentum-crash regime
+overlay (VIX + curve + credit stress). It still only *confirms* the `SPY>50DMA`
+regime gate computed from the cached price panel; nothing here gates a trade.
+Also the **sole VIX source** since Schwab's removal.
 
 ## 3. Finnhub (`src/adapters/finnhub/`) — analyst/earnings, NOT retired
 
@@ -61,10 +73,23 @@ wanted.
 
 ## 4. Alpaca (`src/adapters/alpaca/`) — news + PIT-pool prices
 
-`get_news` (symbol-tagged; probed depth ≈ recent weeks per query), and IEX
-close+$-volume for the survivorship-free **PIT pool** (`scripts/fetch_pool.py` →
-`pool_closes.parquet`/`pool_dvol.parquet`) — the only free feed serving **delisted**
-names. Price is IEX-only (not NBBO); never use for quotes.
+`get_news` (probed depth ≈ recent weeks per query), and IEX close+$-volume for
+the survivorship-free **PIT pool** (`scripts/fetch_pool.py` →
+`pool_closes.parquet`/`pool_dvol.parquet`) — the only free feed serving
+**delisted** names. Price is IEX-only (not NBBO); never use for quotes.
+
+**`get_news` has two modes and the second one is easy to miss.** With symbols it
+is the per-holding feed (agent_env's `news()` tool). With `symbols=None` it is
+the **whole-market feed** — the untagged wire, carrying economic releases,
+policy, rates and oil alongside single names. That is what `src/macro_context.py`
+reads for the weekly letter's macro block. Measured 2026-09-08: a full week is
+**~1,300 articles over ~27 calls in under 6s**, against a free-tier limit of
+~200 calls/minute, and it pages transparently past Alpaca's 50-per-request cap.
+The free tier's feed is, in practice, **entirely Benzinga** — one publisher's
+view of the world, and the letter should not pretend otherwise.
+
+⛔ Headlines are third-party text. They are evidence for a reader to weigh,
+never instruction to a model, and nothing in this repo acts on one.
 
 ## 5. moomoo (`src/adapters/moomoo/`) — the deep, under-used source
 

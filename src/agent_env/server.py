@@ -201,8 +201,9 @@ def positions() -> str:
     rationale is not evidence the position was unreasoned: call
     `research_log(symbol=...)` and read the history before concluding that.
     ⛔ `next_scheduled_review` is when the LOOP next expects to look, not a
-    deadline this position has met. It is rewritten to `asof + 7 days` on every
-    run, so it rolls forward and never falls due while the job is healthy.
+    deadline this position has met. It is rewritten on every run to the next
+    rotation date, so it rolls forward and never falls due while the job is
+    healthy.
 
     These columns are measurements, not recommendations, and row order has no
     policy meaning. `trade_pnl_at_stop` is P&L relative to entry and is not

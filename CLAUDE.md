@@ -147,8 +147,8 @@ architecture in `docs/DESIGN.md` (Layer 1). Summary:
 | ~~**Schwab**~~ | **REMOVED 2026-07-29.** Was the primary market-data feed; its 7-day refresh token was the only recurring human chore in the system, and the signal consumed nothing from it but daily closes. All of it now comes from moomoo. Adapter, auth scripts, `SCHWAB_*` keys and `schwabdev` are deleted — do not reintroduce. | Migration + equivalence proof: `docs/OPSLOG.md` 2026-07-29. |
 | **moomoo** (`src/adapters/moomoo/`) | **THE market-data feed** since 2026-07-29 — daily OHLC panel (`prices.snapshot_ohlc`), intraday quotes for the stop watcher (`prices.live_quotes`), universe turnover/market-cap, capital-flow, short-interest, put/call+IV. Data-only via the local **OpenD** gateway. Still unwired: insider, earnings-price-move, institutional; see `docs/DATA_SOURCES.md`. | ⚠️ Runs under **system `/usr/bin/python3` (3.10)**, NOT `.venv` (3.12) — this now includes `fetch_prices` and `market_monitor`. (`fast_loop` was deleted and `risk_review` retired into the sessions, 2026-08-13/14.) OpenD on `127.0.0.1:11111`, **shared with sibling repo `moomoo-vol-desk`**. ⛔ `request_history_kline` is capped at **100 distinct stocks account-wide** — use `get_market_snapshot` (unmetered, 400/call) for anything universe-wide. moomoo history is **shallow (~1–2 yr)** → forward-log, don't backtest; the deep panel on disk is Schwab-era and now **non-regenerable**, so `research_store/prices/backup/` matters. |
 | **Finnhub** (`src/adapters/finnhub/`) | Analyst *recommendation trends*, earnings *surprises*, basic financials. **NOT retired** — but currently consumed only by `src/event_calendar/` (earnings spine), not the ranking signal. | Free tier. Price-target *level* + forward EPS estimates are **premium (403)**. |
-| **Alpaca** (`src/adapters/alpaca/`) | Symbol-tagged news; IEX close+$-vol for the survivorship-free **PIT pool** (only free feed serving DELISTED names). | Free tier. Price is **IEX-only (not NBBO)** → don't use for quotes. |
-| **FRED** (`src/adapters/fred/`) | Macro regime indicators: VIX (`VIXCLS`), 10y-2y curve (`T10Y2Y`), HY OAS (`BAMLH0A0HYM2`). **Deep history (decades).** Confirms — does not replace — the momentum regime gate. Also the VIX source for `slow_loop.fetch_vix`. | Needs `FRED_API_KEY`. |
+| **Alpaca** (`src/adapters/alpaca/`) | Symbol-tagged news; the **WHOLE-MARKET news feed** (`get_news(None)`) behind the weekly letter's macro block (`src/macro_context.py`); IEX close+$-vol for the survivorship-free **PIT pool** (only free feed serving DELISTED names). | Free tier. Price is **IEX-only (not NBBO)** → don't use for quotes. A week of the untagged feed is ~1,300 articles / ~27 calls; the limit is ~200/min. |
+| **FRED** (`src/adapters/fred/`) | Macro regime indicators: VIX (`VIXCLS`), 10y-2y curve (`T10Y2Y`), HY OAS (`BAMLH0A0HYM2`). **Deep history (decades).** Confirms — does not replace — the momentum regime gate. Also the VIX source for `slow_loop.fetch_vix`, and (via `indicators.context()`) the level-plus-recent-past readings in the weekly letter. | Needs `FRED_API_KEY`. |
 | **Robinhood** (MCP) | **Execution** + its own fundamentals/earnings | The only execution venue. Agentic account only. |
 
 ---
@@ -336,6 +336,13 @@ src/adapters/moomoo/    Data-only moomoo client via OpenD — RUNS UNDER SYSTEM
 src/adapters/fred/      Macro regime indicators (VIX, 10y-2y, HY spread) — deep
                         history; confirms the momentum regime gate. ALSO the VIX
                         source for slow_loop. Needs FRED_API_KEY.
+                        snapshot()/get_vix() = the LATEST print (agent_env's
+                        macro() tool, fred_scope, slow_loop). context() =
+                        LEVEL PLUS RECENT PAST — change_1w/1m and pct_1y (0.0 =
+                        the year's low) — for the weekly letter, because a bare
+                        level is not a fact worth printing. It reports where a
+                        number sits and NEVER what that means; the reading is
+                        the letter's, not the adapter's.
 config/strategy.toml    CODIFIED STRATEGY — single source of truth: risk gates,
                         universe, signal, trade management, regime floor.
                         Tune the strategy HERE, not in code. `[risk]` = the store's
@@ -655,6 +662,36 @@ prompts/newsletter.md   Weekly investor letter ("The Claude Ledger") — headles
                         (never computes numbers), fills newsletter/template.html,
                         Sundays 21:00. scripts/send_newsletter.py delivers via
                         Resend HTTPS API (DO blocks ALL outbound SMTP ports).
+                        ⛔ THE LETTER IS THE PORTFOLIO MANAGER'S, NOT A
+                        NARRATOR'S. The header used to say the trades "were made
+                        by the systematic dual-momentum loop — explain them as
+                        faithful execution of the system"; that described the
+                        fast loop deleted 2026-08-14 and contradicted the
+                        prompt's own step 1b. The sessions decide, so the letter
+                        owns the decisions and states a forward view. Corrected
+                        2026-09-08.
+src/macro_context.py    THE WEEK'S ECONOMY AND MARKET, for the letter's LOOKING
+                        AHEAD section (2026-09-08). That section used to be the
+                        next rebalance date, the review dates and the cooldown
+                        count — because the prompt asked for exactly that and
+                        facts.json carried NO macro at all (`regime` was two
+                        strings). Gathers FRED indicators via
+                        adapters.fred.indicators.context() plus the WHOLE-MARKET
+                        Alpaca feed for the week, ranks headlines
+                        economic_data > policy_rates > market_wide (economic
+                        data leads because a payrolls print bears on every
+                        position at once), drops promo/listicle noise, dedupes
+                        and caps. Reached through scripts/letter_facts.py's
+                        `macro` key — the letter process itself stays airgapped
+                        (no MCP, no network) and gains nothing.
+                        ⛔ IT CLASSIFIES ON HEADLINES, WORD-BOUNDED, and both
+                        halves are load-bearing: substring matching filed a
+                        Strait of Hormuz story as an economic release ("ppi"
+                        inside shiPPIng), and classifying on SUMMARIES filed
+                        four earnings reports as macro policy ("fiscal Q2").
+                        ⛔ It reports; it does not interpret. No "calm", no
+                        "risk-off", no thresholds — a judgement encoded here
+                        would be a rule nobody chose.
 deploy/                 run_slow_loop.sh (Python), run_session.sh (Claude, with
                         ANTHROPIC_API_KEY guard), run_newsletter.sh,
                         crontab.template, alert.sh (ERR-trap → ntfy phone push on
@@ -842,7 +879,10 @@ scripts/promote_proposal.py  Human promotion of a proposal: --apply / --set writ
                         config/strategy.adaptive.toml (merged UNDER strategy.local.toml).
 src/research_store/     Research Store — validated slow→fast handoff (belief +
                         journal). write_product enforces the [risk] mandate.
-src/adapters/alpaca/    Alpaca news client + get_news (data-only, no trading)
+src/adapters/alpaca/    Alpaca news client + get_news (data-only, no trading).
+                        get_news(SYMBOLS) = the per-holding feed (agent_env's
+                        news() tool). get_news(None) = the WHOLE-MARKET feed,
+                        which is what src/macro_context.py reads for the letter.
 src/event_calendar/     Earnings/event calendar compiler (timing + risk spine).
                         Deterministic: Finnhub REST spine + optional agent-supplied
                         RH snapshot; tags confirmed/estimated, logs date revisions.

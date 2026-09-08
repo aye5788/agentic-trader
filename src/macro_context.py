@@ -295,3 +295,80 @@ def week_window(today=None) -> tuple[str, str]:
     today = today or date.today()
     monday = today - timedelta(days=today.weekday())
     return monday.isoformat(), today.isoformat()
+
+
+# -------------------------------------------------------------- selftest ----
+
+def _selftest() -> None:
+    """Pure logic only -- no network, no keys. Every case below is a defect
+    that ACTUALLY OCCURRED against the live feed while this module was built;
+    none of them would have shown up in a hand-written fixture, so they are
+    pinned here rather than remembered.
+    """
+    # ---- word boundaries. Substring matching filed a shipping story as an
+    # economic release, because "ppi" sits inside shiPPIng.
+    assert classify("Iran, Oman Near 'Safe Route' Deal in Strait of Hormuz") == (None, None)
+    assert classify("Traders show optimism into the close") == (None, None), \
+        "'ism' inside optimISM must not read as the ISM survey"
+    assert classify("Mechanism of the new rule explained") == (None, None)
+    assert classify("CPI Comes In Hotter Than Expected")[0] == "economic_data"
+    assert classify("Gold Jumps 3%; ISM Services PMI Rises In August")[0] == "economic_data"
+
+    # ---- a needle written with a trailing space compiles to a pattern that
+    # can never match: "top 3 " + (?!\w) fails on "top 3 stocks".
+    assert is_noise("Top 3 Energy Stocks That Could Sink Your Portfolio")
+    assert _hit("top 3 stocks", _compile(("top 3 ",))) == "top 3"
+
+    # ---- tier priority: economic data outranks policy outranks market colour
+    assert classify("Fed Chair Powell Signals Rate Cut")[0] == "policy_rates"
+    assert classify("Jobs Report Spurs Rate Hike Bets")[0] == "economic_data", \
+        "a story that is both must file as economic data"
+    assert classify("Stock Market Today: Nasdaq Futures Rise")[0] == "market_wide"
+
+    # ---- noise. Performance listicles carry "on the Nasdaq" boilerplate and
+    # took 8 of 12 market slots; session movers did the same.
+    for junk in ("$1000 Invested In KLA 20 Years Ago Would Be Worth This Much Today",
+                 "12 Industrials Stocks Moving In Friday's After-Market Session",
+                 "Here's How Much You Would Have Made Owning Expedia Stock",
+                 "What's Going On With Baidu Stock Tuesday?"):
+        assert is_noise(junk), junk
+    # ...but a real macro story that merely mentions a level is NOT noise
+    assert not is_noise("Stock Market Today: S&P 500 Futures Fall as Oil Tops $99")
+
+    # ---- summaries are not classified. "fiscal Q2" in an earnings summary
+    # filed four earnings reports as macro policy.
+    assert classify("Zscaler Posts Q4 Double Beat", "fiscal Q2 revenue rose") == (None, None)
+
+    # ---- dedupe keeps the first (newest) copy, drops republished repeats
+    arts = [{"headline": "Stock Market Today", "created_at": "2026-09-04T16:00"},
+            {"headline": "stock market today!", "created_at": "2026-09-04T09:00"},
+            {"headline": "Jobs Report Beats", "created_at": "2026-09-04T13:00"}]
+    kept = dedupe(arts)
+    assert len(kept) == 2 and kept[0]["created_at"] == "2026-09-04T16:00", kept
+
+    # ---- caps bind, and matched_counts reports what was SEEN, not what was
+    # kept: the letter must tell "a quiet week" from "we only kept two".
+    many = [{"headline": f"CPI report number {i}", "created_at": "2026-09-04T10:00"}
+            for i in range(10)]
+    got = select(many, {"economic_data": 3, "policy_rates": 0, "market_wide": 0})
+    assert len(got["headlines"]["economic_data"]) == 3
+    assert got["matched_counts"]["economic_data"] == 10, got["matched_counts"]
+
+    # ---- the window is the letter's own week, Monday..today
+    from datetime import date as _d                       # noqa: PLC0415
+    assert week_window(_d(2026, 9, 6)) == ("2026-08-31", "2026-09-06"), "Sunday run"
+    assert week_window(_d(2026, 9, 2)) == ("2026-08-31", "2026-09-02"), "midweek run"
+
+    print("selftest OK: word boundaries hold (ppi/ism), trailing-space needles "
+          "match, tiers rank economic data first, listicles drop, summaries are "
+          "not classified, caps bind while matched_counts reports what was seen")
+
+
+if __name__ == "__main__":
+    import sys
+    if "--selftest" in sys.argv:
+        _selftest()
+    else:
+        s, e = week_window()
+        import json as _json
+        print(_json.dumps(build(s, e), indent=2, default=str))
