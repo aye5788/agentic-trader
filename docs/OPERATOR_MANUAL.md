@@ -208,6 +208,20 @@ tail logs/cohort_activation.log
 A RED `systemctl status` after Friday means it HELD — deliberately, at
 `fixed_list`, with nothing changed. The status file says which gate refused.
 
+**It holds on an imperfect cohort, not just a broken one.** Activation requires
+**zero** `unscoreable` names (the history repair asked and the provider returned
+nothing usable) and **zero** `pending_history` names after the price path (the
+plan measured 48 names needing history against 88 free slots, so all of them
+should land). Either count above zero holds at `fixed_list` — the numbers are in
+the status file. That is stricter than the everyday design, which treats pending
+names as ordinary scheduling; a one-shot unattended flip gets one clean shot, and
+a hold costs a week in the state the box is already in.
+
+**Dry run** (`scripts/activate_cohort.py --dry-run`) evaluates the gates and
+writes **only** `research_store/universe/activation_status.json` and
+`logs/cohort_activation.log`. It never touches your config, the cohort or
+history artifacts, the quota ledger, the metered history API, or any service.
+
 **To switch it on by hand instead** — this is the only change required, and it is one line in
 your box-local override (`config/strategy.local.toml`, git-ignored, wins over
 the committed config):

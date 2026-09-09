@@ -1,8 +1,25 @@
 #!/usr/bin/env python3
 """ONE-TIME GUARDED ACTIVATION of cohort candidate selection.
 
-    .venv/bin/python scripts/activate_cohort.py --dry-run   # gates only, writes nothing
+    .venv/bin/python scripts/activate_cohort.py --dry-run   # gates only, diagnostics only
     .venv/bin/python scripts/activate_cohort.py --run       # the scheduled path
+
+⛔ WHAT `--dry-run` WRITES, STATED EXACTLY. It writes its two DIAGNOSTIC
+artifacts and nothing else:
+
+    research_store/universe/activation_status.json
+    logs/cohort_activation.log
+
+It does NOT touch config/strategy.local.toml, does NOT create or modify
+cohort.json / history_state.json / the quota ledger / a quota reset, does NOT
+call the metered history API, does NOT run the price path, does NOT reload any
+service, and does NOT change activation state. It reads the broker's quota
+METER, which is unmetered and read-only.
+
+This used to claim it "writes NOTHING" while writing exactly those two files.
+The claim was small and false, and a runner whose own description of what it
+touches cannot be trusted is not one you want deciding whether to flip a live
+trading config.
 
 ⛔ WHAT THIS IS FOR, AND WHY IT IS A SCRIPT RATHER THAN A RUNBOOK. Flipping
 `[universe] mode` to "cohort" is one line, but it is only SAFE if a specific
@@ -121,6 +138,10 @@ class Report:
             "rollback": self.rollback,
             "gates": self.gates,
             "facts": self.facts,
+            # Self-describing: a reader should not have to consult the source to
+            # learn what this run was permitted to touch.
+            "diagnostic_artifacts": [str(STATUS), str(LOG)],
+            "writes_state": self.mode != "--dry-run",
         }
         STATUS.parent.mkdir(parents=True, exist_ok=True)
         STATUS.write_text(json.dumps(doc, indent=2, default=str))
@@ -415,14 +436,30 @@ def run_price_path(rep: Report, dry: bool) -> None:
 
 
 def gate_final_view(rep: Report, fixed_ranked: int) -> dict:
-    """The composed cohort must be healthy ENOUGH to trade before the flip is
-    made persistent.
+    """The composed cohort must be FULLY healthy before the flip is made
+    persistent. Every check here BLOCKS.
 
-    Pending names are tolerated only when the quota or a provider explains them,
-    because that is a scheduling state that resolves itself on the next run. An
-    UNSCOREABLE name is a provider failure and is reported. What is never
-    tolerated is a scoreable population too small to be a book, or one that has
-    collapsed relative to the list it is replacing.
+    ⛔ `unscoreable` MUST BE ZERO. It used to be reported and waved through
+    (`rep.gate(..., True, ...)` — a gate that cannot fail, which is the same
+    hollow shape as a test that asserts nothing). An `eligible_unscoreable` name
+    is a name the history repair ASKED FOR and the provider failed to deliver:
+    it has spent a distinct-symbol quota unit and come back with nothing usable.
+    One of those is evidence the metered path is not doing what this activation
+    depends on, and activating on top of it would bake a broken repair into the
+    live configuration and call it healthy.
+
+    ⛔ `pending_history` MUST ALSO BE ZERO, FOR THIS SPECIFIC ACTIVATION. The
+    verified plan measured 48 names needing history against 88 slots the broker
+    reported free — so after the cohort-mode price path runs, every one of them
+    should have landed. A survivor means either the quota was not what telemetry
+    said, or the repair silently under-delivered; either way the assumption the
+    plan rests on is false and the flip should wait for a run where it holds.
+    This is deliberately STRICTER than the general design, which tolerates
+    pending names as an ordinary scheduling state — a one-shot unattended
+    activation is not an ordinary run, and it gets one clean shot.
+
+    Neither is a threshold to relax if Friday's numbers come in awkward. A hold
+    costs a week on `fixed_list`, which is the state the box is in today.
     """
     import cohort  # noqa: PLC0415
     import strategy  # noqa: PLC0415
@@ -449,13 +486,24 @@ def gate_final_view(rep: Report, fixed_ranked: int) -> dict:
     buyable = cohort.buyable(view)
     leaked = sorted(set(view.get("observe_only", [])) & buyable)
     rep.require("no observe-only name is buyable", not leaked, str(leaked))
-    pending_ok = c["pending_history"] == 0 or bool(rep.facts.get("quota_telemetry", {}).get("ok"))
-    rep.gate("pending-history names explained",
-             pending_ok,
-             f"pending={c['pending_history']} "
-             f"(quota-rationed; they resolve on later runs)")
-    rep.gate("unscoreable (provider failures)", True,
-             f"unscoreable={c['unscoreable']}")
+    tel = rep.facts.get("quota_telemetry", {})
+    rep.require(
+        "no unscoreable names (provider failures)",
+        c["unscoreable"] == 0,
+        f"unscoreable={c['unscoreable']} — the history repair asked for these and "
+        f"the provider returned nothing usable, spending a quota unit each. "
+        f"Names: {', '.join(view.get('unscoreable', [])[:15])}"
+        f"{'…' if len(view.get('unscoreable', [])) > 15 else ''}. "
+        f"Activation holds: a broken repair must not be baked in as healthy.")
+    rep.require(
+        "no pending-history names after the cohort-mode price path",
+        c["pending_history"] == 0,
+        f"pending={c['pending_history']} after the repair ran "
+        f"(telemetry reported used={tel.get('used')} remain={tel.get('remain')}). "
+        f"The verified plan expected every name needing history to fit inside "
+        f"available capacity; a survivor means that assumption did not hold. "
+        f"Names: {', '.join(view.get('pending_history', [])[:15])}"
+        f"{'…' if len(view.get('pending_history', [])) > 15 else ''}")
     return view
 
 
@@ -546,8 +594,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", action="store_true", help="the scheduled activation")
     ap.add_argument("--dry-run", action="store_true",
-                    help="evaluate gates, write NOTHING (no override, no reload, "
-                         "no history requests)")
+                    help="evaluate gates and write ONLY the diagnostic status "
+                         "file and log. Never writes config, cohort/history "
+                         "artifacts, the quota ledger or a reset; never calls "
+                         "the metered history API, runs the price path, or "
+                         "reloads a service.")
     ap.add_argument("--expect-asof", default=None,
                     help="require the cohort artifact to carry this as_of "
                          "(default: today ET on a --run)")
@@ -600,18 +651,36 @@ def main() -> int:
         gate_quota(rep)
 
         # baseline for the collapse comparison, taken BEFORE the flip
-        fixed_ranked = int(subprocess.run(
-            [str(REPO / ".venv" / "bin" / "python"), "-c",
-             "import sys,json;sys.path.insert(0,'src');"
-             "from agent_env import server;print(len(json.loads(server.universe())['ranked']))"],
-            cwd=str(REPO), capture_output=True, text=True, timeout=300).stdout.strip() or 0)
+        # ⛔ A FAILED BASELINE PROBE MUST NOT ABORT THE RUN. This is a
+        # comparison number, not a gate input of its own: it feeds the
+        # "has the scoreable set collapsed vs the list it replaces" check.
+        # Letting it raise turned an unavailable interpreter into an
+        # "unexpected error" that killed the whole activation, which is a
+        # crash where a degraded reading was wanted. On failure it records 0
+        # and says so — the collapse check then cannot bite, but
+        # MIN_SCOREABLE still does, so the population floor is never lost.
+        try:
+            probe = subprocess.run(
+                [str(REPO / ".venv" / "bin" / "python"), "-c",
+                 "import sys,json;sys.path.insert(0,'src');"
+                 "from agent_env import server;"
+                 "print(len(json.loads(server.universe())['ranked']))"],
+                cwd=str(REPO), capture_output=True, text=True, timeout=300)
+            fixed_ranked = int((probe.stdout or "").strip() or 0)
+        except Exception as e:                                # noqa: BLE001
+            fixed_ranked = 0
+            rep.gate("fixed-list baseline probe", False,
+                     f"{type(e).__name__}: {e} — the collapse comparison is "
+                     f"skipped; the absolute scoreable floor still applies")
         rep.facts["fixed_list_ranked"] = fixed_ranked
 
         if dry:
-            rep.gate("DRY RUN — stopping before any write", True,
-                     "no override written, no history requested, no reload")
+            rep.gate("DRY RUN — stopping before any state change", True,
+                     "diagnostics only: no override, no price path, no history "
+                     "requests, no ledger write, no reload")
             rep.outcome = "DRY_RUN_GATES_PASSED"
-            rep.rollback = "none — dry run changed nothing"
+            rep.rollback = ("none — the dry run changed no state. It wrote only "
+                            "this status file and logs/cohort_activation.log.")
             return 0
 
         # ---- 7. temporary override + the normal price path --------------
@@ -642,8 +711,10 @@ def main() -> int:
         remove_override()
         rep.activated = False
         rep.outcome = "HELD"
-        rep.rollback = (f"nothing to roll back — the override was removed and mode "
-                        f"is {loaded_mode()!r}. Services untouched.")
+        rep.rollback = (f"nothing to roll back — the runner-owned override was "
+                        f"removed and mode is {loaded_mode()!r}. Services "
+                        f"untouched. The only files written were this status "
+                        f"file and logs/cohort_activation.log.")
         log(f"HELD at fixed_list: {e}")
         return 0 if dry else 2
     except Exception as e:  # noqa: BLE001
