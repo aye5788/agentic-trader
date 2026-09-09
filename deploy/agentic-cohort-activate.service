@@ -1,0 +1,32 @@
+# ONE-TIME guarded activation of cohort candidate selection.
+#
+# Runs scripts/activate_cohort.py --run, which evaluates every gate and flips
+# [universe] mode to "cohort" ONLY if all of them pass. It reads moomoo data and
+# the broker's quota meter (both read-only); it places NO brokerage order.
+#
+# ⛔ TIMEOUT MUST EXCEED wait-for-refresh + the price path. The runner polls up
+# to 45 min for the Friday screen's artifact, then repairs the cohort's pending
+# names through the metered history API. 90 min leaves headroom for both without
+# leaving a hung job pinned to the box for ever.
+#
+# SuccessExitStatus is NOT widened: exit 2 (HELD at fixed_list) and exit 3
+# (error) must both surface as unit failures, so `systemctl status` shows red
+# when activation did not happen. A silent "success" on a hold is exactly the
+# kind of green-while-broken this repo keeps paying for.
+[Unit]
+Description=agentic-trader ONE-TIME guarded cohort activation (2026-09-11)
+Documentation=file:/opt/agentic-trader/scripts/activate_cohort.py
+After=network-online.target opend.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/agentic-trader
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
+ExecStart=/opt/agentic-trader/.venv/bin/python scripts/activate_cohort.py --run
+TimeoutStartSec=5400
+MemoryAccounting=yes
+MemoryMax=600M
+Nice=5

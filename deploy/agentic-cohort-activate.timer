@@ -1,0 +1,23 @@
+# Fires ONCE: Friday 2026-09-11 17:30 America/New_York.
+#
+# 17:30 is 30 minutes after the scheduled Friday 17:00 universe refresh — but
+# the runner does NOT trust that gap. It polls for the refresh's own artifact
+# carrying Friday's as_of, so a slow or failed screen holds the activation
+# instead of racing it. See wait_for_refresh() in the runner.
+#
+# ⛔ OnCalendar names a specific DATE, so this timer fires exactly once and then
+# has no future elapse. Persistent=true means a reboot or a powered-down box
+# across the window still runs it on the next boot rather than silently skipping
+# the only shot it gets.
+[Unit]
+Description=agentic-trader one-shot cohort activation schedule (Fri 2026-09-11 17:30 ET)
+Documentation=file:/opt/agentic-trader/scripts/activate_cohort.py
+
+[Timer]
+OnCalendar=2026-09-11 17:30:00 America/New_York
+AccuracySec=30s
+Persistent=true
+RemainAfterElapse=yes
+
+[Install]
+WantedBy=timers.target
