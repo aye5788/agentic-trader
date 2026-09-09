@@ -41,7 +41,7 @@ deploy/setup_v2env.sh                               # builds ./v2env (protobuf <
 The Friday universe screen runs moomoo's V2 `get_stock_screen` in a subprocess
 under `./v2env`, because that decoder calls `FieldDescriptor.label` — removed in
 protobuf 6/7, and the box runs 7.35.1 everywhere else (the system moomoo install
-is shared with `moomoo-vol-desk`, so it cannot be downgraded). Without `v2env`
+may be used by other local workloads, so it cannot be downgraded). Without `v2env`
 the screen reports NO_CHANGE every week and the universe silently stops being
 maintained; `deploy/run_universe_refresh.sh` refuses to start and says so.
 Recipe: `deploy/v2env-requirements.txt`.
@@ -80,9 +80,9 @@ systemctl status opend                     # must be up on 127.0.0.1:11111
   which runs under `./v2env` (see Phase 1). ⚠️ `.venv` may also have a `moomoo`
   installed; it imports and V1 works there, but nothing scheduled uses it, and
   V2 fails there exactly as it does under system python.
-- OpenD is **shared with the sibling repo `moomoo-vol-desk`**, which owns the
-  login. Never start a second instance. The V2 subprocess uses that SAME
-  gateway — never launch a second one for it.
+- `agentic-trader` is the primary OpenD consumer; the only other current user is
+  the minor `moomoo-data-collector` workload. Never start a second instance.
+  The V2 subprocess uses that SAME gateway — never launch another one for it.
 
 ```bash
 # verify the V2 screen runtime (no history quota, no orders):
@@ -98,8 +98,8 @@ deploy/run_slow_loop.sh          # writes the target book — inspect research_s
 
 **Scheduling — ⚠️ do NOT run `crontab deploy/crontab.template` on the live box.**
 That is the *first-install* command only. The live crontab has since diverged: it
-carries box-only jobs the template does **not** contain (the `moomoo-vol-desk`
-09:30/09:35 options runs, the `moomoo-data-collector` 16:30 update), and a
+carries box-only jobs the template does **not** contain (including the
+`moomoo-data-collector` 16:30 update), and a
 wholesale install would silently wipe them.
 
 On an already-deployed box, arm a new job by **appending the single line**, and
@@ -269,7 +269,7 @@ crontab -l                                    # 10 agentic-trader lines (+3 box-
 # sessions (M-F 10:35 + 15:15, systemd) · letter (Sun 21:00) · upkeep check (daily 8:00)
 # ledger backup (daily 22:30) · universe refresh (WEEKLY, Fri 17:00 — was
 #   quarterly/never-fired until 2026-08-20)
-# box-only, NOT this project: moomoo-vol-desk 9:30/9:35, data-collector 16:30
+# box-only, NOT this project: data-collector 16:30
 timedatectl                                   # MUST be America/New_York or cron fires at wrong times
 cat research_store/monitor/state.json         # book_asof advancing = monitor polled OK.
                                               # `fired` is {SYM: {tier: level}} and is CARRIED,
@@ -295,8 +295,8 @@ journalctl -u agentic-monitor -n 50           # monitor: silent unless a stop/ta
   `src/strategy.py` deep-merges over the base. Pause new buys: edit the local
   file, or delete it to fully disarm. `git pull` never conflicts on this.
 - **Price feed dies when OpenD does** — no token to expire any more, but OpenD is
-  a single point of failure and is shared with `moomoo-vol-desk`. If the slow loop
-  errors on quotes/history, check `systemctl status opend` first.
+  a single point of failure. If the slow loop errors on quotes/history, check
+  `systemctl status opend` first.
 - **RH blocks the 2nd trade** — one-time "investor profile" KYC on the Agentic
   account; complete it in the RH app. Non-recurring.
 - **No native stop orders** — RH rejects stops on sub-1-share fractional positions

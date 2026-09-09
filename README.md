@@ -56,8 +56,9 @@ So anything importing `moomoo` — `fetch_prices.py`, `market_monitor.py` —
 proceed with a safety check silently skipped. That exact mistake cost real money on
 2026-07-23.
 
-moomoo data flows through an **OpenD** gateway on `127.0.0.1:11111`, **shared with
-the sibling repo `moomoo-vol-desk`**. Never start a second one.
+moomoo data flows through a single **OpenD** gateway on `127.0.0.1:11111`.
+`agentic-trader` is its primary consumer; the only other current consumer is the
+small `moomoo-data-collector` workload. Never start a second gateway.
 
 ## Setup
 

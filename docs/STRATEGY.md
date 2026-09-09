@@ -75,8 +75,9 @@ its only protection.
 ### 2a. Why the cohort can be broad and the candidate set cannot grow as fast
 
 moomoo's **screening is unmetered** but `request_history_kline` is capped at
-**100 distinct symbols per rolling window, account-wide** (shared with the
-sibling repo `moomoo-vol-desk`). So ranking the whole market weekly costs
+**100 distinct symbols per rolling window, account-wide**. This repo is the
+current primary consumer, but the cap is a broker-level limit rather than a
+private process allowance. So ranking the whole market weekly costs
 nothing, while giving ~200 names a 252-session window cannot be done in one run
 at all. `src/quota_planner.py` rations it — current holdings first, then the
 names closest to becoming scoreable, then cohort rank — and names past the

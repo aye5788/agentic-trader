@@ -145,7 +145,7 @@ architecture in `docs/DESIGN.md` (Layer 1). Summary:
 | Source | Role | Notes |
 | ------ | ---- | ----- |
 | ~~**Schwab**~~ | **REMOVED 2026-07-29.** Was the primary market-data feed; its 7-day refresh token was the only recurring human chore in the system, and the signal consumed nothing from it but daily closes. All of it now comes from moomoo. Adapter, auth scripts, `SCHWAB_*` keys and `schwabdev` are deleted — do not reintroduce. | Migration + equivalence proof: `docs/OPSLOG.md` 2026-07-29. |
-| **moomoo** (`src/adapters/moomoo/`) | **THE market-data feed** since 2026-07-29 — daily OHLC panel (`prices.snapshot_ohlc`), intraday quotes for the stop watcher (`prices.live_quotes`), universe turnover/market-cap, capital-flow, short-interest, put/call+IV. Data-only via the local **OpenD** gateway. Still unwired: insider, earnings-price-move, institutional; see `docs/DATA_SOURCES.md`. | ⚠️ Runs under **system `/usr/bin/python3` (3.10)**, NOT `.venv` (3.12) — this now includes `fetch_prices` and `market_monitor`. (`fast_loop` was deleted and `risk_review` retired into the sessions, 2026-08-13/14.) OpenD on `127.0.0.1:11111`, **shared with sibling repo `moomoo-vol-desk`**. ⛔ `request_history_kline` is capped at **100 distinct stocks account-wide** — use `get_market_snapshot` (unmetered, 400/call) for anything universe-wide. moomoo history is **shallow (~1–2 yr)** → forward-log, don't backtest; the deep panel on disk is Schwab-era and now **non-regenerable**, so `research_store/prices/backup/` matters. |
+| **moomoo** (`src/adapters/moomoo/`) | **THE market-data feed** since 2026-07-29 — daily OHLC panel (`prices.snapshot_ohlc`), intraday quotes for the stop watcher (`prices.live_quotes`), universe turnover/market-cap, capital-flow, short-interest, put/call+IV. Data-only via the local **OpenD** gateway. Still unwired: insider, earnings-price-move, institutional; see `docs/DATA_SOURCES.md`. | ⚠️ Runs under **system `/usr/bin/python3` (3.10)**, NOT `.venv` (3.12) — this now includes `fetch_prices` and `market_monitor`. OpenD is on `127.0.0.1:11111`; this repo is its primary consumer and only the minor `moomoo-data-collector` also uses it. ⛔ `request_history_kline` is capped at **100 distinct stocks account-wide** — use `get_market_snapshot` (unmetered, 400/call) for anything universe-wide. moomoo history is **shallow (~1–2 yr)** → forward-log, don't backtest; the deep panel on disk is Schwab-era and now **non-regenerable**, so `research_store/prices/backup/` matters. |
 | **Finnhub** (`src/adapters/finnhub/`) | Analyst *recommendation trends*, earnings *surprises*, basic financials. **NOT retired** — but currently consumed only by `src/event_calendar/` (earnings spine), not the ranking signal. | Free tier. Price-target *level* + forward EPS estimates are **premium (403)**. |
 | **Alpaca** (`src/adapters/alpaca/`) | Symbol-tagged news; the **WHOLE-MARKET news feed** (`get_news(None)`) behind the weekly letter's macro block (`src/macro_context.py`); IEX close+$-vol for the survivorship-free **PIT pool** (only free feed serving DELISTED names). | Free tier. Price is **IEX-only (not NBBO)** → don't use for quotes. A week of the untagged feed is ~1,300 articles / ~27 calls; the limit is ~200/min. |
 | **FRED** (`src/adapters/fred/`) | Macro regime indicators: VIX (`VIXCLS`), 10y-2y curve (`T10Y2Y`), HY OAS (`BAMLH0A0HYM2`). **Deep history (decades).** Confirms — does not replace — the momentum regime gate. Also the VIX source for `slow_loop.fetch_vix`, and (via `indicators.context()`) the level-plus-recent-past readings in the weekly letter. | Needs `FRED_API_KEY`. |
@@ -171,13 +171,14 @@ architecture in `docs/DESIGN.md` (Layer 1). Summary:
   work on `/usr/bin/python3`; just do not rely on the import failing to enforce
   that.
 - **OpenD gateway.** moomoo data flows through a local **OpenD** daemon on
-  `127.0.0.1:11111` (`opend.service`), **shared** with the sibling repos — never
-  launch a second one. Data needs only the quote channel (`qot_logined: True`).
-- **Sibling repos on the SAME droplet — NOT this project, don't conflate:**
-  `~/moomoo-vol-desk` (a separate options/vol trading system with its own MCP +
-  cron; owns the OpenD login), `~/moomoo-data-collector` (15m K-line for ~3–5
-  index/vol symbols → feeds the vol-desk; **not** our signal panel),
-  `~/time-spread-lab` (resident Streamlit options app). The droplet is
+  `127.0.0.1:11111` (`opend.service`). `agentic-trader` is the primary consumer;
+  the only other current workload is the small `moomoo-data-collector`. Never
+  launch a second gateway. Data needs only the quote channel (`qot_logined: True`).
+- **Other repos on the SAME droplet — NOT this project, don't conflate:**
+  `~/moomoo-vol-desk` is inactive and is not a current OpenD or quota consumer;
+  `~/moomoo-data-collector` runs a small 15-minute K-line collection workload
+  for ~3–5 index/vol symbols and is not this signal panel; `~/time-spread-lab`
+  is a resident Streamlit options app. The droplet is
   memory-tight (~2 GB, often swapping); the heavy consumers are headless `claude`
   runs (~500 MB each) across all these. Keep new on-box work pure-Python and off
   the weekday market-hours pileup — prefer off-box (GitHub Actions).
@@ -320,8 +321,9 @@ src/adapters/moomoo/    Data-only moomoo client via OpenD — RUNS UNDER SYSTEM
                         cumulative == the $50M/day floor).
                         ⛔ It runs in a SUBPROCESS under ./v2env (scripts/
                         v2_screen.py): the V2 decoder needs protobuf < 5 and the
-                        box runs 7.35.1 everywhere else (the SDK is shared with
-                        ~/moomoo-vol-desk, so no global downgrade). v2env is
+                        box runs 7.35.1 everywhere else. Do not globally
+                        downgrade the system Python environment; use v2env.
+                        v2env is
                         GIT-IGNORED — rebuild with deploy/setup_v2env.sh, and
                         run_universe_refresh.sh refuses to run without it.
                         ⛔ A V2 FAILURE NEVER FALLS BACK. Duplicates, unusable

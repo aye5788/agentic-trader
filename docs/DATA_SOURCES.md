@@ -14,11 +14,14 @@ summary; this is the detail.
 ## 0. Runtimes (get this wrong and nothing imports)
 
 - Core system → repo **`.venv` (Python 3.12)**.
-- **moomoo → system `/usr/bin/python3` (3.10) ONLY.** The `moomoo` SDK is not in
-  `.venv`. Any moomoo pull must run under `/usr/bin/python3` (see
+- **Scheduled moomoo data path → system `/usr/bin/python3` (3.10).** `.venv`
+  currently carries the SDK and can import its V1 surface, but scheduled work
+  remains on system Python; the V2 screen runs in its isolated `./v2env`.
+  Any normal moomoo pull therefore uses `/usr/bin/python3` (see
   `deploy/run_universe_refresh.sh`). It talks to a local **OpenD** daemon on
-  `127.0.0.1:11111` (`opend.service`), **shared with `~/moomoo-vol-desk`** — never
-  start a second OpenD. Data needs only the quote channel.
+  `127.0.0.1:11111` (`opend.service`). `agentic-trader` is the primary consumer;
+  only the minor `~/moomoo-data-collector` workload also uses it. Never start a
+  second OpenD. Data needs only the quote channel.
 
 ---
 
@@ -306,7 +309,7 @@ pre-6 protobuf. Blast radius is limited to `get_stock_screen`: V1 and the other
 165 methods use explicit protobuf field access, not the generic reflection walker.
 
 ✅ **How to actually run V2 — an isolated venv, verified 2026-07-29.** Do NOT pin
-or patch the system install: that SDK is shared with `moomoo-vol-desk`. Stand up a
+or patch the system install: other local workloads may rely on it. Stand up a
 separate interpreter and point it at the **same** OpenD (data channel only — never
 launch a second gateway).
 

@@ -35,11 +35,13 @@ LAYER 4  EXECUTION       Robinhood MCP: review -> place  (thin, dumb, reliable)
 > return + trend (close/SMA200); absolute gate = 12mo return > 0; hold top-10
 > (banded); ⛔ the top-4 ETF sleeve was DELETED 2026-08-20 — equities only;
 > weekly rebalance, nightly risk exits;
-> off-switch = cash; **70/30 book/sleeve** capital split. The operational spec —
+> off-switch = cash; **equities-only book** (the former ETF sleeve is deleted).
+> The operational spec —
 > written for the deployed agent — is [`docs/STRATEGY.md`](STRATEGY.md); params
 > are in `config/strategy.toml`. Earnings-calendar use demotes from *primary
-> signal* (the old PEAD first pass) to *defensive event-awareness*. Infra (Schwab
-> price history, Research Store, regime gate, config loader) carries over intact.
+> signal* (the old PEAD first pass) to *defensive event-awareness*. Infra (the
+> moomoo price panel, Research Store, regime gate, config loader) carries over
+> intact.
 
 **Horizon: swing (multi-day to a few weeks).** Chosen for structural fit, not
 regulation — our data is EOD-shaped, the slow loop runs nightly, and the edge
@@ -59,10 +61,10 @@ uptrend** (absolute-trend filter). The signal stack, each source with one job:
 
 | Signal | Role | Source |
 | ------ | ---- | ------ |
-| **Relative-rank momentum** (risk-adj 12mo return + trend) | **primary edge** — winners keep winning over 6–12mo | Schwab price history |
-| **Absolute-trend filter** (close/SMA200; 12mo return > 0) | the **off-switch** — long-only rotates to cash when the trend breaks | Schwab price history |
+| **Relative-rank momentum** (risk-adj 12mo return + trend) | **primary edge** — winners keep winning over 6–12mo | moomoo daily price panel |
+| **Absolute-trend filter** (close/SMA200; 12mo return > 0) | the **off-switch** — long-only rotates to cash when the trend breaks | moomoo daily price panel |
 | ~~ETF rotation sleeve~~ | ⛔ **DELETED 2026-08-20** (retired 08-16, sold 08-17). Equities only; a buy naming a fund is refused by the whitelist. The 11 sector price series survive as residual-tilt FACTORS, not holdings | price panel |
-| Fundamental quality | light universe hygiene (the 150 are already liquid large-caps) | Schwab + Finnhub metrics |
+| Fundamental quality | light universe hygiene (the 150 are already liquid large-caps) | moomoo + Finnhub metrics |
 | Earnings calendar | **defensive** event-awareness — don't hold a swing into a print | Finnhub + RH |
 | News / catalysts | context + risk flag | Alpaca news |
 
@@ -144,9 +146,9 @@ review_by, outcome`.
 
 | Source | Role | Status |
 | ------ | ---- | ------ |
-| **Schwab API** | PRIMARY: price history/OHLC, fundamentals, options+greeks, movers, quotes (SIP/NBBO) | ✅ connected (Market Data only; 7-day OAuth) |
-| **moomoo** (OpenD) | Data-only. WIRED: universe-maint (turnover, market-cap). UNWIRED but available: capital flow, short interest, put/call+IV, insider, earnings-price-move, institutional | ✅ connected. ⚠️ system `python3.10`; OpenD `:11111` shared w/ `moomoo-vol-desk`; history **shallow (~1–2yr)** → forward-log, don't backtest |
-| **FRED API** | Macro regime indicators (VIX, `T10Y2Y` curve, `BAMLH0A0HYM2` HY spread). Deep history (decades) | ✅ **built** (`src/adapters/fred/`); confirms the Schwab regime gate |
+| ~~**Schwab API**~~ | Removed 2026-07-29; do not reintroduce its adapter or OAuth flow | retired |
+| **moomoo** (OpenD) | Daily OHLC panels, intraday quotes, V2 universe turnover/market-cap, and other market data | ✅ connected. ⚠️ scheduled data path uses system `python3.10`; OpenD `:11111` has this repo as its primary consumer (only the small `moomoo-data-collector` also uses it); history **shallow (~1–2yr)** → forward-log, don't backtest |
+| **FRED API** | Macro regime indicators (VIX, `T10Y2Y` curve, `BAMLH0A0HYM2` HY spread). Deep history (decades) | ✅ **built** (`src/adapters/fred/`); confirms the momentum regime gate |
 | **Finnhub API** | Analyst recommendation *trends*, earnings *surprises*, basic financials | ✅ connected (free tier); consumed by `event_calendar` only, **not** the ranking |
 | **Alpaca API** | News (symbol-tagged); IEX close+$-vol for the survivorship-free PIT pool (dead names) | ✅ connected (free tier; IEX price only) |
 | **Robinhood MCP** | Fundamentals, **earnings calendar/results**, its own screeners; **the execution venue** | available |
@@ -155,7 +157,7 @@ review_by, outcome`.
 | **Airtable / Drive** | Structured research DB / store | available |
 
 > **Feed notes.** Alpaca's *price* data is IEX-only on the free plan (single-venue,
-> not full NBBO) — so we lean on **Schwab/RH for quotes** and use Alpaca purely for
+> not full NBBO) — so we lean on **moomoo/RH for quotes** and use Alpaca purely for
 > **news + screeners**. Finnhub's **price-target** and **forward EPS-estimate**
 > endpoints are premium-only; we deliberately skip the price-target *level* (weak,
 > biased signal) and treat forward consensus estimates as a deferred maybe.
@@ -205,6 +207,14 @@ is what runs today). It exists because ONE file — `config/universe.csv` — wa
 simultaneously the ranking pool, the price-panel column set and the order-gate
 buy whitelist, so "what is liquid enough to consider" and "what may be bought"
 could not be told apart, and neither could be wider than a hand-maintained list.
+
+**Scheduled activation, not current state.** A guarded one-shot systemd job is
+armed for **Fri 2026-09-11 17:30 ET**. It waits for that Friday's 17:00 cohort
+artifact, temporarily enters cohort mode only to run the normal price path, and
+persists the mode only after all gates pass. In particular, this activation
+requires zero `pending_history` and zero `eligible_unscoreable` names after the
+repair. A hold removes its own override and leaves `fixed_list` in force. See
+[`OPERATOR_MANUAL.md`](OPERATOR_MANUAL.md) §2a for status, dry-run, and rollback.
 
 | Question | Who answers | Where it lives | Cadence |
 | --- | --- | --- | --- |
@@ -260,7 +270,7 @@ rule becomes a hard field on the thesis record and/or a governance guardrail:
 | Entry zone | defined buy-price range; never chase **above** it — cheaper never blocks | `entry_zone` + `[trade_management] no_chase`/`chase_tol_sigma`. ⚠️ **NOT ENFORCED ANYWHERE since 2026-08-14** — `fast_loop.apply_chase_guard` was its only implementation and went with the executor. The keys remain as the documented default for a judgement the SESSION makes; `brief()` and `terrain()` carry the entry zone. This clause was documented as enforced from the start and wired NOWHERE until 2026-07-28, so state the current answer plainly: it is guidance, not a gate |
 | Stop loss | defined + enforced, **volatility-adjusted** (below recent swing low / ATR mult) — *not* IBD's flat 2–3% (too tight for volatile momentum names) | `stop`; governance auto-exits on breach |
 | Profit targets | tiered at **multiples of risk** (~2.2R / 4R), vol-scaled so reward:risk ≥ 2:1 holds for any name — *not* a fixed 5/10% (unreachable at 2:1 for a high-vol mover) | `targets: [t1, t2]` |
-| Moving-average exit | exit if close < short-term MA (e.g. 21-day), even if stop not hit | daily fast-loop check (Schwab price history) |
+| Moving-average exit | exit if close < short-term MA (e.g. 21-day), even if stop not hit | daily slow-loop check (moomoo price panel) |
 | Position size | ≤ **10% / name** (IBD "full" = 10%; most trades ½–¾) | `target_weight`, capped in guardrails |
 | Reward:risk | ≥ **2:1** = (target−entry)/(entry−stop) | **store validation gate** — reject bad-geometry theses on write |
 
@@ -275,11 +285,10 @@ down/sideways tape**, so new entries are gated on market regime. The design is
 
 - **Mechanical floor = the ON switch (backtestable, non-negotiable).** No new
   entries unless the broad market passes a mechanical trend test (SPX/QQQ > 50-day
-  MA) **and** VIX ≤ `[regime].vix_ceiling` (wired 2026-07-09: live Schwab `$VIX`
-  quote, FRED VIXCLS fallback; both down → gate skipped fail-open so a data
-  outage can't force cash). Computed from **Schwab** — the load-bearing trend
-  gate has **no FRED dependency**. Pure code, provable against history, immune
-  to narrative.
+  MA) **and** VIX ≤ `[regime].vix_ceiling` (FRED `VIXCLS`; unavailable data
+  skips only the VIX ceiling fail-open so an outage cannot force cash). The
+  trend floor is computed from the moomoo daily panel; FRED supplies the VIX
+  input only. Pure code, provable against history, immune to narrative.
 - **Agent overlay = the OFF switch only (judgment; veto / downsize).** A tiny
   nightly read may *veto or downsize* on context the numbers can't see ("CPI
   tomorrow → stand down"; "macro-driven tape, stock-specific edge suppressed"). It
@@ -372,7 +381,8 @@ on a timer, with nobody watching**. Three things make that work:
    wanted.
 2. ~~**Analyst-data source**~~ — RESOLVED: Finnhub free (recommendation trends +
    earnings surprises) + Alpaca free (news). Paid consensus estimates deferred.
-3. ~~**Regime approach**~~ — RESOLVED: mechanical floor (ON, Schwab-computed) +
+3. ~~**Regime approach**~~ — RESOLVED: mechanical floor (ON, moomoo-panel trend
+   plus FRED VIX) +
    agent overlay (OFF-only); **v1 deterministic-only**, agent overlay in v2.
 4. ~~**Single edge vs. blend**~~ — RESOLVED (revised): **hybrid dual momentum**
    is the edge (relative rank + absolute trend). PEAD was the first pass and was
@@ -486,7 +496,7 @@ on a timer, with nobody watching**. Three things make that work:
       (the ordered droplet runbook).
 - [x] **Intraday exit monitor** (`scripts/market_monitor.py`) — the always-on
       stop-loss / take-profit watcher the daily loops couldn't be. Polls live
-      Schwab quotes for held names every ~15s during RTH, checks vs. each name's
+      moomoo quotes for held names every ~15s during RTH, checks vs. each name's
       stored stop/targets, and fires the headless executor (`prompts/exit.md`) to
       market-sell on a breach (fractional sells are allowed; native stops are NOT
       — RH blocks stops on sub-1-share positions). Stopped-out names get a cooldown

@@ -143,10 +143,10 @@ What replaced the failure mode: if the feed does break, you learn from the daily
 from the monitor's "feed down — stops unwatched" alert, rather than from a
 calendar. See §5 for what the alerts mean.
 
-The one thing worth knowing: moomoo data flows through **OpenD** on
-`127.0.0.1:11111`, which is **shared with the sibling repo `moomoo-vol-desk`**.
-Never start a second one. If prices go stale, check OpenD is up before anything
-else: `systemctl status opend`.
+The one thing worth knowing: moomoo data flows through one local **OpenD**
+gateway on `127.0.0.1:11111`. This repo is its primary consumer; only the small
+`moomoo-data-collector` workload also uses it. Never start a second gateway. If
+prices go stale, check OpenD is up before anything else: `systemctl status opend`.
 
 ---
 
@@ -286,7 +286,7 @@ read access to your book. Subscribe to both in the ntfy app.
 | **"weekly tuner FAILED"** | the off-box tuner errored | Usually the `LEDGER_TOKEN` PAT expired → §4. Nothing unsafe; it just stops learning. |
 | **"<job> — NEVER RAN / STALE"** | a scheduled job stopped leaving evidence | "NEVER RAN" = probably not scheduled, check `crontab -l`. "STALE" = it ran before and stopped; check that job's log. |
 | **cron failure** (ERR-trap) | a scheduled job errored | Check the log it names in `logs/`. Most often OpenD is down or logged out — `systemctl status opend`. |
-| **"feed down — stops unwatched"** | the intraday monitor can't get quotes | The moomoo feed is down — check OpenD (`systemctl status opend`; it's shared with `moomoo-vol-desk`). Until fixed your stops aren't auto-watched; eyeball positions if you care. |
+| **"feed down — stops unwatched"** | the intraday monitor can't get quotes | The moomoo feed is down — check OpenD (`systemctl status opend`). Until fixed your stops aren't auto-watched; eyeball positions if you care. |
 | **"ledger backup FAILED"** | off-box backup push failed | Usually transient (network). If it repeats, check the box has push access to `agentic-trader-ledger`. |
 | **"signal panel gap"** | the moomoo panel couldn't collect | OpenD (moomoo) likely logged out — see §4. Non-urgent: it just skips that week's data. |
 
@@ -371,10 +371,10 @@ Setting it to a guess hands back spend the broker may still be counting — whic
 is exactly the defect corrected on 2026-09-09 (OPSLOG: *"a 7-day timer was
 handing back quota the broker may still be counting"*).
 
-**moomoo / OpenD re-login** (if you got a "signal panel gap" alert): the moomoo
-session is shared with the `moomoo-vol-desk` project and needs a one-time SMS code
-when it logs out. This lives in that project's setup — re-run its OpenD login
-(`~/moomoo-vol-desk` SETUP). Verify with:
+**moomoo / OpenD re-login** (if you got a "signal panel gap" alert): the local
+OpenD session needs a one-time SMS code when it logs out. Use this system's
+documented OpenD login procedure; do not rely on the inactive `moomoo-vol-desk`
+repository. Verify with:
 ```
 /usr/bin/python3 -c "import sys; sys.path.insert(0,'src'); from adapters.moomoo.client import quote_ctx; c=quote_ctx(); print(c.get_market_snapshot(['US.AAPL'])[0]); c.close()"
 ```
@@ -498,8 +498,8 @@ this setup is the pull request:
 ## 6. Checking that everything's healthy
 
 - **Market feed:** `systemctl status opend` — OpenD is the moomoo gateway and the
-  single point of failure for prices and intraday quotes. Shared with
-  `moomoo-vol-desk`; never start a second instance.
+  single point of failure for prices and intraday quotes. Never start a second
+  instance.
 - **Dashboard** (portfolio, equity curve): **dash.ethobs.uk** (login = `DASH_USER`/
   `DASH_PASS` from `.env`). Locally: `.venv/bin/python dashboard/app.py` → 127.0.0.1:8787.
 - **Recent cron activity:** `tail logs/slow.log logs/fast.log logs/signals.log`
