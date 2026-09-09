@@ -338,6 +338,20 @@ def live_quotes(tickers, ctx=None):
                     "open": rec.get("open_price"),
                     "high": rec.get("high_price"),
                     "low": rec.get("low_price"),
+                    # ⛔ THE FEED'S OWN CLOCK (2026-09-09). This record always
+                    # carried `update_time` and this function threw it away,
+                    # while snapshot_ohlc — reading the IDENTICAL record 60
+                    # lines up — uses it and errors when it is absent. Without
+                    # it the stop watcher cannot tell a live price from a
+                    # three-day-old one: on 2026-09-07 (Labor Day) OpenD
+                    # answered successfully with Friday's closes, the monitor
+                    # compared them to every stop, found no breach, and logged a
+                    # healthy tick. A stale feed silently disables the stop.
+                    # Passed through RAW and uninterpreted: its timezone is
+                    # undocumented and unresolved, so the only safe use is
+                    # comparing it against ITSELF over time — see
+                    # market_monitor._feed_stalled().
+                    "ts": rec.get("update_time"),
                 }
     finally:
         if own:

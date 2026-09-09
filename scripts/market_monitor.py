@@ -708,6 +708,65 @@ def _selftest() -> None:
           "and alert-only when not armed")
 
 
+def newest_feed_ts(quotes: dict):
+    """The newest `update_time` across the whole book, or None. Pure.
+
+    A string compare is a time compare here: moomoo stamps
+    `YYYY-MM-DD HH:MM:SS[.ffffff]`, which sorts lexicographically in
+    chronological order. That matters, because it means this never has to
+    PARSE the value — and therefore never has to know its timezone, which is
+    undocumented and unresolved (`20:02:19` on a shut market is equally
+    consistent with 16:02 ET stamped UTC and 20:02 ET).
+    """
+    best = None
+    for blk in (quotes or {}).values():
+        ts = (blk or {}).get("ts")
+        if not ts:
+            continue
+        ts = str(ts)
+        if best is None or ts > best:
+            best = ts
+    return best
+
+
+def feed_stalled(st: dict, newest, limit: int) -> bool:
+    """Has the feed's OWN clock stopped advancing? Mutates st['feed']. -> bool.
+
+    ⛔ WHY THIS COMPARES THE FEED AGAINST ITSELF, NOT AGAINST OUR CLOCK.
+    The failure being caught is a successful response carrying stale prices —
+    `QuoteFeedError` and the feed-down ladder only fire when the CALL fails,
+    so a wedged-but-answering OpenD reads as perfectly healthy. Checking
+    freshness against wall-clock time needs `update_time`'s timezone, which is
+    not documented anywhere and which an earlier attempt at this treated as a
+    blocker. It is not one: a wedged feed is a timestamp that stops moving, and
+    you do not need to know what timezone a clock is in to see it is not
+    ticking. This is therefore immune to that ambiguity, to DST, and to
+    half-day closures alike.
+
+    BOOK-WIDE, NEVER PER-SYMBOL. A single thin name can legitimately go minutes
+    without a print, so per-symbol this would cry wolf constantly. If NOTHING
+    in the entire book has printed in `limit` consecutive polls of a supposedly
+    open market, that is the feed, not the market.
+
+    One mechanism, both real cases: a market holiday (frozen at the previous
+    session's close) and OpenD wedging mid-session (frozen at the minute it
+    hung). `limit` is counted in POLLS, so it scales with poll_secs.
+    """
+    f = st.setdefault("feed", {})
+    if newest is None:
+        # No symbol carried a timestamp. Do NOT call that a stall: a feed that
+        # never reports one would then look permanently wedged and the ladder
+        # would restart forever. Absent is unknown; unknown is not evidence.
+        f["stalls"] = 0
+        return False
+    if f.get("newest") == newest:
+        f["stalls"] = int(f.get("stalls", 0)) + 1
+    else:
+        f["newest"] = newest
+        f["stalls"] = 0
+    return f["stalls"] >= limit
+
+
 def _last_price(block: dict):
     """Extract a usable mark from one quote block, or None.
 
@@ -2198,6 +2257,21 @@ def check_once(cfg, client) -> int:
         # Do NOT swallow: signal the main loop so it rebuilds the client and, if
         # the feed stays wedged, exits for a clean systemd restart + phone alert.
         raise QuoteFeedError(str(e)) from e
+
+    # ⛔ A SUCCESSFUL CALL IS NOT A FRESH ONE. Raised BEFORE any trigger is
+    # evaluated, so a stale price can never satisfy a stop or a target — that
+    # is the whole point. It goes through QuoteFeedError deliberately: the
+    # existing ladder already rebuilds the context, alerts, and finally exits
+    # for a clean systemd restart, which is exactly the right response to a
+    # wedged feed and needs no second alerting path. See feed_stalled().
+    if feed_stalled(st, newest_feed_ts(quotes),
+                    int((cfg.get("monitor") or {}).get("feed_stall_polls", 4))):
+        _save(STATE, st)
+        raise QuoteFeedError(
+            f"feed timestamp has not advanced across "
+            f"{st['feed']['stalls']} polls (newest {st['feed'].get('newest')!r}) "
+            f"— the call succeeded but the prices are stale, so no stop or "
+            f"target may be evaluated against them")
 
     # persist the marks we just paid for — the dashboard + equity logger value
     # positions from this file (via src/marks.py) instead of stale snapshots
