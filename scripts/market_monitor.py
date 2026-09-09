@@ -102,11 +102,66 @@ def _now_et():
 
 
 def market_open(now=None) -> bool:
+    """Weekday + 09:30-16:00 ET. PURE — no I/O, no calendar, deliberately.
+
+    ⛔ DO NOT PUT THE HOLIDAY LOOKUP IN HERE. This stays pure because that is
+    what makes it testable at any instant without a network; the calendar is a
+    separate, cached gate applied in main() alongside it — see trading_day().
+    """
     now = now or _now_et()
     if now.weekday() >= 5:
         return False
     mins = now.hour * 60 + now.minute
     return 9 * 60 + 30 <= mins < 16 * 60          # 09:30–16:00 ET
+
+
+# Definitive calendar answers only, keyed by ET date; None is never cached here.
+_TRADING_DAY: dict = {}
+_TRADING_DAY_TRIED: dict = {}
+_TRADING_DAY_RETRY_SECS = 900
+
+
+def trading_day(ctx=None, now=None) -> bool:
+    """Is TODAY a US trading session? -> bool. Asked ONCE per ET date.
+
+    market_open() tests weekday and clock alone, so on a market HOLIDAY the
+    monitor polled all day. `get_market_snapshot` on a shut market returns the
+    PREVIOUS session's close, so it compared Friday's prices to every stop and
+    every target: on 2026-09-07 (Labor Day) that fired MU's target1 against a
+    stale 1016.59 and placed a real order the broker queued, which the 10:35
+    session had to cancel by hand. Recorded in OPSLOG 2026-09-07 as a hole left
+    open on the judgement that a shut market "can breach no stop" — true of the
+    stop, but not of the ORDER it placed, nor of the take-profit latch that
+    order then held spent.
+
+    ⛔ UNKNOWN MEANS RUN, NEVER HALT. `is_trading_day` returns None for "could
+    not tell" — and a calendar lookup that fails must never be what stops the
+    stop watcher from running on a real trading day. None therefore falls back
+    to exactly today's behaviour (weekday + clock), which needs no network and
+    is never wrong about a weekend; this call only adds weekday HOLIDAYS on top.
+
+    ASKED ONCE PER DAY, not once per poll: the loop ticks every 15s, so asking
+    per tick would be ~1,500 calls a day against a paced API. Only a definitive
+    True/False is cached; an inconclusive answer is retried, but no more often
+    than every 15 minutes, so a transient failure cannot silently disable the
+    gate for the rest of the day. Reuses the monitor's open context the way
+    fetch_prices does, so it costs no extra connection.
+    """
+    d = (now or _now_et()).date().isoformat()
+    if d in _TRADING_DAY:
+        return _TRADING_DAY[d]
+    last = _TRADING_DAY_TRIED.get(d)
+    if last is not None and (time.monotonic() - last) < _TRADING_DAY_RETRY_SECS:
+        return True                      # unknown and asked recently — behave as before
+    ans = mmp.is_trading_day(d, ctx=ctx)
+    if ans is None:
+        _TRADING_DAY_TRIED[d] = time.monotonic()
+        return True                      # unknown -> run, never halt
+    _TRADING_DAY[d] = bool(ans)
+    if not _TRADING_DAY[d]:
+        print(f"  market CLOSED today ({d}) — holiday per the exchange calendar; "
+              f"not polling, so no stop or target is evaluated against a stale feed")
+    return _TRADING_DAY[d]
 
 
 # ⛔ BROKER STATES IN WHICH NOTHING HAS EXECUTED. Anything NOT listed here —
@@ -2913,7 +2968,7 @@ def main():
         # the cron ERR trap on a pass that actually succeeded. The Schwab client this
         # replaced needed no teardown, which is why the try/finally is new here.
         try:
-            if not args.force and not market_open():
+            if not args.force and not (market_open() and trading_day(ctx=client)):
                 print("market closed — nothing to do (use --force to test)")
                 return
             try:
@@ -2931,7 +2986,7 @@ def main():
     cooldown = int(m.get("feed_alert_cooldown_mins", 30)) * 60
     consec_fail = 0
     while True:
-        if market_open():
+        if market_open() and trading_day(ctx=client):
             try:
                 check_once(cfg, client)
                 consec_fail = 0                       # healthy tick — reset the counter
