@@ -1161,15 +1161,127 @@ def _save(path, obj):
     either the old file or the new one, never a partial one.
     """
     MON.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=2))
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")   # per-process: never collide
+    with open(tmp, "w") as fh:
+        fh.write(json.dumps(obj, indent=2))
+        fh.flush()
+        os.fsync(fh.fileno())        # durable BEFORE the rename, not just atomic
     os.replace(tmp, path)
 
 
 FIRED_KEY = {"stop": "stop", "target1": "t1", "target2": "t2"}
 
+# ⛔ TWO QUESTIONS, TWO ANSWERS (2026-09-08). `sold`/`placed` above answers
+# "should the recorders run?" and deliberately FAILS TOWARDS RECORDING — an
+# unknown status counts as sold, because an unrecorded fill is worse than an
+# idempotent recorder running for nothing (selftest, "unknown status must fail
+# towards recording"). The LATCH asks a different question — "is this trigger
+# spent?" — where failing towards yes means NEVER SELLING THIS AGAIN. One
+# variable cannot carry both failure directions, and reusing it for both is why
+# a REJECTED order marked its level spent and dropped out of the retry path.
+LIVE_AT_BROKER = frozenset({"queued", "new", "unconfirmed", "pending", "confirmed"})
+TERMINAL_NO_FILL = frozenset({"cancelled", "canceled", "rejected", "failed", "voided"})
 
-def latch_fired(st, act, sold, placed):
+
+def _cum_qty(row) -> float:
+    """Executed quantity on an order row; unreadable/absent -> 0.0."""
+    for k in ("cumulative_quantity", "filled_quantity", "quantity_filled"):
+        v = row.get(k)
+        if v not in (None, ""):
+            try:
+                q = float(v)
+            except (TypeError, ValueError):
+                return 0.0
+            return q if math.isfinite(q) and q > 0 else 0.0
+    return 0.0
+
+
+def classify_outcome(row) -> str:
+    """One order row -> 'filled' | 'live' | 'terminal_no_fill' | 'ambiguous'. Pure.
+
+    ⛔ AMBIGUOUS IS A REAL OUTCOME, NOT A DEFAULT. A partial fill, an unknown
+    status, or a terminal status carrying a NONZERO executed quantity all mean
+    "something happened and we do not know how much". None of those may latch
+    the trigger (that strands the residual) and none may be blindly retried
+    (that places a second order). They pause the symbol and page a human.
+    """
+    status = str(row.get("status", "")).strip().lower()
+    qty = _cum_qty(row)
+    if status in TERMINAL_NO_FILL:
+        # A cancel/reject that nonetheless executed part of the order is NOT a
+        # clean failure — retrying it would sell the remainder twice.
+        return "ambiguous" if qty > 0 else "terminal_no_fill"
+    if status == "filled":
+        return "filled"
+    if status in LIVE_AT_BROKER:
+        # A live order that has already partially executed is ambiguous for the
+        # same reason; a clean live order latches so we do not duplicate it.
+        return "ambiguous" if qty > 0 else "live"
+    return "ambiguous"          # partially_filled, absent, or anything unknown
+
+
+def outcome_sets(rows, act_symbols) -> dict:
+    """Split the executor's rows into the four sets the monitor acts on. Pure.
+
+    `retry` also carries every triggered symbol the executor said NOTHING about
+    — silence is a failure to act, not a success.
+    """
+    by = {"filled": set(), "live": set(), "terminal_no_fill": set(), "ambiguous": set()}
+    seen = set()
+    for r in rows:
+        sym = r.get("symbol")
+        if not sym:
+            continue
+        seen.add(sym)
+        by[classify_outcome(r)].add(sym)
+    # a symbol reported twice with conflicting outcomes takes the WORST one
+    for sym in list(by["filled"] | by["live"]):
+        if sym in by["ambiguous"] or sym in by["terminal_no_fill"]:
+            by["filled"].discard(sym)
+            by["live"].discard(sym)
+    return {"latch": by["filled"] | by["live"],
+            "retry": by["terminal_no_fill"] | (set(act_symbols) - seen),
+            "paused": by["ambiguous"],
+            "live": by["live"], "filled": by["filled"]}
+
+
+def sweep_pending(st, unresolved, now_dt, window_s: int) -> list:
+    """Expire latches held for orders that were LIVE and never became fills.
+
+    ⛔ WHY THIS EXISTS. A `queued` order latches its trigger so the next poll
+    cannot place a second one against it — correct. But nothing re-reads that
+    order afterwards. If the broker CANCELS it minutes later (exactly what
+    happened to MU into the Labor Day close, 2026-09-07), the trigger stays
+    marked spent and the position is never sold again. A latch taken on the
+    promise of a fill must expire when the fill does not arrive.
+
+    Expiry does NOT retry: the order may still be live, and a blind retry is a
+    duplicate sale. It un-latches, PAUSES the symbol and pages a human. Pure
+    apart from the caller's dicts; returns the symbols it expired.
+    """
+    out = []
+    for sym, p in list((st.get("pending") or {}).items()):
+        try:
+            age = (now_dt - datetime.fromisoformat(str(p.get("ts")))).total_seconds()
+        except (TypeError, ValueError):
+            age = window_s + 1        # unparseable stamp -> treat as expired, never stuck
+        if age < window_s:
+            continue
+        tier = p.get("tier")
+        tiers = st.get("fired", {}).get(sym) or {}
+        if tier and tiers.get(tier) == p.get("level"):
+            tiers.pop(tier, None)                 # the promised fill never came
+            if not tiers:
+                st.get("fired", {}).pop(sym, None)
+        st["pending"].pop(sym, None)
+        u = unresolved.setdefault(sym, {"fails": 0, "escalated": False})
+        u["paused"] = True
+        u["reason"] = "a live exit order never became a fill within the window"
+        out.append(sym)
+    return out
+
+
+def latch_fired(st, act, latch_syms, _unused=None):
     """Mark every acted-on trigger SPENT AT ITS LEVEL and persist it NOW.
 
     ⛔ THIS MUST RUN THE INSTANT `sold`/`placed` ARE KNOWN — BEFORE the
@@ -1193,10 +1305,23 @@ def latch_fired(st, act, sold, placed):
     check_once calls it again after the wake/cooldown work without harm.
     """
     for t in act:
-        if t["symbol"] in sold or t["symbol"] in placed:
-            tier = FIRED_KEY.get(t["reason"])
-            if tier:                     # unknown reason: never crash the tick
-                st["fired"].setdefault(t["symbol"], {})[tier] = _lvl(t["level"])
+        if t["symbol"] not in latch_syms:
+            continue
+        tier = FIRED_KEY.get(t["reason"])
+        if tier is None:
+            # ⛔ NEVER SILENTLY. An unrecognised reason means this trigger can
+            # never be marked spent, so it re-fires every poll — the STX defect
+            # by another route. It must not crash the tick either. Say so.
+            print(f"  🚨 unlatchable trigger: {t['symbol']} reason={t['reason']!r} "
+                  f"is not in FIRED_KEY — it CANNOT be marked spent and will "
+                  f"re-fire every poll")
+            notify("Unlatchable exit trigger",
+                   f"{t['symbol']} fired with reason {t['reason']!r}, which has no "
+                   f"latch tier. The level cannot be marked spent, so it will "
+                   f"re-trigger on every poll. Investigate before the next exit.",
+                   tags="rotating_light")
+            continue
+        st["fired"].setdefault(t["symbol"], {})[tier] = _lvl(t["level"])
     _save(STATE, st)
     return st
 
@@ -2031,6 +2156,28 @@ def check_once(cfg, client) -> int:
     # Resetting `fired` here is what sold MU twice on 2026-09-07.
     st["book_asof"] = prod.as_of
     st["fired"] = carry_fired(st.get("fired"))
+    # ⛔ EXPIRE LATCHES TAKEN ON A PROMISE. Runs EVERY tick, before any trigger
+    # evaluation, so a live order the broker later cancelled cannot hold its
+    # trigger spent forever with the position unsold. See sweep_pending().
+    _unresolved_now = st.setdefault("unresolved", {})
+    _expired = sweep_pending(st, _unresolved_now, datetime.now(timezone.utc),
+                             int((cfg.get("monitor") or {}).get("pending_resolve_secs", 600)))
+    if _expired:
+        _save(STATE, st)
+        print(f"  🚨 latch expired (live order never filled): {', '.join(sorted(_expired))}"
+              f" — un-latched and PAUSED, not retried")
+        store.append_journal({"event": "exit_latch_expired",
+                              "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                              "symbols": sorted(_expired),
+                              "reason": "an exit order was accepted but never became a "
+                                        "fill inside the window; the latch it was holding "
+                                        "is released and the symbol paused for a human"})
+        notify("🚨 Exit order never filled — latch released",
+               f"{', '.join(sorted(_expired))}: the broker accepted an exit order but it "
+               f"never filled. The take-profit/stop is no longer marked spent, and the "
+               f"symbol is PAUSED rather than retried — the order may still be live. "
+               f"Check Robinhood (948184924) before reissuing.",
+               tags="rotating_light")
 
     # A wake can name a symbol we do NOT hold -- that is most of the point ("tell
     # me if NVDA reaches X"). Quoting only holdings would leave those wakes
@@ -2452,12 +2599,29 @@ def check_once(cfg, client) -> int:
         placed = {s["symbol"] for s in _placed_rows
                   if str(s.get("status", "")).strip().lower() in UNEXECUTED_STATES}
         sold = {s["symbol"] for s in _placed_rows} - placed
+        # ⛔ THE LATCH IS COMPUTED SEPARATELY FROM THE RECORDER SETS (2026-09-08).
+        # See classify_outcome(): `sold`/`placed` fails TOWARDS recording, the
+        # latch must fail AWAY from "never sell this again".
+        _out = outcome_sets(_placed_rows, {t["symbol"] for t in act})
         # ⛔ LATCH FIRST — BEFORE THE RECORDERS AND BEFORE EVERY PUSH. Nothing
         # below this line may run while a completed sale is still unrecorded:
         # the whole block that follows is bookkeeping and reporting, and on
         # 2026-09-08 an exception inside it re-armed a spent take-profit and
         # sold STX four times. See latch_fired().
-        latch_fired(st, act, sold, placed)
+        latch_fired(st, act, _out["latch"])
+        # ⛔ A LATCHED LIVE ORDER MUST EXPIRE. A `queued` order latches so we do
+        # not place a second against it — but if the broker cancels it later,
+        # nothing re-reads that, and the trigger would stay spent forever with
+        # the position unsold. Record it; _sweep_pending() below un-latches and
+        # pauses it if it has not become a fill within the window.
+        _pend = st.setdefault("pending", {})
+        for t in act:
+            if t["symbol"] in _out["live"]:
+                _pend[t["symbol"]] = {"tier": FIRED_KEY.get(t["reason"]),
+                                      "level": _lvl(t["level"]), "ts": ts}
+            else:
+                _pend.pop(t["symbol"], None)      # resolved one way or the other
+        _save(STATE, st)
         # ⛔ THE MONITOR RECORDS THE EXIT, NOT THE EXECUTOR (2026-09-03). The
         # executor writes staging files; the four recorder scripts run HERE,
         # whichever path sold, so a filled sale with a silent ledger/snapshot
@@ -2490,7 +2654,38 @@ def check_once(cfg, client) -> int:
                    f"positions.json catch up at the next reconcile; if it is "
                    f"cancelled, the position keeps its current size.",
                    tags="hourglass")
-        failed = {t["symbol"] for t in act} - sold - placed
+        # ⛔ AMBIGUOUS OUTCOMES PAUSE, THEY DO NOT RETRY (2026-09-08). A partial
+        # fill, an unknown status, or a cancel/reject carrying a nonzero executed
+        # quantity all mean "something executed and we do not know how much".
+        # Retrying sells the remainder twice; latching strands it unsold. The
+        # only correct move is to stop touching the symbol and page a human, who
+        # reconciles against the broker and reissues for the remainder only.
+        for sym in sorted(_out["paused"]):
+            u = unresolved.setdefault(sym, {"fails": 0, "last_try_ts": ts,
+                                            "escalated": False})
+            u["paused"] = True
+            u["last_try_ts"] = ts
+            u["reason"] = "ambiguous executor outcome — partial/unknown fill"
+        if _out["paused"]:
+            store.append_journal({"event": "exit_outcome_ambiguous", "ts": ts,
+                                  "symbols": sorted(_out["paused"]),
+                                  "reason": "partial fill, unknown status, or a terminal "
+                                            "status with nonzero executed quantity — the "
+                                            "symbol is PAUSED, not retried and not latched"})
+            notify("🚨 EXIT OUTCOME AMBIGUOUS — position PAUSED",
+                   f"{', '.join(sorted(_out['paused']))}: the order partly executed or "
+                   f"returned an unknown status. It is NOT latched and will NOT be "
+                   f"retried automatically — retrying could sell the remainder twice. "
+                   f"Reconcile against Robinhood (948184924) and reissue for the "
+                   f"remainder only.",
+                   tags="rotating_light")
+        # ⛔ `retry` COMES FROM classify_outcome, NOT from set arithmetic on
+        # `sold`/`placed`. A REJECTED order used to land in `placed`, which both
+        # latched it AND cleared its backoff, so a breach the broker refused was
+        # never tried again (INTC hit exactly this twice on 2026-09-08, on the $1
+        # fractional minimum). A terminal no-fill means nothing executed and
+        # nothing is live: it is the ordinary retry path.
+        failed = _out["retry"] - _out["paused"]
         if failed:
             notify("Exit executor result",
                    f"FAILED/skipped (backing off, will retry): {', '.join(sorted(failed))}"
@@ -2508,7 +2703,12 @@ def check_once(cfg, client) -> int:
                 u["paused"] = True
             if sym in escalate:
                 u["escalated"] = True
-        for sym in sold | placed:        # the breach was acted on either way
+        # ⛔ ONLY A LATCHED OUTCOME CLEARS THE RETRY STATE. It used to be
+        # `sold | placed`, and `placed` included rejected/cancelled/failed —
+        # so a refused order had its fail count, backoff and escalation wiped
+        # as though the breach had been handled. Ambiguous symbols keep their
+        # `paused` flag; terminal no-fills keep their backoff.
+        for sym in _out["latch"]:
             unresolved.pop(sym, None)
         if escalate:                                 # one loud manual-intervention push
             notify("🚨 MANUAL INTERVENTION — stop-sell failing",

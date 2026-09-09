@@ -18,6 +18,7 @@ RUNS UNDER /usr/bin/python3 (3.10) — the monitor's interpreter. Keep it
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -92,13 +93,51 @@ def run_step(script: str, staging: str, *, rh: Path = RH, runner=subprocess.run,
     return {"script": script, "rc": rc, "tail": tail, "archived": archived}
 
 
+def usable(path: Path) -> bool:
+    """True iff this staging file exists AND holds parseable, non-empty JSON.
+
+    ⛔ PRESENCE IS NOT CONTENT (2026-09-08). record_exits used to ask only
+    Path.exists(), so a ZERO-BYTE orders_dump.json counted as a staging file:
+    reconcile_ledger.py ran against it and failed with "malformed
+    orders_dump.json" on EVERY exit cycle, paging the operator about a file
+    that held nothing. This is the same defect class as the corrupt
+    overrides.json that silently reverted all 12 stops — the repo's own rule is
+    that ABSENT is not a finding but PRESENT-BUT-UNREADABLE is the event.
+    """
+    try:
+        raw = path.read_text().strip()
+    except OSError:
+        return False
+    if not raw:
+        return False
+    try:
+        return json.loads(raw) not in (None, [], {})
+    except ValueError:
+        return False
+
+
 def record_exits(sold: set, *, rh: Path = RH, runner=subprocess.run,
                  ts: str | None = None) -> dict:
-    """Run every recorder whose staging file exists. -> summary for the monitor."""
-    present = {name for _, name in STEPS if (rh / name).exists()}
-    if (rh / SNAPSHOT_INPUT).exists():
-        present.add(SNAPSHOT_INPUT)
+    """Run every recorder whose staging file exists AND is readable.
+
+    An unreadable staging file is REPORTED, never silently skipped: it is kept
+    on disk for a human, and its name comes back in `warnings` so the monitor
+    pages instead of quietly doing nothing.
+    """
+    unusable, present = [], set()
+    for name in [n for _, n in STEPS] + [SNAPSHOT_INPUT]:
+        pth = rh / name
+        if not pth.exists():
+            continue                      # absent is a real state, not a finding
+        if usable(pth):
+            present.add(name)
+        else:
+            unusable.append(name)
     p = plan(set(sold), present)
+    for name in unusable:
+        p["warnings"].append(
+            f"{name} EXISTS but is empty or unparseable — the recorder that "
+            f"consumes it was NOT run and the file is kept for inspection")
     ran, failed = [], []
     for script, name in STEPS:
         if script not in p["run"]:
