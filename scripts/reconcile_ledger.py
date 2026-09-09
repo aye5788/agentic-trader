@@ -95,21 +95,76 @@ def unidentified_fills(rh_orders: list) -> list:
             if o.get("state") == "filled" and not o.get("order_id")]
 
 
-def heal_event(missing: list, ts: str) -> dict | None:
-    """Build one execution event (source='reconcile') for the missing orders,
-    or None if nothing is missing."""
-    if not missing:
-        return None
-    fills = [{
-        "symbol": o.get("symbol"),
-        "side": o.get("side"),
-        "order_id": o.get("order_id"),
-        "avg_price": o.get("average_price"),
-        "quantity": o.get("quantity"),
-        "status": "filled",
-    } for o in missing]
-    return {"event": "execution", "source": "reconcile", "ts": ts,
-            "n": len(fills), "fills": fills}
+def fill_ts(order) -> tuple[str | None, str]:
+    """An order's OWN execution time, and where that time came from. Pure.
+
+    ⛔ A HEALED FILL IS JOURNALLED UNDER THE TIME IT EXECUTED, NEVER UNDER THE
+    TIME WE NOTICED IT. This is the whole point of the function. `ts=now()` was
+    used here until 2026-09-09, and because snapshot_freshness.latest_fill_ts()
+    reads the MAX ts across execution events, healing any old order pushed the
+    "newest fill" to the current instant — so a snapshot written seconds EARLIER
+    read as predating it. The monitor then treats ownership as unverified: the
+    ownership filter goes off, take-profits are suppressed and the trailing pass
+    is skipped on EVERY tick, for the whole book, until something rewrites the
+    snapshot. It does not self-heal, because the journal ts never moves.
+    It fired THREE times off one 2026-07-08 18:43 batch whose members were healed
+    one at a time: MU on 09-04 (7 min), AMD on 09-08, and DELL on 09-09, healed
+    at 13:53:41 — 41 minutes, suppressing MRVL's target1 seven times until the
+    10:35 session happened to refresh the snapshot.
+
+    Preference order, most to least authoritative: the LAST execution's own
+    timestamp, then `executed_at`, then the order's last transaction, then when
+    it was created.
+
+    ⚠️ `executed_at` is in that list because of REAL DATA, not theory: the
+    exit path's older hand-reshaped dumps (e.g. the 2026-09-03 archive) carry
+    the fill time under that name and none of the other three. Reshaped and raw
+    dumps are the same evidence — `_normalize_order` already reconciles their
+    id/quantity names, and this reconciles their clock.
+    """
+    execs = order.get("executions") if isinstance(order, dict) else None
+    if isinstance(execs, list):
+        stamps = [str(e.get("timestamp")) for e in execs
+                  if isinstance(e, dict) and e.get("timestamp")]
+        if stamps:
+            return max(stamps), "executions"
+    for key in ("executed_at", "last_transaction_at", "created_at"):
+        if isinstance(order, dict) and order.get(key):
+            return str(order[key]), key
+    return None, "unknown"
+
+
+def heal_events(missing: list, fallback_ts: str) -> list:
+    """One execution event per healed order, each under that order's OWN fill
+    time. Pure. Oldest first, so the journal stays chronological.
+
+    ONE EVENT PER ORDER, not one event for the batch: healed orders can span
+    months (that is what "missing" means), and a single event can carry only one
+    ts, so a batch event would have to lie about every fill but one.
+
+    `fallback_ts` is used ONLY when the broker gave no timestamp at all. That
+    fails toward "recent", which is the fail-SAFE direction here — it stands the
+    monitor down rather than letting it act on ownership it cannot date — and
+    `ts_source` records that it happened so a recurrence is diagnosable instead
+    of mysterious.
+    """
+    events = []
+    for o in missing:
+        stamp, source = fill_ts(o)
+        events.append({
+            "event": "execution", "source": "reconcile",
+            "ts": stamp or fallback_ts, "ts_source": source, "n": 1,
+            "fills": [{
+                "symbol": o.get("symbol"),
+                "side": o.get("side"),
+                "order_id": o.get("order_id"),
+                "avg_price": o.get("average_price"),
+                "quantity": o.get("quantity"),
+                "status": "filled",
+                "placed_at": o.get("created_at"),
+            }],
+        })
+    return sorted(events, key=lambda e: str(e["ts"]))
 
 
 def main() -> None:
@@ -135,11 +190,13 @@ def main() -> None:
 
     missing = missing_orders(journaled, rh_orders)
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    ev = heal_event(missing, ts)
-    if ev:
+    events = heal_events(missing, fallback_ts=ts)
+    for ev in events:
         store.append_journal(ev)
-        print(f"reconcile: healed {ev['n']} unjournaled fill(s): "
-              + ", ".join(f["order_id"] for f in ev["fills"]))
+    if events:
+        print(f"reconcile: healed {len(events)} unjournaled fill(s): "
+              + ", ".join(f'{e["fills"][0]["order_id"]}@{e["ts"]}'
+                          f'({e["ts_source"]})' for e in events))
 
     # Verify: after healing, NO filled RH order may be absent from the journal,
     # and no filled RH order may lack a usable order_id (those can never heal).
@@ -183,13 +240,46 @@ def _selftest() -> None:
     miss = missing_orders({"o1"}, rh)
     assert [m["order_id"] for m in miss] == ["o2"], miss   # o1 known, o3 not filled
 
-    ev = heal_event(miss, ts="2026-07-20T15:00:00+00:00")
+    FALLBACK = "2026-07-20T15:00:00+00:00"
+    evs = heal_events(miss, fallback_ts=FALLBACK)
+    assert len(evs) == 1, evs
+    ev = evs[0]
     assert ev["event"] == "execution" and ev["source"] == "reconcile"
     assert [f["order_id"] for f in ev["fills"]] == ["o2"]
     assert ev["fills"][0]["side"] == "sell" and ev["fills"][0]["avg_price"] == 190.0
 
-    # nothing missing -> no event
-    assert heal_event([], ts="2026-07-20T15:00:00+00:00") is None
+    # nothing missing -> no events
+    assert heal_events([], fallback_ts=FALLBACK) == []
+
+    # A HEALED FILL WEARS ITS OWN EXECUTION TIME, NEVER THE HEAL TIME.
+    # Regression pin for 2026-09-09: ts=now() here suppressed take-profits
+    # book-wide for 41 minutes. executions > executed_at > last transaction >
+    # created, and the source is recorded on the event.
+    dated = {"order_id": "o9", "symbol": "DELL", "side": "buy", "state": "filled",
+             "quantity": "0.0098", "average_price": "428.70",
+             "created_at": "2026-07-08T15:00:02.114000Z",
+             "last_transaction_at": "2026-07-08T15:00:04.32Z",
+             "executions": [{"timestamp": "2026-07-08T15:00:04.32Z"}]}
+    got = heal_events([dated], fallback_ts=FALLBACK)[0]
+    assert got["ts"] == "2026-07-08T15:00:04.32Z", got["ts"]
+    assert got["ts_source"] == "executions", got["ts_source"]
+    assert got["fills"][0]["placed_at"] == "2026-07-08T15:00:02.114000Z"
+    assert fill_ts({k: v for k, v in dated.items() if k != "executions"}) == (
+        "2026-07-08T15:00:04.32Z", "last_transaction_at")
+    # the reshaped exit-path dumps carry it under executed_at and nothing else
+    assert fill_ts({"executed_at": "2026-09-02T19:18:00.912Z"}) == (
+        "2026-09-02T19:18:00.912Z", "executed_at")
+    assert fill_ts({"created_at": "2026-07-08T15:00:02.114000Z"}) == (
+        "2026-07-08T15:00:02.114000Z", "created_at")
+    # no broker timestamp at all -> fall back, and SAY SO
+    bare = heal_events([{"order_id": "o0", "symbol": "ZZ", "side": "buy"}],
+                       fallback_ts=FALLBACK)[0]
+    assert bare["ts"] == FALLBACK and bare["ts_source"] == "unknown", bare
+    # a batch spanning months keeps every fill's own date, oldest first
+    span = heal_events([dated, {"order_id": "oN", "symbol": "MU", "side": "buy",
+                                "created_at": "2026-09-09T13:50:00Z"}],
+                       fallback_ts=FALLBACK)
+    assert [e["ts"][:10] for e in span] == ["2026-07-08", "2026-09-09"], span
     # re-run idempotency: once o2 is journaled, it is no longer missing
     assert missing_orders({"o1", "o2"}, rh) == []
 
@@ -214,8 +304,8 @@ def _selftest() -> None:
     dup_miss = missing_orders(set(), dup_dump)
     assert [m["order_id"] for m in dup_miss] == ["dup1"], dup_miss
 
-    print("selftest OK: journaled_order_ids, missing_orders (dedup), heal_event "
-          "(idempotent), unidentified_fills")
+    print("selftest OK: journaled_order_ids, missing_orders (dedup), "
+          "heal_events (own-clock, idempotent), fill_ts, unidentified_fills")
 
 
 if __name__ == "__main__":

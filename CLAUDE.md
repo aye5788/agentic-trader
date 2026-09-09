@@ -624,18 +624,31 @@ research_store/rh/positions.json
                         ⛔ THAT GUARANTEE COVERS ONE WRITER, NOT THE PATH
                         (2026-09-04). Freshness is snapshot_ts vs the newest
                         JOURNALLED execution ts — any ts, not just this fill's —
-                        and exit_bookkeeping runs reconcile_ledger LAST, which
-                        journals back-filled orders under ts=now(). So a healed
-                        fill lands AFTER the snapshot every time, and a correct
-                        snapshot reads stale. It happened 2 seconds after the MU
-                        exit: a 2026-07-08 buy back-filled under today's clock
-                        stood the monitor down — ownership filter off,
-                        take-profits suppressed, trailing pass skipped on every
-                        tick — and does NOT self-heal, because the journal ts
-                        never moves. Repair is any refresh_broker_snapshot();
-                        the fix to heal_event's timestamp is OPEN. See OPSLOG
-                        2026-09-04, "a July fill back-filled under today's
-                        clock".
+                        and exit_bookkeeping runs reconcile_ledger LAST. It used
+                        to journal back-filled orders under ts=now(), so a healed
+                        fill landed AFTER the snapshot every time and a correct
+                        snapshot read stale — ownership filter off, take-profits
+                        suppressed, trailing pass skipped on every tick, and NOT
+                        self-healing, because the journal ts never moves. It fired
+                        three times off ONE 2026-07-08 18:43 batch: MU (09-04,
+                        7 min), AMD (09-08), DELL (09-09, 41 min — it suppressed
+                        MRVL's target1 seven times until the 10:35 session
+                        refreshed the snapshot).
+                        ⛔ FIXED 2026-09-09: reconcile_ledger.fill_ts() stamps a
+                        healed fill with the time it EXECUTED, from the broker's
+                        own record (executions > executed_at > last_transaction_at
+                        > created_at), and heal_events() emits ONE EVENT PER
+                        ORDER because a batch spans months and one ts can only
+                        describe one fill. now() survives ONLY as the fallback
+                        when the broker sent no clock at all, recorded as
+                        ts_source="unknown" — verified across 39 archived orders,
+                        where it never fires. The 08-19 guard is untouched: a
+                        genuinely recent fill against an old snapshot still reads
+                        stale. See OPSLOG 2026-09-09, "a healed fill wore the
+                        clock of the day we noticed it".
+                        ⚠️ The three rows ALREADY in the ledger still carry the
+                        wrong day; the code no longer adds more. Repairing them
+                        is a ledger edit, not a code fix — ask first.
                         The EXIT path reaches it via scripts/record_fills.py +
                         research_store/rh/broker_state.json — RUN BY THE MONITOR
                         (src/exit_bookkeeping.py, 2026-09-03), not by the

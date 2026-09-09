@@ -8,6 +8,81 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-09 — a healed fill wore the clock of the day we noticed it
+
+The fifth exit-path defect of the day, and the one that had already been found
+TWICE and written down as open both times (2026-09-04, and again in this file's
+own "known and not fixed" list). It fired again this morning while the earlier
+four were being fixed.
+
+### What it did
+
+`reconcile_ledger.main()` computed `ts = datetime.now()` once and handed it to
+`heal_event()`, which stamped every back-filled fill with it. The fill's own
+execution time — which the broker sends, three different ways — was discarded.
+
+`snapshot_freshness.latest_fill_ts()` takes the MAX `ts` across execution
+events, so healing ANY old order pushes "the newest fill" to the current
+instant. `exit_bookkeeping` runs the reconcile LAST, after the snapshot is
+written, so the healed row always lands a few seconds AFTER it. A snapshot
+written seconds earlier therefore reads as predating the newest fill, and
+`market_monitor` treats ownership as unverified: ownership filter off,
+take-profits suppressed, trailing pass skipped on every tick, book-wide. It
+does not self-heal, because the journal ts never moves — only a
+`refresh_broker_snapshot()` clears it, which is why it always looked like it
+had fixed itself by the time anyone looked.
+
+### One July batch, three separate stand-downs
+
+Every occurrence traces to the SAME 2026-07-08 18:43 order batch, whose members
+were healed one at a time on different days:
+
+| healed | journalled as | true fill time | stand-down |
+| --- | --- | --- | --- |
+| MU | 2026-09-04T19:48:19Z | 2026-07-08T18:43:10Z | 7 min |
+| AMD | 2026-09-08T17:20:13Z | 2026-07-08T18:43:01Z | — |
+| DELL | 2026-09-09T13:53:41Z | 2026-07-08T18:43:05Z | 41 min |
+
+Today's suppressed MRVL's target1 seven times between 13:53:57 and 14:35:03 —
+first trigger 238.77, eventual fill 238.01 — and cleared only because the 10:35
+session happened to refresh the snapshot as one of its first acts.
+
+### The fix
+
+`fill_ts(order)` returns the order's own execution time AND where it came from:
+`executions[].timestamp` > `executed_at` > `last_transaction_at` > `created_at`.
+`heal_events()` replaces `heal_event()` and emits ONE EVENT PER ORDER, oldest
+first — a batch of healed orders spans months by definition, and one `ts` can
+only describe one fill, so a batch event would have to lie about all but one.
+
+⛔ `now()` survives ONLY as the fallback for an order the broker sent no clock
+for at all, and that case is recorded on the event as `ts_source="unknown"`
+rather than being indistinguishable from a real stamp. That direction is the
+fail-SAFE one — it stands the monitor down rather than letting it act on
+ownership it cannot date — but it must be visible when it happens.
+
+⚠️ `executed_at` is in that chain because of REAL DATA, not theory. Replaying
+all 39 filled orders in the retained dumps found one — DELL
+`6a987668`, in the hand-reshaped 2026-09-03 archive — carrying its fill time
+under that name and under none of the other three. A fixture would have missed
+it; the archives did not.
+
+### What was checked, given a selftest cannot answer this
+
+Verified against the retained broker dumps and the real
+`snapshot_freshness` module, not a suite: all 39 filled orders resolve to a true
+timestamp with zero fallbacks; the July DELL order heals to 2026-07-08; a
+current snapshot no longer reads stale after an old heal; and — the one that
+matters most — the 2026-08-19 guard still FIRES, with a genuinely recent fill
+against a two-day-old snapshot still reported stale. Loosening that guard would
+have been a worse bug than the one being fixed.
+
+⚠️ NOT done, deliberately: the three rows already in the journal still carry
+the wrong day. Rewriting them is a ledger edit on the live trade record, not a
+code fix, and it is the principal's call. They no longer cause a stand-down
+(each has been superseded by a later real fill), but they do misattribute three
+July trades to September for anything that counts executions by day.
+
 ## 2026-09-09 — the stop watcher could not tell a live price from a three-day-old one
 
 Four fixes, all on the exit path, all found by starting from one GitHub issue
