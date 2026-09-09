@@ -42,7 +42,7 @@ should hold. That is the whole point of the change — the code defines the fiel
 and the guardrails; the agent plays.
 
 **It is still fenced.** Every order goes through the same gate as everything
-else: kill switch, per-order size cap, universe whitelist, `live_approved`,
+else: kill switch, per-order size cap, buy eligibility (§2a), `live_approved`,
 `HALT_ENTRIES`, the automatic drawdown halt, and any active `rule_out`. The gate
 runs in the harness, so the agent cannot skip it by forgetting. Everything on
 that list except the kill switch refuses BUYS ONLY — blocking a sell would strip
@@ -170,6 +170,72 @@ code writes it.
 
 ---
 
+## 2a. The candidate universe — two modes, and how to switch or unswitch
+
+**Right now the system runs `mode = "fixed_list"`: the curated 150 names in
+`config/universe.csv`. Nothing about that has changed.** The paragraphs below
+describe the *other* mode, which is built, tested and **not switched on**.
+
+**What the second mode does.** Instead of the agent choosing from a 150-name
+list somebody typed, it chooses from an **eligibility cohort** — the whole US
+market, rescreened every Friday on 20-day dollar turnover above the same
+market-cap and liquidity floors already in use, written to
+`research_store/universe/cohort.json`. Two things stay true regardless:
+
+- The agent still cannot buy a name the **momentum signal cannot score**. A
+  freshly discovered name is a *research lead* until we have 252 sessions of
+  its closes, and moomoo rations that history at 100 symbols per window.
+- A name **you already hold** is always sellable and always watched, even after
+  it drops out of the cohort. Eligibility only ever restricts *buying*.
+
+**To switch it on** — this is the only change required, and it is one line in
+your box-local override (`config/strategy.local.toml`, git-ignored, wins over
+the committed config):
+
+```toml
+[universe]
+mode = "cohort"
+```
+
+**To roll back**, delete that line (or set it to `"fixed_list"`). Nothing else
+has to be undone: `config/universe.csv` is still maintained every Friday by the
+same job, so the old path is live and current at all times. There is no data
+migration either way.
+
+**Before switching it on, check the cohort actually exists and looks sane:**
+
+```
+cd /opt/agentic-trader
+.venv/bin/python - <<'EOF'
+import sys, datetime as dt; sys.path.insert(0, "src")
+import cohort, strategy
+from pathlib import Path
+cfg = strategy.load()
+v = cohort.active_view({**cfg, "universe": {**cfg["universe"], "mode": "cohort"}},
+                       Path("."), dt.date.today())
+print("as_of      :", v["as_of"])
+print("freshness  :", v["freshness"])
+print("counts     :", v["counts"])
+print("provenance :", v["provenance"])
+print("top 10     :", v["scoreable"][:10])
+EOF
+```
+
+If that prints a traceback saying `CohortInvalid`, **do not switch modes** — it
+is telling you the artifact is absent, stale, incomplete or malformed, and in
+cohort mode that state refuses every new buy (it still allows every sell). The
+weekly Friday screen is what produces it; a missing cohort means the screen has
+not yet run since this was installed.
+
+**What you would see afterwards.** The Friday universe push is unchanged. The
+agent's `brief()` gains a `cohort` block showing how many names are eligible,
+how many are scoreable, how many are waiting on history, and how fresh the
+screen is. `research_store/universe/history_state.json` says, per name, why it
+is or is not scoreable — `complete`, `seasoning`, `deferred_quota`,
+`repairing`, or `failed_provider`.
+
+---
+
 ## 3. When your phone buzzes (ntfy alerts) — what each means
 
 **Two topics, on purpose.** Trade alerts (fills, stops, P&L) go to your main ntfy
@@ -224,6 +290,52 @@ already runs) backfills any universe member whose history cannot satisfy the
 momentum window, and skips names too young to have it. A healthy panel costs
 zero history quota. Use `--backfill` for a deliberate rebuild, not for routine
 gaps.
+
+**Check the history quota, or re-establish it** (only if the log says capacity is
+UNKNOWN, or the repair reports everything deferred):
+
+```
+cd /opt/agentic-trader
+/usr/bin/python3 -c "
+import sys; sys.path.insert(0,'src')
+from adapters.moomoo.prices import history_quota
+print(history_quota())"
+```
+
+That reads moomoo's own meter (`get_history_kl_quota`) — it is free, changes
+nothing, and is the authority the system prefers above everything else. A
+healthy reply looks like `{'ok': True, 'used': 11, 'remain': 89, ...}` and there
+is **nothing for you to do**: the next run uses it automatically.
+
+If it says `ok: False`, OpenD is down or logged out — fix that first
+(`systemctl status opend`), because with no telemetry the system falls back to
+its own local record, and that record deliberately **never expires on a timer**.
+That is the safe direction, but it means capacity can read as zero and the
+repair will defer everything rather than risk overspending a quota it cannot
+see.
+
+**Only if telemetry cannot be restored** and you have established by other means
+that the window really is clear, write an operator-confirmed reset:
+
+```
+cat > research_store/universe/history_quota_reset.json <<'EOF'
+{"effective_from": "2026-09-10",
+ "confirmed_by": "aaron",
+ "reason": "get_history_kl_quota read 0/100 at 09:15 ET"}
+EOF
+```
+
+Requests recorded **before** `effective_from` stop counting; requests after it
+count normally — so this grants **one** fresh window, not a standing exemption,
+and the file records who confirmed it and why. An undated or unattributed file
+is **ignored**: a reset that cannot say *from when* is not evidence of anything.
+
+⚠️ **Do not "fix" a deferral by inventing a window duration.**
+`[history_acquisition] rolling_window_days` exists, is unset, and should stay
+unset unless you have genuinely documented moomoo's real rolling-window length.
+Setting it to a guess hands back spend the broker may still be counting — which
+is exactly the defect corrected on 2026-09-09 (OPSLOG: *"a 7-day timer was
+handing back quota the broker may still be counting"*).
 
 **moomoo / OpenD re-login** (if you got a "signal panel gap" alert): the moomoo
 session is shared with the `moomoo-vol-desk` project and needs a one-time SMS code

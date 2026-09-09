@@ -692,7 +692,18 @@ def main() -> None:
         sys.exit("price cache is empty — fetch_prices likely failed (auth/lock/"
                  "network); refusing to rebuild the book off empty data. "
                  "Fix the fetch, then run scripts/fetch_prices.py --force.")
-    names = [t for t in pd.read_csv(REPO / "config" / "universe.csv")["ticker"] if t in closes]
+    # ⛔ THE SAME POOL THE AGENT SEES. `screen.ranking_pool()` is the one
+    # implementation of "which names are ranked": the curated CSV under
+    # [universe] mode = "fixed_list", the SCOREABLE eligibility cohort under
+    # "cohort". `score` is a PERCENTILE, so the pool defines it — this loop and
+    # `candidates()`/`universe()` ranking different name sets does not produce
+    # "almost the same" numbers, it produces different numbers for every name in
+    # common. That divergence shipped once already (OPSLOG 2026-08-20, the tilt
+    # and the pooled ETFs); reading the CSV directly here would re-open it.
+    from agent_env import screen as _screen                  # noqa: PLC0415
+    _pool = _screen.ranking_pool(cfg, REPO)
+    print(f"  {_pool['note']}")
+    names = [t for t in _pool["tickers"] if t in closes]
     asof = closes.index[-1]
     spy = closes["SPY"]
 

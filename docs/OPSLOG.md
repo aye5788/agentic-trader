@@ -8,6 +8,283 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-09 — a 7-day timer was handing back quota the broker may still be counting
+
+**⚠️ STILL NOT ACTIVATED.** `[universe] mode` remains `fixed_list`. This corrects
+the quota machinery described in the entry below, which had shipped in the same
+working tree and had not run.
+
+**The defect.** `repeat_credit_days = 7` was being used as the effective
+CAPACITY window. Once a recorded request aged past seven days,
+`charged_symbols()` dropped it, `remaining_new_distinct` ROSE, and the planner
+could schedule a fresh 100 distinct symbols on day 8 — while moomoo may still
+have been counting the originals. The window's real duration is **undocumented**;
+this repo's own readings only bracket it (100/100 on 2026-07-29, 5/100 on
+2026-09-06). Seven was a number we chose.
+
+**And the reasoning written to justify it was inverted.** The module, the config
+and the docs all said a shorter assumed window is conservative because it "only
+schedules fewer names". Under capacity subtraction the opposite holds: a SHORTER
+window counts FEWER symbols as charged, which leaves MORE remaining capacity,
+which schedules MORE new names. That claim is removed everywhere it appeared —
+`src/quota_planner.py`, `config/strategy.toml`, `CLAUDE.md`,
+`docs/DATA_SOURCES.md` and the paragraph above.
+
+**The source of truth was sitting in the SDK the whole time.**
+`OpenQuoteContext.get_history_kl_quota(get_detail)` returns `(used, remain,
+detail_list)` — the broker's own account-wide count of what is spent, what
+remains, and WHICH symbols it is currently counting. It is unmetered and
+read-only. The 100/100 and 5/100 readings this repo already recorded came from
+exactly this endpoint; nothing had ever wrapped it. It is now
+`adapters.moomoo.prices.history_quota()`.
+
+**Resolution order, strictest first** (`quota_planner.capacity_state`):
+
+| # | Source | What it establishes |
+| --- | --- | --- |
+| 1 | **Broker telemetry** | `remain` IS the capacity; `detail_list` names the free repeats. The only account-wide-correct answer. |
+| 2 | **Operator-confirmed reset** | `history_quota_reset.json` — dated + attributed, or ignored. Requests before `effective_from` stop counting. |
+| 3 | **Documented `rolling_window_days`** | Opt-in, unset by default, accurately named. |
+| 4 | **Local ledger, NO expiry** | Every recorded request still counts, for ever. |
+| 5 | **Unknown** | ZERO new distinct-symbol capacity. |
+
+⛔ **An absent ledger is UNKNOWN, not "unused".** It previously read as "first
+run on this box — full capacity assumed", the most permissive possible reading
+of missing information. A fresh clone, a restored droplet or a deleted file all
+produce that state, and none of them says anything about what the ACCOUNT has
+already spent. A reset is self-limiting: requests made after it count normally,
+so it grants one fresh window rather than a standing exemption.
+
+**`--backfill` had no quota accounting at all.** It sliced its candidate list at
+100 and called `daily_panel()` directly — no awareness of what the window had
+already spent, and **no ledger entry afterwards**, so an operator backfill was
+invisible to the next automatic repair, which then planned as if the quota were
+untouched. Both paths now go through one `authorized_history_fetch()`:
+resolve capacity → plan → issue only authorised symbols → **merge into the
+panels** → record exactly what was attempted. `--backfill` keeps its own
+candidate ORDERING; it does not keep its own accounting. A structural test
+asserts there is exactly one `daily_panel()` call site in `scripts/fetch_prices.py`.
+
+**And "no expiry" had a back door, found on a third pass.** `record()` still
+pruned every ledger entry older than 90 days — justified in its own docstring as
+"far beyond any plausible rolling window", which cannot be true of a window
+deliberately treated as unknown. The sequence:
+
+1. the ledger holds 100 symbols charged on day 0;
+2. day 91, telemetry down, no reset, no documented window;
+3. a REPEAT is still allowed — it costs no distinct-symbol unit — and calls
+   `record()`;
+4. `record()` prunes the other 99 while writing that one repeat;
+5. the next capacity read counts 1 charged symbol and grants **99** new slots;
+6. history requests go out with no telemetry, no confirmed reset and no
+   documented window behind them.
+
+Reproduced against the removed implementation before fixing it: `entries
+surviving = 1 | remaining_new = 99`. Under the correction: `entries surviving =
+100 | remaining_new = 0`.
+
+Retention is now an act of an **authority**, never of a clock.
+`capacity_state()` returns the retention its own branch permits —
+`{"keep_only": …}` from telemetry that supplied per-symbol detail,
+`{"prune_before": …}` from a reset's `effective_from` or a documented window,
+and **`{}` from every branch that inferred capacity locally or could not
+establish it**. `record(**cap["retention"])` therefore cannot prune under
+UNKNOWN even by accident, because the branch that returns UNKNOWN returns no
+permission. Deciding capacity in one place and retention in another is what let
+the 90-day prune contradict the policy the same module was documenting.
+
+⚠️ A second, quieter half of the same defect: `record()` dropped any entry whose
+timestamp would not parse (`except ValueError: continue`) while
+`charged_symbols()` deliberately **counts** such an entry — unknown-when is
+conservative. The two halves disagreed, so the entry counted against the budget
+until the next write and then vanished, leaking a slot. Both sides now treat
+unknown-when as still-counting.
+
+Growth is stated honestly rather than managed by a timer: the file is a dict
+keyed by ticker, so it is bounded by the number of DISTINCT symbols this box has
+ever requested — a few thousand at most. Unbounded-in-time is not
+unbounded-in-size, and an over-large ledger only makes the planner more
+conservative.
+
+⚠️ **Scope, stated accurately.** Only telemetry is account-wide. The local
+ledger sees this repository alone, so the fallback path is a lower bound and is
+not described as account-wide safe. Per the operator the former sibling
+`moomoo-vol-desk` process is inactive, this repo is the primary consumer, and
+`~/moomoo-data-collector` is not material unless it starts calling
+`request_history_kline`.
+
+**Cost of the fallback, accepted deliberately:** with no telemetry and no reset
+the system under-utilises the quota rather than risk overspending it. On a clean
+install that means the repair does nothing until an operator establishes
+capacity — loudly, with the command in `docs/OPERATOR_MANUAL.md` §2b.
+
+---
+
+## 2026-09-09 — the candidate universe was a list somebody typed; eligibility, scoring and selection are now three things
+
+**⚠️ BUILT, TESTED, AND NOT SWITCHED ON.** `[universe] mode` is still
+`fixed_list`. Everything below describes machinery that exists and is exercised;
+the live path today is unchanged — the curated 150 in `config/universe.csv`,
+rescreened every Friday. Flipping that one key is the entire activation and
+setting it back is the entire rollback. This entry is written up front because a
+retirement or an activation that is *reported* without being *real* is the
+failure this log keeps recording (the adaptive layer, 2026-09-09 above; the ETF
+sleeve, 2026-08-20).
+
+### What was wrong
+
+`config/universe.csv` answered **three different questions at once**:
+
+- what is liquid and safe enough for this book to consider (ELIGIBILITY),
+- what the price panel can actually score (SCOREABILITY),
+- and — because it *is* `governance.whitelist()` — what may be bought.
+
+Conflating them had two consequences that had already cost real things:
+
+1. **The agent's hunting ground could only ever be 150 names a human typed.**
+   The Friday screen chose them, but it chose them *into a fixed-size file*, so
+   discovery was structurally capped at the size of the list rather than at what
+   the market offered. The 2026-09-06 entry measured the older version of this:
+   1,084 names met both standing policies and were invisible, and 23 of the 30
+   that did make it were human seeds — "the screen did not find them; Aaron did."
+2. **A name became BUYABLE the moment it was admitted, and SCOREABLE possibly
+   never.** The whitelist and the ranking pool were one file, so the 08-28 and
+   09-04 cohorts (SLB, ARM, ABNB, SNPS, HPE) were buyable while
+   `momentum.compute()` was silently dropping them. That was patched on
+   2026-09-06 by repairing history on the daily path; it was not patched at the
+   level of *saying which state a name is in*.
+
+### The state model
+
+Three questions, three owners, and only the third is a judgement:
+
+| Question | Answered by | Artifact | Cadence |
+| --- | --- | --- | --- |
+| Eligibility | deterministic code (V2 liquidity screen) | `research_store/universe/cohort.json` | weekly, Fri 17:00 |
+| Scoreability | deterministic code (the panel's own window test) | `research_store/universe/history_state.json` | daily, with the price append |
+| Selection | **the agent** | its decisions + the journal | every session |
+
+`src/cohort.py` composes them into three statuses:
+
+- **`scoreable`** — eligible AND rankable. A candidate, and **buyable**. The
+  agent may pick any of them; `candidates(n)` is an attention budget, not a
+  boundary.
+- **`eligible_pending_history`** — eligible, no score yet: too recently listed
+  for a 252-session window, or queued behind the history quota.
+- **`eligible_unscoreable`** — eligible, and the repair failed for a provider
+  reason.
+
+The last two are **research leads**: visible, and **not buyable**. That is not
+bureaucracy. This book is cross-sectional momentum, so a name with no computed
+score cannot be compared against the names that have one — buying it would put
+prose where the measurement goes, which is the substitution the whole
+`rule_out`/theme-cap episode of 2026-08-21 was about.
+
+⛔ **A held name that leaves the cohort stays sellable, stays priced, stays
+monitored and keeps its stop.** Eligibility is an ENTRY question. In cohort mode
+the price panel carries every held symbol unconditionally, which removes the
+consequence `_validate_before_write` could previously only warn about (a held
+name dropping out of the CSV and its price column going quiet).
+
+### The quota model, stated properly for the first time
+
+The reason the cohort can be broad and the candidate set cannot grow as fast:
+
+| Call | Metered against the 100-symbol cap? | Batch |
+| --- | --- | --- |
+| `request_history_kline` | ✅ 100 DISTINCT symbols / rolling window, ACCOUNT-WIDE | per symbol |
+| `get_market_snapshot` | ❌ | ≤400 codes |
+| `get_stock_screen` / `get_stock_filter` | ❌ | ≤200 rows |
+| `get_stock_basicinfo` | ❌ | whole market |
+
+So ranking the whole US market weekly costs **zero** history quota, and giving
+~200 names a 252-session window **cannot be done in one run at all**.
+`src/quota_planner.py` rations it deterministically: **held positions first**
+(the only tier justified by risk rather than opportunity — a position whose
+momentum cannot be computed is one the book cannot rotate out of or rank),
+then **nearest-to-scoreable** (measured as the actual shortfall against the
+window, so one quota unit buys a candidate now rather than maybe), then
+**cohort rank**, ties broken by ticker so no name starves by flapping between
+runs. The previous order was `repair[:quota]` off an alphabetical set — stable,
+but expressing no priority at all.
+
+Two ceilings, both enforced: the distinct-NEW-symbol count moomoo actually
+meters, and an **absolute per-run request count**, so a wrong ledger cannot
+raise the budget. Overflow is deferred **with a reason**; quota exhaustion is a
+scheduling outcome and never truncates or replaces the cohort. A repeat inside
+the window costs no new unit (verified 2026-09-06).
+
+⛔ **AND THE FIRST VERSION OF THIS PARAGRAPH WAS WRONG, WHICH IS WHY THE ENTRY
+BELOW EXISTS.** It said the credit window was "deliberately shorter than the
+real one, because assuming it longer overspends while assuming it shorter merely
+schedules fewer names". That is backwards under capacity subtraction, and the
+7-day timer it described was reclaiming capacity nobody had confirmed was free.
+See **"a 7-day timer was handing back quota the broker may still be counting"**
+below.
+
+### Fail-closed, and where it deliberately does not
+
+The eligibility artifact carries **provenance and per-name evidence** — the
+turnover, cap and venue that made each name eligible — so `validate()` re-tests
+the claim against the configured floors at READ time. A curated list could only
+assert. Absent, malformed, stale (past `cohort_max_age_days`, which tolerates
+exactly one missed Friday), incomplete-coverage, wrong-schema, empty, or
+below-floor all **refuse every new BUY with a named reason and touch no exit**.
+A bad screen leaves the previous `cohort.json` **byte-identical** and never
+falls back to another discovery mechanism — same rule `_v2_pond` already applies
+to the CSV.
+
+⛔ **The RANKING path deliberately has the opposite polarity.**
+`screen.ranking_pool()` falls back to the CSV on a degraded cohort *and says
+so*, because ranking is information: refusing to rank would blind the session
+rather than protect it. So during a cohort outage the agent still sees a
+ranking while every buy is refused. Those two behaviours are meant to differ;
+do not "fix" one to match the other.
+
+### One pool as well as one signal
+
+2026-08-20 fixed half of a divergence — the agent's list was ranked without the
+residual tilt and with 18 ETFs pooled in. The other half was that each caller
+read the name list itself. `score` is a PERCENTILE, so the pool DEFINES it: two
+callers ranking slightly different sets do not produce almost the same numbers,
+they produce different numbers for every name in common. `screen.ranking_pool()`
+is now the one implementation, and `candidates()`, `universe()` and
+`scripts/slow_loop.py` all call it.
+
+### A regression caught by READING, not by running
+
+Folding `require_whitelist` into a single `buy_eligibility()` silently disabled
+the order gate's **off-list announcement**, which is live precisely when the
+blocking whitelist is OFF — a real configuration, asserted in that hook's own
+selftest. Found by reading the selftest rather than executing it (the box
+forbids running these suites, and this is the kind of thing that makes the rule
+worth keeping). Split into `eligible_symbols()` (always computes) and
+`buy_eligibility()` (respects the switch).
+
+### Migration
+
+`config/universe.csv` is **not deleted** and keeps being maintained every Friday
+by the same job, so the rollback path stays live and current rather than
+becoming a stale artifact nobody has exercised. During migration both paths are
+produced on every run: the CSV proposal as before, and the cohort beside it — so
+that flipping the mode switches to something that has accumulated real weekly
+runs, not to something written for the first time on the day it goes live.
+
+Activation point: `[universe] mode = "cohort"` in `config/strategy.local.toml`.
+Rollback: delete that line. Nothing else.
+
+### What was NOT changed
+
+The momentum math, the residual tilt, `book_hold`/`book_band`, the weekly
+rotation, the stop/target geometry, the monitor, the exit path, the model pins,
+the prompts, and every account/order gate (agentic-account identity, kill
+switch, HALT_ENTRIES, live_approved, drawdown halt, per-order cap, rule-outs,
+cooldowns, finite-value checks). No concentration or theme limit was added —
+there still is none, and the only concentration limit remains the per-position
+cap in `config/mandate.toml`.
+
+---
+
 ## 2026-09-09 — a healed fill wore the clock of the day we noticed it
 
 The fifth exit-path defect of the day, and the one that had already been found

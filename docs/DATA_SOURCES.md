@@ -101,13 +101,65 @@ and `candidate_pond`, which since 2026-09-06 serve only the retained
 `screen_backend = "legacy_v1"` comparison path. **Everything below is available
 but UNWIRED.**
 
-Quota: `request_history_kline` is metered at **100 DISTINCT symbols per rolling
-window**; re-pulling a symbol already inside that window costs **0** (verified
-2026-09-06 — a second NVDA pull left `used_quota` unchanged). The window
-genuinely recycles: it read `100/100` on 2026-07-29 and `5/100` on 2026-09-06.
-⛔ Screening (`get_stock_screen`, `get_stock_filter`, `get_stock_basicinfo`,
-`get_market_snapshot`) is **entirely unmetered against that cap** — a weekly
-universe screen spends ZERO history quota.
+### 5.0 THE QUOTA MODEL — the constraint the candidate architecture is built on
+
+| Call | Metered against the 100-symbol cap? | Batch | Used for |
+| --- | --- | --- | --- |
+| `request_history_kline` | ✅ **100 DISTINCT symbols per rolling window, ACCOUNT-WIDE** | per symbol | history repair / `--backfill` |
+| `get_market_snapshot` | ❌ unmetered | **≤400 codes/call** | the daily OHLC append |
+| `get_stock_screen` (V2), `get_stock_filter` (V1) | ❌ unmetered | ≤200 rows | weekly discovery |
+| `get_stock_basicinfo` | ❌ unmetered | whole market | venue + listing dates |
+| `get_history_kl_quota` | ❌ unmetered | — | **reading the meter itself** |
+
+Everything unmetered still shares the **60 calls / 30 s** rate limit (V2's own
+documented limit is 10 req/30 s), so "unmetered" means "free of the history
+cap", not "free".
+
+- **ACCOUNT-WIDE** means the whole brokerage account, not this process. Other
+  consumers on the box would draw on the same 100.
+- Re-pulling a symbol already inside the rolling window costs **0** (verified
+  2026-09-06 — a second NVDA pull left `used_quota` unchanged), so a failed
+  repair is retried without compounding cost.
+- The window genuinely recycles — `100/100` on 2026-07-29, `5/100` on
+  2026-09-06 — but its **length is undocumented**, and nothing in this repo may
+  assume one.
+
+#### Where remaining capacity comes from
+
+⛔ **ASK THE BROKER; DO NOT RUN A TIMER.**
+`get_history_kl_quota(get_detail=True)` returns `(used, remain, detail_list)` —
+what is spent, what remains, and **which symbols are being counted**. Unmetered
+and read-only. The two readings above came from it. Wrapped as
+`adapters.moomoo.prices.history_quota()`; `src/quota_planner.py` resolves in
+this order: **broker telemetry → operator-confirmed reset → documented
+`rolling_window_days` → local ledger with no expiry → UNKNOWN (zero new
+capacity)**.
+
+⛔ **`repeat_credit_days` IS GONE, AND THE CLAIM THAT JUSTIFIED IT WAS
+BACKWARDS.** This page used to say a shorter assumed window was safer because it
+"merely schedules fewer names". Under capacity subtraction it is the reverse: a
+shorter window counts fewer symbols as charged, leaving MORE remaining capacity
+and scheduling MORE new names. The 7-day timer was reclaiming quota the broker
+may still have been counting. See OPSLOG 2026-09-09, "a 7-day timer was handing
+back quota the broker may still be counting".
+
+⚠️ **Only telemetry is account-wide.** The local ledger records this repository's
+requests alone, so the fallback path is a lower bound on true consumption and
+must not be described as account-wide safe.
+
+⛔ **THIS ASYMMETRY IS WHY "ELIGIBLE" AND "CANDIDATE" ARE DIFFERENT WORDS HERE.**
+A weekly screen can rank the whole US market for **zero** history quota, so the
+eligibility cohort can be broad. Giving ~200 of those names the 252-session
+window `momentum.compute()` needs **cannot be done in one run at all** — it is
+100 symbols per window, and only ~200 names fit in one unmetered snapshot call
+either way. So a newly discovered name is visible as a **research lead** before
+it is scoreable, and it is not buyable until the panel can score it. See
+`src/cohort.py` for the state model and `docs/STRATEGY.md` §2.
+
+⛔ **SNAPSHOT SCREENING IS NOT HISTORICAL MOMENTUM SCORING.** The V2 screen
+proves a name is liquid enough to consider; it says nothing about whether we
+hold 252 sessions of its closes. Treating a screen hit as a scored candidate is
+the exact substitution the two-tier design exists to prevent.
 
 ### 5a. The defining constraint: moomoo's EDGE feeds are SHALLOW
 

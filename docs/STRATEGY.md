@@ -28,10 +28,63 @@ it must be **strong relative to its peers** (cross-sectional rank) **and** in it
 6–12-month horizon; the absolute filter is what takes you to cash when the trend
 breaks, since long-only has no short leg to hedge you.
 
-## 2. Universe — the single-name pool, rescreened weekly
+## 2. Universe — eligibility, scoring, and selection are THREE things
 
 ⚠️ This section described **two parallel engines** until 2026-08-20. There is
 one: the single-name book. Equities only.
+
+⛔ **AND SINCE 2026-09-09 IT DESCRIBES TWO MODES, ONE OF WHICH IS NOT YET
+SWITCHED ON.** Read `[universe] mode` in `config/strategy.toml` — that key is
+the whole answer, and this page defers to it:
+
+| `mode` | what is your hunting ground |
+| --- | --- |
+| `fixed_list` (**what runs today**) | the curated 150 in `config/universe.csv` |
+| `cohort` | the persisted **eligibility cohort**, `research_store/universe/cohort.json` |
+
+**The distinction the cohort mode exists to draw**, because one file used to
+answer all three questions at once and that is what made the pool a list
+somebody typed:
+
+- **ELIGIBILITY** — *is this security liquid and safe enough to consider?* A
+  fact about the instrument, established weekly by the V2 liquidity screen over
+  the whole US market. Deterministic code decides it.
+- **SCOREABILITY** — *can `momentum.compute()` produce a number for it?* A fact
+  about **our price panel**, established daily by `fetch_prices.py`. Also
+  deterministic.
+- **SELECTION** — *which of the eligible, scored names should this book hold?*
+  **Yours.** Nothing in the eligibility or scoring layers picks a position.
+
+An eligible name that is **not scoreable** is a **research lead**: you can see
+it, read it and form a view on it, and you **cannot buy it**. That is not
+bureaucracy. This book is cross-sectional momentum — a name with no computed
+score cannot be compared against the names that have one, so buying it would
+mean choosing on prose where every other holding was chosen on the measurement.
+The order gate enforces this independently of anything you decide.
+
+Two states carry that: `eligible_pending_history` (too recently listed to have
+252 sessions, or its history is queued behind moomoo's 100-distinct-symbol
+quota — see §2a) and `eligible_unscoreable` (the history repair failed for a
+provider reason). `universe()` shows both, with reasons.
+
+⛔ **A name you HOLD that leaves the cohort is still sellable, still monitored,
+and still carries its stop.** Eligibility is an ENTRY question. Stops here are
+software, so a gate that could refuse an exit would strip an open position of
+its only protection.
+
+### 2a. Why the cohort can be broad and the candidate set cannot grow as fast
+
+moomoo's **screening is unmetered** but `request_history_kline` is capped at
+**100 distinct symbols per rolling window, account-wide** (shared with the
+sibling repo `moomoo-vol-desk`). So ranking the whole market weekly costs
+nothing, while giving ~200 names a 252-session window cannot be done in one run
+at all. `src/quota_planner.py` rations it — current holdings first, then the
+names closest to becoming scoreable, then cohort rank — and names past the
+budget are **deferred with a reason and retried**, never dropped. This asymmetry
+is the shape of the system, not a defect: it is exactly why "eligible" and
+"candidate" are different words here.
+
+### 2b. The curated list (what runs today)
 
 - **Single-name book** — the 150 in [`config/universe.csv`](../config/universe.csv),
   **rescreened every Friday** (17:00 ET) by `scripts/universe_refresh.py`. ⚠️ This
@@ -54,8 +107,11 @@ one: the single-name book. Equities only.
   `micro` / `spec` are tradeable but note them.
 - ~~**ETF sleeve**~~ — **DELETED 2026-08-20** (retired 08-16, positions sold
   08-17). ⛔ **You cannot buy a fund.** `config/etf_universe.csv` is gone, the
-  order gate's whitelist is the single-name universe alone, and a buy naming a
-  fund is refused like any other off-universe symbol. (A SELL is never refused.)
+  order gate's buy-eligibility set is single names alone in **either** mode
+  (the cohort's adds pass a positive market-cap test, which a genuine fund
+  fails because moomoo serves it no market cap, plus a denylist backstop), and
+  a buy naming a fund is refused like any other ineligible symbol. (A SELL is
+  never refused.)
   You will still see sector tickers in the price panel: the signal regresses
   each name on its sector to measure its own strength. That is read-only market
   data, not an instrument. The design
@@ -85,6 +141,14 @@ pooled into the same percentile — so the list the agent read could order the s
 names differently from the list the book was built from. One ranking now:
 `screen.rank_book()` and `scripts/slow_loop.py` both go through
 `residual.kwargs_from_config()`, and a selftest asserts the two agree.
+
+⛔ **AND ONE POOL, since 2026-09-09.** `score` is a PERCENTILE, so *who is in
+the pool defines it* — two callers ranking slightly different name sets do not
+produce almost the same numbers, they produce different numbers for every name
+in common. `screen.ranking_pool()` is the single implementation of "which names
+are ranked"; `candidates()`, `universe()` and `scripts/slow_loop.py` all call
+it. Fixing the signal in 2026-08-20 closed half of this; reading the pool from
+a file in each caller would have re-opened the other half.
 
 **Relative rank score** (no tunable weights — do not add any):
 - percentile-rank the *Return view* across the eligible universe → `p_ret`
@@ -212,7 +276,7 @@ after the gate stopped existing in one form and was removed in the other.**
   looking at the same number and deciding.
   What remains ENFORCED at the order gate, unbypassably: the kill switch,
   live_approved, HALT_ENTRIES, the automatic drawdown halt, the per-order cap,
-  the universe whitelist, and an active `rule_out`.
+  the buy-eligibility check (§2), and an active `rule_out`.
 
 ## 8. Execution — the sessions, with judgment
 
@@ -237,7 +301,9 @@ regardless of who is executing:
 4. Every order passes the PreToolUse order gate, which runs in the harness and
    cannot be skipped by forgetting. It refuses on the kill switch, `live_approved`,
    `HALT_ENTRIES`, the automatic drawdown halt, an active `rule_out`, the
-   per-order cap, the universe whitelist and shadow mode. **A sell is refused by
+   per-order cap, the buy-eligibility check (§2 — the curated list under
+   `mode = "fixed_list"`, the scoreable eligibility cohort under `"cohort"`)
+   and shadow mode. **A sell is refused by
    nothing but the kill switch** — stops here are software, so blocking a sell
    would remove a position's only protection.
 5. **Never** read-for-decision or write to any other account. Every non-Agentic

@@ -359,6 +359,71 @@ def live_quotes(tickers, ctx=None):
     return out
 
 
+def history_quota(ctx=None, detail: bool = True) -> dict:
+    """THE BROKER'S OWN ACCOUNT-WIDE HISTORY-QUOTA STATE. Read-only, UNMETERED.
+
+    -> {"ok": bool, "used": int, "remain": int, "charged": {TICKER, ...},
+        "detail_available": bool, "error": str|None}
+
+    ⛔ THIS IS THE SOURCE OF TRUTH FOR REMAINING DISTINCT-SYMBOL CAPACITY, and
+    it is the reason `src/quota_planner.py` no longer guesses. `remain_quota` is
+    the broker's own count of how many more DISTINCT symbols
+    `request_history_kline` will accept, and `detail_list` names the symbols
+    currently counted — so "which repeats are free" stops being our inference
+    about an undocumented window and becomes the server's answer.
+
+    ⛔ NOTHING HERE INFERS A WINDOW DURATION. The rolling window's length is
+    still undocumented and this call does not report it. That is fine, because
+    with telemetry we never need it: we ask what remains rather than computing
+    when something expired. The readings this repo already recorded — 100/100 on
+    2026-07-29, 5/100 on 2026-09-06 — came from exactly this endpoint, which is
+    how we know it recycles at all.
+
+    `wrapped by OpenQuoteContext.get_history_kl_quota(get_detail)`, which returns
+    `(ret, (used, remain, detail_list))` on success and `(ret, msg)` on failure —
+    two different shapes, so the arity is checked rather than unpacked blindly
+    (the same >2-tuple trap docs/DATA_SOURCES.md §5d records for other endpoints).
+
+    FAILS to `ok=False` on ANY problem and never raises. The caller must treat
+    `ok=False` as UNKNOWN capacity — never as zero used, and never as full
+    capacity. See `quota_planner.capacity_state`.
+    """
+    own = ctx is None
+    q = ctx or quote_ctx()
+    try:
+        out = q.get_history_kl_quota(get_detail=bool(detail))
+        if not isinstance(out, tuple) or len(out) != 2:
+            return {"ok": False, "used": None, "remain": None, "charged": set(),
+                    "detail_available": False,
+                    "error": f"unexpected reply shape {type(out).__name__}"}
+        ret, payload = out
+        if ret != RET_OK or not isinstance(payload, tuple) or len(payload) != 3:
+            return {"ok": False, "used": None, "remain": None, "charged": set(),
+                    "detail_available": False, "error": str(payload)[:200]}
+        used, remain, details = payload
+        charged, detail_ok = set(), False
+        if isinstance(details, (list, tuple)):
+            # `bGetDetail` is optional server-side, so an EMPTY detail list is
+            # ambiguous: it can mean "no symbols charged" or "details not
+            # supplied". Only treat details as available when used==0 (empty is
+            # then consistent) or the list is non-empty. Anything else leaves
+            # `detail_available` False, and the planner then declines to treat
+            # any symbol as a free repeat rather than guessing which.
+            for item in details:
+                if isinstance(item, dict) and item.get("code"):
+                    charged.add(_bare(str(item["code"])))
+            detail_ok = bool(charged) or (isinstance(used, int) and used == 0)
+        return {"ok": True, "used": int(used), "remain": int(remain),
+                "charged": charged, "detail_available": detail_ok, "error": None}
+    except Exception as e:                                    # noqa: BLE001
+        return {"ok": False, "used": None, "remain": None, "charged": set(),
+                "detail_available": False,
+                "error": f"{type(e).__name__}: {e}"}
+    finally:
+        if own:
+            q.close()
+
+
 def daily_panel(tickers, start: str, end: str, ctx=None, progress=None):
     """Pull `tickers` sequentially -> ({ticker: candles}, {ticker: err}).
 

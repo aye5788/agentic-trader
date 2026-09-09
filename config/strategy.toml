@@ -87,14 +87,49 @@ rebalance     = "weekly"  # full re-rank + rotate weekly; risk exits run nightly
 # reconciled human-seed (54 conviction names) + liquidity fill by dollar volume.
 # Full list + provenance: config/universe.csv (as_of 2026-07-08).
 [universe]
+# ⛔ THIS KEY IS THE WHOLE ACTIVATION POINT OF THE COHORT MIGRATION.
+#   "fixed_list"  the curated config/universe.csv below is the ranking pool, the
+#                 price-panel column set AND the order-gate buy whitelist. This
+#                 is the behaviour that has always run; it is the default and
+#                 the rollback.
+#   "cohort"      the persisted eligibility artifact
+#                 (research_store/universe/cohort.json, written weekly by
+#                 scripts/universe_refresh.py from the V2 liquidity screen) is
+#                 the eligibility boundary, and a BUY additionally requires the
+#                 name to be SCOREABLE — i.e. the price panel can satisfy the
+#                 momentum window. See src/cohort.py.
+# Flipping this one key switches every consumer at once, and setting it back is
+# the entire rollback: no code change, no data migration. Anything unrecognised
+# reads as "fixed_list", because a typo must fail toward TODAY'S behaviour and
+# never toward a wider set of buyable names.
+#
+# ⛔ WHAT DOES **NOT** CHANGE IN EITHER MODE: the momentum math, the residual
+# tilt, the portfolio rules, the per-name cap, and the rule that a SELL is
+# refused by nothing but the kill switch. Eligibility is an ENTRY question.
 mode      = "fixed_list"
 source    = "config/universe.csv"   # 150 US single names; `flag` col marks
                                     #   adr/micro/spec/fresh-ipo model-caveats
+                                    #   Used as the pool in "fixed_list" mode,
+                                    #   and retained as the rollback path in
+                                    #   "cohort" mode. Do NOT delete it until the
+                                    #   cohort path has run unattended for a
+                                    #   full screen cycle.
 size      = 150
-# ETFs are NOT in this universe and are not ranked alongside it. `score` is a
-# PERCENTILE rank, so who is in the pool defines it: a broad basket carries
-# structurally lower sigma, flatters itself on R/sigma, and shifts every single
-# name's score. This is the whole universe now — there is no second engine.
+# --- cohort mode artifacts (read only when mode = "cohort") -----------------
+cohort_file         = "research_store/universe/cohort.json"
+history_state_file  = "research_store/universe/history_state.json"
+# How old the eligibility artifact may be and still authorise a BUY. The screen
+# is weekly, so 10 days tolerates exactly ONE missed Friday and refuses the
+# second: long enough that a single failed run does not stop the book trading,
+# short enough that a screen which has quietly died cannot keep authorising
+# entries for a month. A stale cohort never blocks an exit.
+cohort_max_age_days = 10
+# ETFs are NOT in this universe and are not ranked alongside it, in EITHER mode.
+# `score` is a PERCENTILE rank, so who is in the pool defines it: a broad basket
+# carries structurally lower sigma, flatters itself on R/sigma, and shifts every
+# single name's score. There is ONE ranking engine and one pool
+# (screen.ranking_pool) — what changes between the two modes above is only WHICH
+# names fill that pool, never how they are scored or how many engines there are.
 
 # ⛔ THE ETF SLEEVE IS DELETED (2026-08-20), not disabled.
 # It was retired 2026-08-16 by setting `enabled = false` and its four positions
@@ -345,6 +380,13 @@ screen_rows            = 200          # ranked rows retrieved (V2 page max is 20
 # bigger number. The direct test replaced it: snapshot_turnover() now reports
 # per-name coverage and classify() refuses when any pond name is neither
 # returned nor reported unquotable. See universe_maint.classify.
+# How far down the liquidity ranking the persisted ELIGIBILITY COHORT reaches.
+# Defaults to keep_rank_max, so the cohort is exactly the slice membership
+# decisions are already made over — no new policy number. Raising it widens what
+# the agent may consider; it does NOT widen what it may buy, because a BUY also
+# needs the name to be scoreable, and scoreability is rationed by moomoo's
+# 100-distinct-symbol history quota (see [history_acquisition]).
+cohort_rank_max        = 180
 stale_seed_rank_floor  = 100          # seed in bottom third (of 150) counts toward stale
 stale_seed_weeks       = 8            # consecutive WEEKS flagged ⇒ surface for decision.
                                       #   ⚠️ Until 2026-08-20 the slow loop accrued this
@@ -354,3 +396,61 @@ stale_seed_weeks       = 8            # consecutive WEEKS flagged ⇒ surface fo
                                       #   faster than declared. Accrual is now gated on
                                       #   screen_day, one reading per week.
 seed_watch_history     = 16           # weeks of rank history to retain per seed
+
+# --- Metered history acquisition (the moomoo quota model) --------------------
+# ⛔ A BROKER FACT, NOT A STRATEGY THRESHOLD. moomoo meters
+# `request_history_kline` at 100 DISTINCT stocks per rolling window,
+# ACCOUNT-WIDE. It was hit for real on 2026-07-29 at exactly "stock: 100/100"
+# with 98 of 168 universe names still unfetched.
+#
+# Screening is UNMETERED against that cap (get_stock_screen, get_stock_filter,
+# get_stock_basicinfo, get_market_snapshot), which is the whole reason the
+# eligibility cohort can be broad while the SCOREABLE set grows slowly: ranking
+# the market weekly costs zero quota, giving 200 names a 252-session window
+# cannot be done in one run at all. That asymmetry is the shape of the system,
+# not a defect to engineer around.
+#
+# ⛔ WHERE REMAINING CAPACITY COMES FROM, in strict order (src/quota_planner.py):
+#   1. BROKER TELEMETRY — get_history_kl_quota() reports `used`/`remain` and the
+#      symbols currently counted. Unmetered, read-only, and the only source that
+#      is genuinely account-wide correct. Used whenever it answers.
+#   2. OPERATOR-CONFIRMED RESET — research_store/universe/history_quota_reset.json
+#      (see reset_file below).
+#   3. CONFIRMED BROKER WINDOW — rolling_window_days, ONLY if an operator has
+#      documented the real duration.
+#   4. LOCAL LEDGER WITH NO EXPIRY — every recorded request still counts.
+#   5. UNKNOWN -> ZERO new distinct-symbol capacity.
+#
+# ⛔ THERE IS NO LONGER A `repeat_credit_days`. It was an arbitrary 7-day timer
+# being used as the effective CAPACITY window: once a request aged past it the
+# symbol dropped out of the charged set, remaining capacity ROSE, and the
+# planner could schedule 100 fresh distinct symbols on day 8 while moomoo may
+# still have been counting the originals. The window's true duration is
+# undocumented — this repo's own readings only bracket it (100/100 on
+# 2026-07-29, 5/100 on 2026-09-06).
+#
+# ⛔ AND THE OLD COMMENT HERE CLAIMED A SHORTER ASSUMED WINDOW WAS SAFER BECAUSE
+# IT "ONLY SCHEDULES FEWER NAMES". THAT WAS BACKWARDS. Under capacity
+# subtraction a SHORTER window counts FEWER symbols as charged, which leaves
+# MORE remaining capacity, which schedules MORE new names. No assumed duration
+# makes this safe in either direction; only asking the broker, or a human
+# confirming a reset, can.
+[history_acquisition]
+distinct_symbol_quota = 100   # moomoo's meter. Also the absolute per-run request
+                              #   ceiling, enforced independently, so malformed
+                              #   state cannot authorise unbounded calls.
+# ⛔ UNSET = UNKNOWN = NOTHING EXPIRES. Set this ONLY if you have documented
+# moomoo's real rolling-window duration; it is not published, and a guess here
+# hands back spend that may still be counted. Named for what it is: a broker
+# window, not a "credit" timer.
+# rolling_window_days = 30
+ledger_file = "research_store/universe/history_quota.json"
+# Operator-confirmed bootstrap/reset. Write this ONLY when you have established
+# that the broker's window was actually empty at `effective_from`:
+#   {"effective_from": "2026-09-10", "confirmed_by": "aaron",
+#    "reason": "get_history_kl_quota read 0/100"}
+# Requests recorded before that instant stop counting; requests after it count
+# normally, so it grants ONE fresh window rather than a standing exemption. An
+# undated or unattributed file is IGNORED — a reset that cannot say from when is
+# not evidence of anything.
+reset_file = "research_store/universe/history_quota_reset.json"

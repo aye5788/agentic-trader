@@ -32,6 +32,7 @@ signal silently dropped them. See src/history_repair.py for the invariant.
 """
 import argparse
 import datetime as dt
+import json
 import sys
 from collections import Counter
 from pathlib import Path
@@ -41,6 +42,11 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
+
+import cohort as _cohort      # noqa: E402 — stdlib-only, safe under 3.10
+import quota_planner as qp    # noqa: E402 — pure, no moomoo import
+
+MARKET_TZ = ZoneInfo("America/New_York")
 
 # moomoo meters request_history_kline against this many DISTINCT stocks,
 # account-wide and cumulative — hit live on 2026-07-29 at exactly "stock: 100/100"
@@ -64,7 +70,7 @@ TURNOVER = OUT_DIR / "turnover.parquet"
 META = OUT_DIR / "fetch_meta.csv"
 
 
-def universe_tickers() -> list[str]:
+def universe_tickers(cfg=None) -> list[str]:
     """Every series the panel must carry: the tradeable universe + the price
     series the signal and the regime observation READ but never trade.
 
@@ -79,13 +85,306 @@ def universe_tickers() -> list[str]:
       - SPY: the regime observation (price vs its 50-day mean), and the "market"
         variant of the same tilt.
 
-    None of these is tradeable: they are absent from config/universe.csv and
-    therefore from governance.whitelist(), so a buy naming one is refused.
+    None of these is tradeable: they are absent from the buy eligibility set
+    (governance.buy_eligibility), so a buy naming one is refused.
+
+    ⛔ COHORT MODE WIDENS IT, AND THE WIDENING IS FREE. Under `[universe] mode
+    = "cohort"` the names come from the persisted eligibility artifact instead
+    of the CSV, plus every HELD symbol. The daily append is ONE unmetered
+    `get_market_snapshot` call and moomoo takes up to 400 codes per call, so
+    carrying ~200 eligible names + factors costs the same one call and zero
+    history quota. What is NOT free is giving those names a 252-session window;
+    that is metered, rationed by src/quota_planner.py, and is exactly why an
+    eligible name is not a candidate until the panel can score it.
+
+    ⛔ HELD NAMES ARE ADDED UNCONDITIONALLY IN COHORT MODE. A position whose
+    price column stops updating loses its mark, and the stop watcher falls back
+    to coarser marks (src/marks.py). Membership of a discovery cohort must never
+    decide whether an OPEN position is priced — that is the same asymmetry as
+    "a sell is refused by nothing". `universe_refresh._validate_before_write`
+    already warns when a held name leaves the CSV; this removes the consequence.
     """
     import residual                                       # noqa: PLC0415
-    names = pd.read_csv(REPO / "config" / "universe.csv")["ticker"].tolist()
     factors = list(residual.SECTOR_FACTORS) + ["SPY"]     # read-only series
+    if cfg is not None and _cohort.mode(cfg) == "cohort":
+        names, note = _cohort_tickers(cfg)
+        if names is not None:
+            print(note)
+            return list(dict.fromkeys(names + factors))
+        # No usable cohort -> the CSV, ANNOUNCED. This is the one place a
+        # fallback to the legacy list is correct: the panel is DATA, not
+        # permission, and a narrower panel cannot authorise anything. The order
+        # gate has the opposite polarity and never falls back (governance.
+        # buy_eligibility), so a degraded cohort refuses buys even while prices
+        # keep flowing from the CSV.
+        print(note)
+    names = pd.read_csv(REPO / "config" / "universe.csv")["ticker"].tolist()
     return list(dict.fromkeys(names + factors))
+
+
+def _cohort_tickers(cfg):
+    """-> (tickers | None, note). Eligible cohort + held names, or why not."""
+    try:
+        view = _cohort.active_view(cfg, REPO, dt.datetime.now(MARKET_TZ).date())
+    except _cohort.CohortInvalid as e:
+        return None, (f"  cohort unusable ({e}) — panel falls back to "
+                      f"config/universe.csv. Prices are DATA: a fallback here "
+                      f"cannot authorise a buy, and the order gate does not "
+                      f"fall back.")
+    names = list(view["by_ticker"])
+    held = sorted(_held_symbols())
+    extra = [h for h in held if h not in set(names)]
+    return names + extra, (
+        f"  cohort mode: {len(names)} eligible name(s) as of {view['as_of']}"
+        + (f" + {len(extra)} held-but-outside ({' '.join(extra)})" if extra else ""))
+
+
+def _held_symbols() -> set:
+    """Symbols in the broker snapshot. Unreadable -> empty set (fail quiet).
+
+    Used only to WIDEN the panel, so an empty answer degrades to the previous
+    behaviour rather than to something unsafe.
+    """
+    try:
+        d = json.loads((REPO / "research_store" / "rh" / "positions.json").read_text())
+        return {str(s).strip().upper() for s in (d.get("positions") or {})}
+    except Exception:                                     # noqa: BLE001
+        return set()
+
+
+def _quota_settings(cfg) -> dict:
+    """The `[history_acquisition]` knobs, resolved. -> dict.
+
+    `rolling_window_days` is UNSET by default and means UNKNOWN — no capacity is
+    ever reclaimed by the passage of time. It is named for what it is: a broker
+    window duration an operator has DOCUMENTED. It replaced `repeat_credit_days`,
+    which was an arbitrary 7-day timer doubling as a capacity model and silently
+    handed back 100 symbols of spend on day 8.
+    """
+    h = (cfg or {}).get("history_acquisition") or {}
+    try:
+        quota = int(h.get("distinct_symbol_quota", MOOMOO_HISTORY_QUOTA))
+    except (TypeError, ValueError):
+        quota = MOOMOO_HISTORY_QUOTA
+    win = h.get("rolling_window_days", qp.DEFAULT_ROLLING_WINDOW_DAYS)
+    try:
+        win = None if win in (None, 0, "") else int(win)
+    except (TypeError, ValueError):
+        win = None                      # unparseable -> UNKNOWN, never a guess
+    return {"quota": quota, "rolling_window_days": win,
+            "ledger": REPO / str(h.get("ledger_file") or qp.LEDGER_FILE),
+            "reset": REPO / str(h.get("reset_file") or qp.RESET_FILE)}
+
+
+def resolve_capacity(cfg, ctx, mmp, today) -> dict:
+    """Remaining distinct-symbol capacity, from the best authority available.
+
+    Asks the BROKER first (`history_quota()` — unmetered, read-only, and the
+    only account-wide-correct answer), then falls back to the local ledger with
+    an operator-confirmed reset or a documented window, then to UNKNOWN.
+
+    ⛔ A TELEMETRY FAILURE IS NOT ZERO USED. `history_quota()` returns
+    `ok=False` on any problem and this hands that straight to
+    `capacity_state()`, which then resolves from local evidence — never from an
+    assumption that the account is idle.
+    """
+    q = _quota_settings(cfg)
+    tel = None
+    if ctx is not None and mmp is not None:
+        try:
+            tel = mmp.history_quota(ctx=ctx)
+        except Exception as e:                            # noqa: BLE001
+            tel = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if tel and not tel.get("ok"):
+            print(f"  history quota telemetry unavailable ({tel.get('error')}) "
+                  f"— falling back to local evidence")
+    cap = qp.capacity_state(
+        telemetry=tel, ledger_state=qp.load_ledger_state(q["ledger"]),
+        reset_state=qp.load_reset_state(q["reset"]), today=today,
+        quota=q["quota"], rolling_window_days=q["rolling_window_days"])
+    cap["settings"] = q
+    return cap
+
+
+def authorized_history_fetch(panels, wanted, *, cfg, ctx, mmp, today,
+                             start, end, held=(), missing_rows=None,
+                             cohort_ranks=None, dry=False, label="repair"):
+    """⛔ THE ONE AND ONLY PATH TO `request_history_kline` IN THIS REPO.
+
+    Both the automatic repair and the operator's `--backfill` come through here.
+    Neither has its own quota accounting; they differ only in how they ORDER
+    their candidates, which is passed in.
+
+    It does, in this order and always:
+      1. resolves remaining capacity from the source of truth
+         (`resolve_capacity`);
+      2. plans against it (`quota_planner.plan`) — authorised symbols only;
+      3. issues `mmp.daily_panel()` for exactly the authorised symbols;
+      4. MERGES the returned bars into `panels` before anything assesses
+         completeness or persists;
+      5. records every ATTEMPTED symbol — including failures, because the meter
+         charges a symbol rather than a successful response — and records
+         nothing when nothing was attempted.
+
+    -> (panels, result) where result carries request/deferred/reasons/budget/
+    errors/raw_counts.
+
+    ⛔ `--backfill` USED TO BYPASS ALL OF THIS. It sliced its candidate list at
+    100 and called `daily_panel()` directly: no awareness of what the window had
+    already spent, and no ledger entry afterwards, so its spend was invisible to
+    the next automatic repair. An operator action may be deliberate about WHICH
+    names it wants; it cannot be exempt from the broker's meter.
+    """
+    cap = resolve_capacity(cfg, ctx, mmp, today)
+    print(f"  history quota [{label}]: {cap['note']}  (source={cap['source']})")
+    budget = qp.plan(
+        wanted, held=held, missing_rows=missing_rows or {},
+        cohort_ranks=cohort_ranks or {}, quota=cap["settings"]["quota"],
+        charged=cap["charged"], remaining_new=cap["remaining_new"],
+        capacity_unknown=cap["capacity_unknown"])
+    b = budget["budget"]
+    print(f"  history budget [{label}]: {b['requested']} authorized "
+          f"({b['new_symbols']} new + {b['repeat_symbols']} repeat), "
+          f"{b['remaining_new_distinct']} distinct-symbol slot(s) available; "
+          f"{b['deferred']} deferred")
+
+    result = {"request": budget["request"], "deferred": budget["deferred"],
+              "reasons": budget["reasons"], "budget": b, "errors": {},
+              "raw": {}, "capacity": cap}
+    if not budget["request"]:
+        # ⛔ NOTHING ATTEMPTED -> NOTHING RECORDED. A ledger entry for a request
+        # that was never sent would spend capacity we still have.
+        return panels, result
+    if dry:
+        print(f"  [dry] would request {len(budget['request'])} name(s); "
+              f"nothing requested, nothing recorded")
+        return panels, result
+
+    raw, errs = mmp.daily_panel(budget["request"], start, end, ctx=ctx)
+
+    # ⛔ MERGE BEFORE ANY ASSESSMENT OR PERSISTENCE. `fetched.combine_first(base)`
+    # lets the fetch win where it has a value and the stored panel fill every gap
+    # it does not cover, so a partial response adds observations and can never
+    # erase valid stored data. Dropping this step is what made every repaired
+    # name report STILL INCOMPLETE for ever while spending a quota unit a run.
+    if raw:
+        fetched = _field_panels(raw)
+        for f in _FIELDS:
+            base = panels.get(f)
+            panels[f] = (fetched[f] if base is None or base.empty
+                         else fetched[f].combine_first(base).sort_index())
+
+    try:
+        # `cap["retention"]` is the permission to forget, from whichever
+        # authority set the capacity above — `{}` (keep everything) whenever
+        # capacity was inferred from local evidence or could not be established.
+        # Passing it through is what stops a write from reclaiming a
+        # distinct-symbol slot that no telemetry, reset or documented window
+        # ever released.
+        qp.record(cap["settings"]["ledger"], budget["request"], today,
+                  **(cap.get("retention") or {}))
+    except Exception as e:                                # noqa: BLE001
+        print(f"  ⚠️ history-quota ledger not updated ({type(e).__name__}: {e}) "
+              f"— the next run cannot see this spend; fix before the next "
+              f"metered run, or capacity will read higher than it is")
+    result["errors"] = {t: str(e)[:200] for t, e in (errs or {}).items()}
+    result["raw"] = {t: len(c) for t, c in (raw or {}).items()}
+    return panels, result
+
+
+def _missing_rows(close, tickers) -> dict:
+    """{ticker: sessions short of the momentum window}. Smaller = cheaper to fix.
+
+    This is what makes "closest to becoming scoreable" a MEASUREMENT rather than
+    a guess: it counts the non-null closes actually present inside the window
+    `momentum.compute()` reads, so a name needing 6 more sessions outranks one
+    needing 250. A ticker with no column at all carries no entry — it is not
+    "nearly there", and priority_key falls through to its cohort rank.
+    """
+    import history_repair as hr                            # noqa: PLC0415
+    out = {}
+    if close is None or getattr(close, "empty", True):
+        return out
+    for t in tickers:
+        if t not in close.columns:
+            continue
+        col = close[t].iloc[-hr.REQUIRED_ROWS:]
+        out[t] = max(0, hr.REQUIRED_ROWS - int(col.notna().sum()))
+    return out
+
+
+def _cohort_ranks(cfg) -> dict:
+    """{ticker: eligibility rank} from the cohort artifact, or {} in fixed_list
+    mode. Used only to ORDER a rationed queue — never to decide membership."""
+    if cfg is None or _cohort.mode(cfg) != "cohort":
+        return {}
+    try:
+        view = _cohort.active_view(cfg, REPO, dt.datetime.now(MARKET_TZ).date())
+    except _cohort.CohortInvalid:
+        return {}
+    return {t: r for t, r in view["ranks"].items() if isinstance(r, int)}
+
+
+def write_history_state(panels, tickers, plan, path, today) -> dict:
+    """Persist WHY each name is or is not scoreable. Returns the states written.
+
+    ⛔ FIVE STATES, AND THE DISTINCTIONS ARE THE POINT (src/cohort.py holds the
+    vocabulary):
+
+      complete         the window is satisfied — the signal has a number, so the
+                       name is a candidate and is buyable
+      seasoning        listed too recently to have the window. Not a gap, not a
+                       fault, and nothing to fix: it resolves by the passage of
+                       time and must never burn a quota unit meanwhile
+      deferred_quota   mature and repairable, but past this run's budget. It is
+                       retried next run in the same priority order
+      repairing        history was requested and the window is STILL short —
+                       a partial result, which must never be treated as a valid
+                       signal input
+      failed_provider  the request came back with an error. Distinguished from
+                       `repairing` because one is a data-shape problem and the
+                       other is an outage, and an operator reading the dashboard
+                       needs to know which
+
+    Everything except `complete` composes to a research lead: visible, not
+    buyable. A state string this file does not know composes to pending too —
+    src/cohort.compose has no branch that reaches `scoreable` except an exact
+    `complete`, so a typo can never make a name buyable.
+    """
+    import history_repair as hr                            # noqa: PLC0415
+    close = panels.get("close")
+    plan = plan or {}
+    seasoning = set(plan.get("seasoning") or ())
+    deferred = set(plan.get("deferred") or ())
+    attempted = set(plan.get("repair") or ())
+    errors = plan.get("errors") or {}
+    states, reasons = {}, {}
+    for t in tickers:
+        ok = (close is not None and not getattr(close, "empty", True)
+              and t in close.columns and hr.window_complete(close[t]))
+        if ok:
+            states[t] = _cohort.HIST_COMPLETE
+        elif t in seasoning:
+            states[t] = _cohort.HIST_SEASONING
+        elif t in deferred:
+            states[t] = _cohort.HIST_DEFERRED
+            reasons[t] = (plan.get("reasons") or {}).get(t, "past this run's quota")
+        elif t in attempted and t in errors:
+            states[t] = _cohort.HIST_FAILED
+            reasons[t] = errors[t]
+        elif t in attempted:
+            states[t] = _cohort.HIST_REPAIRING
+            reasons[t] = "history requested; the momentum window is still short"
+        else:
+            states[t] = _cohort.HIST_REPAIRING
+            reasons[t] = "incomplete window, not yet requested"
+    doc = {"as_of": str(today), "quota": (plan.get("budget") or {}),
+           "counts": {s: sum(1 for v in states.values() if v == s)
+                      for s in sorted(set(states.values()))},
+           "reasons": reasons, "states": states}
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(doc, indent=2, sort_keys=True))
+    return states
 
 
 _FIELDS = ("open", "high", "low", "close", "turnover")
@@ -125,8 +424,9 @@ def _merge_bars(panels: dict, bars: dict) -> dict:
     return out
 
 
-MARKET_TZ = ZoneInfo("America/New_York")
-# RTH closes 16:00 ET; give Schwab a buffer to stamp the settled daily bar.
+# MARKET_TZ is defined with the other module constants at the top — the cohort
+# helpers above read it, so it cannot live down here any more.
+# RTH closes 16:00 ET; give the feed a buffer to stamp the settled daily bar.
 SETTLE_AFTER = dt.time(16, 15)
 
 
@@ -198,7 +498,8 @@ def _field_panels(raw: dict) -> dict:
     return {f: pd.DataFrame(series).sort_index() for f, series in out.items()}
 
 
-def _repair_incomplete(panels: dict, tickers, ctx, mmp, mmr, today, dry=False):
+def _repair_incomplete(panels: dict, tickers, ctx, mmp, mmr, today, dry=False,
+                       cfg=None):
     """Give every universe member the history `momentum.compute()` needs — or
     establish that it is too young to have it. Returns (panels, plan).
 
@@ -220,8 +521,16 @@ def _repair_incomplete(panels: dict, tickers, ctx, mmp, mmr, today, dry=False):
         additional quota (verified 2026-09-06: a second NVDA pull left
         used_quota unchanged), so a name whose repair fails is retried without
         compounding cost;
-      - the request is capped by the SAME MOOMOO_HISTORY_QUOTA the --backfill
+      - the request is capped by the SAME distinct-symbol quota the --backfill
         path uses, and the overflow is NAMED rather than silently dropped.
+
+    ⛔ THE OUTCOME OF EVERY NAME IS PERSISTED, not merely printed. Returning the
+    plan and logging it left the SCOREABILITY of the pool knowable only by
+    re-deriving it from a parquet, so no other process — the order gate, the
+    brief, the dashboard — could tell a name that is seasoning from one that is
+    deferred from one whose provider request failed. `history_state.json` is
+    that record, and src/cohort.py composes it with the eligibility artifact
+    into the tri-state view every surface reads.
     """
     import history_repair as hr                        # noqa: PLC0415
 
@@ -246,38 +555,59 @@ def _repair_incomplete(panels: dict, tickers, ctx, mmp, mmr, today, dry=False):
     if not ages:
         print("  ⚠️ listing dates unavailable — treating every age as UNKNOWN, "
               "which attempts a real backfill rather than assuming youth")
-    plan = hr.plan_repair(close, need, ages, today, quota=MOOMOO_HISTORY_QUOTA)
+
+    # ⛔ THE ORDER IS A DECISION, NOT AN ACCIDENT (2026-09-09). `plan_repair`
+    # used to take `repair[:quota]` off an alphabetical `sorted(set(...))`, which
+    # is deterministic but expresses no priority at all — a HELD position could
+    # be deferred behind three names beginning with 'A'. That was survivable
+    # while the pool was 150 curated names and rarely more than a handful needed
+    # repair; with a ~200-name eligibility cohort the deferral set is routine and
+    # who gets deferred matters every week. src/quota_planner.py supplies the
+    # order: held first, then whichever names are closest to scoreable, then
+    # cohort rank. `missing_rows` is what makes "closest" measurable rather than
+    # a guess — it is the actual shortfall against momentum.compute()'s window.
+    #
+    # ⛔ THE SEASONING SPLIT HAPPENS FIRST, THEN THE BUDGET. `plan_repair` is
+    # asked for NO quota, so it separates "too young to have the window" from
+    # "should have it and does not" using listing age alone; only the second
+    # group is then rationed. Applying the budget first would let a young name —
+    # which is never requested at all — consume a slot a mature name needed.
+    #
+    # ⛔ THE SEASONING SPLIT RUNS FIRST WITH NO QUOTA, THEN THE ONE AUTHORIZED
+    # PATH RATIONS WHAT IS LEFT. A name too young to have bars must never
+    # consume a slot a mature name needed, and quota accounting lives in exactly
+    # one place for every metered call in this repo.
+    plan = hr.plan_repair(close, need, ages, today, quota=None)
+    start_d, end_d = hr.backfill_window(today)
+    panels, res = authorized_history_fetch(
+        panels, plan["repair"], cfg=cfg, ctx=ctx, mmp=mmp, today=today,
+        start=start_d, end=end_d, held=_held_symbols(),
+        missing_rows=_missing_rows(close, plan["repair"]),
+        cohort_ranks=_cohort_ranks(cfg), dry=dry, label="repair")
+    plan["repair"] = res["request"]
+    plan["deferred"] = res["deferred"]
+    plan["budget"] = res["budget"]
+    plan["reasons"] = res["reasons"]
+    plan["errors"] = res["errors"]
 
     if plan["seasoning"]:
         print(f"  seasoning ({len(plan['seasoning'])}): too young for a "
               f"{hr.REQUIRED_ROWS}-session window — intentionally unscoreable, "
               f"not a gap: " + " ".join(plan["seasoning"]))
     if plan["deferred"]:
-        print(f"  DEFERRED past the {MOOMOO_HISTORY_QUOTA}-symbol history quota "
-              f"({len(plan['deferred'])}): " + " ".join(plan["deferred"])
-              + " — re-run to continue")
+        print(f"  DEFERRED ({len(plan['deferred'])}): " + " ".join(plan["deferred"])
+              + " — NOT retried as new requests until distinct-symbol capacity "
+                "is re-established by broker telemetry or an operator-confirmed "
+                "reset; then in the same priority order")
     if not plan["repair"]:
         return panels, plan
-
-    start_d, end_d = hr.backfill_window(today)
-    print(f"repairing {len(plan['repair'])} incomplete name(s) via the history "
-          f"API ({start_d} .. {end_d}): " + " ".join(plan["repair"]))
-    if dry:
-        print("  [dry] no history requested, nothing written")
-        return panels, plan
-
-    raw, rerrs = mmp.daily_panel(plan["repair"], start_d, end_d, ctx=ctx)
-    if raw:
-        fetched = _field_panels(raw)
-        for f in _FIELDS:
-            base = panels.get(f)
-            panels[f] = (fetched[f] if base is None or base.empty
-                         else fetched[f].combine_first(base).sort_index())
+    print(f"  repaired {len(plan['repair'])} name(s) via the history API "
+          f"({start_d} .. {end_d})")
     for t in plan["repair"]:
-        n = len(raw.get(t, ()))
+        n = res["raw"].get(t, 0)
         ok = hr.window_complete(panels["close"][t]) if t in panels["close"] else False
         print(f"    {t:7s} {n:4d} bars -> {'scoreable' if ok else 'STILL INCOMPLETE'}"
-              + (f"  ({str(rerrs[t])[:70]})" if t in rerrs else ""))
+              + (f"  ({str(plan['errors'][t])[:70]})" if t in plan["errors"] else ""))
     return panels, plan
 
 
@@ -298,7 +628,9 @@ def main() -> None:
     from adapters.moomoo import research as mmr        # noqa: PLC0415
     from adapters.moomoo.client import OpenDUnavailable, quote_ctx  # noqa: PLC0415
 
-    tickers = universe_tickers()
+    import strategy                                    # noqa: PLC0415
+    cfg = strategy.load()
+    tickers = universe_tickers(cfg)
     panels = _read_panels()
     before = panels["close"].shape if not panels["close"].empty else (0, 0)
     print(f"cached panel: {before[0]} dates x {before[1]} tickers"
@@ -311,32 +643,43 @@ def main() -> None:
         print(f"  cache LEFT INTACT: {CLOSES}")
         raise SystemExit(2)
 
-    meta, errs = [], {}
+    meta, errs, repair_plan = [], {}, None
     try:
         if args.backfill:
-            # Backfill is quota-metered. Only ask for names that actually need it,
-            # and stop at 100 so the request doesn't fail mid-batch.
+            # ⛔ A DELIBERATE OPERATOR ACTION IS NOT EXEMPT FROM THE BROKER'S
+            # METER. This branch used to slice its candidate list at 100 and
+            # call `daily_panel()` directly — no awareness of what the rolling
+            # window had already spent, and NO LEDGER ENTRY afterwards, so its
+            # spend was invisible to the next automatic repair, which then
+            # planned as if the quota were untouched. `--backfill` keeps its own
+            # CANDIDATE ORDERING (the operator chose these names and this
+            # date range); it does not keep its own quota accounting.
             end_d = dt.datetime.now(MARKET_TZ).date()
             start_d = end_d - dt.timedelta(days=args.backfill)
             have = panels["close"]
             need = [t for t in tickers
                     if have.empty or t not in have.columns
                     or have[t].loc[str(start_d):].isna().any()]
-            if len(need) > MOOMOO_HISTORY_QUOTA:
-                print(f"  {len(need)} tickers need backfill but moomoo's history quota is "
-                      f"{MOOMOO_HISTORY_QUOTA} distinct stocks — taking the first "
-                      f"{MOOMOO_HISTORY_QUOTA}. Re-run to continue.")
-                need = need[:MOOMOO_HISTORY_QUOTA]
-            print(f"backfilling {len(need)} tickers, {start_d} .. {end_d} (history API)")
-            raw, errs = mmp.daily_panel(need, str(start_d), str(end_d), ctx=ctx)
-            fetched = _field_panels(raw)
-            for f in _FIELDS:                     # union old+new, new wins on overlap
-                base = panels.get(f)
-                panels[f] = (fetched[f] if base is None or base.empty
-                             else fetched[f].combine_first(base).sort_index())
-            meta = [(t, len(c), "ok") for t, c in raw.items()]
-            got = len(raw)
-            wanted = len(need)
+            print(f"backfill: {len(need)} ticker(s) need bars, "
+                  f"{start_d} .. {end_d} (history API)")
+            # The operator's own ordering is preserved by handing it in as the
+            # `cohort_ranks` tiebreak; held names still come first, because a
+            # position the book cannot rank is a risk before it is an
+            # inconvenience.
+            panels, res = authorized_history_fetch(
+                panels, need, cfg=cfg, ctx=ctx, mmp=mmp, today=end_d,
+                start=str(start_d), end=str(end_d), held=_held_symbols(),
+                cohort_ranks={t: i + 1 for i, t in enumerate(need)},
+                dry=args.dry, label="backfill")
+            errs = res["errors"]
+            meta = [(t, n, "ok") for t, n in res["raw"].items()]
+            got = len(res["raw"])
+            wanted = len(res["request"])
+            if res["deferred"]:
+                print(f"  backfill DEFERRED {len(res['deferred'])} name(s) for "
+                      f"want of distinct-symbol capacity: "
+                      + " ".join(res["deferred"][:20])
+                      + ("…" if len(res["deferred"]) > 20 else ""))
         else:
             bars, errs = mmp.snapshot_ohlc(tickers, ctx=ctx)
             got, wanted = len(bars), len(tickers)
@@ -356,9 +699,9 @@ def main() -> None:
             # Repair AFTER the append, so today's bar is already in place and a
             # name that needs only today is not counted as needing history.
             if not args.no_repair:
-                panels, _ = _repair_incomplete(
+                panels, repair_plan = _repair_incomplete(
                     panels, tickers, ctx, mmp, mmr,
-                    dt.datetime.now(MARKET_TZ).date(), dry=args.dry)
+                    dt.datetime.now(MARKET_TZ).date(), dry=args.dry, cfg=cfg)
         # Ask the calendar while the context is still open, so this costs no
         # extra connection. None = could not tell -> the weekend test still
         # applies; only weekday HOLIDAYS go unrecognised.
@@ -399,6 +742,36 @@ def main() -> None:
             print(f"WARN parquet write failed for {field} ({e}); wrote CSV -> {fallback}")
     pd.DataFrame(meta, columns=["ticker", "candles", "status"]).to_csv(META, index=False)
     print(f"wrote {CLOSES} (+ opens/highs/lows/turnover)")
+
+    # ⛔ THE SCOREABILITY RECORD, WRITTEN EVERY RUN. Without it, "can the signal
+    # score this name" is answerable only by re-deriving the window test from a
+    # parquet, which the order gate (stdlib-only, latency-budgeted) and the
+    # dashboard cannot do. `research_store/universe/history_state.json` is what
+    # src/cohort.py composes with the weekly eligibility artifact to produce the
+    # scoreable / pending / unscoreable view every surface reads.
+    #
+    # It covers the TRADEABLE names only -- the sector factors and SPY are
+    # regression inputs and a regime observation, never candidates, so recording
+    # a scoreability verdict for them would invite a reader to treat them as
+    # ones. Same reasoning as their absence from the ranked candidate list.
+    try:
+        import residual                                    # noqa: PLC0415
+        factors = set(residual.SECTOR_FACTORS) | {"SPY"}
+        _cohort_path, hstate_path = _cohort.paths(cfg, REPO)
+        states = write_history_state(
+            panels, [t for t in tickers if t not in factors], repair_plan,
+            hstate_path, dt.datetime.now(MARKET_TZ).date())
+        counts = {}
+        for v in states.values():
+            counts[v] = counts.get(v, 0) + 1
+        print(f"history state -> {hstate_path.name}: "
+              + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    except Exception as e:                                 # noqa: BLE001
+        # Never lose a good price write to a bookkeeping failure. An absent
+        # history state composes to "nothing is scoreable", which REFUSES buys
+        # rather than authorising them -- see cohort.load_history_state.
+        print(f"WARN history state not written ({type(e).__name__}: {e}) — "
+              f"nothing will read as scoreable until it is")
 
 
 def _selftest() -> None:

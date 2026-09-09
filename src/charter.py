@@ -239,6 +239,43 @@ def render_universe(strat_cfg: dict, repo: Path | None = None) -> str:
     # 18 ETFs" — four days after the sleeve was retired and three after its
     # positions were sold. The charter is the agent's whole standing account of
     # the game, so a retired allocation named here is not cosmetic.
+    # ⛔ AND IT MUST DESCRIBE THE MODE ACTUALLY IN FORCE. Under `[universe] mode
+    # = "cohort"` the hunting ground is a weekly liquidity screen of the whole
+    # US market, not a curated file, and the sentence about trading "outside the
+    # list" becomes actively wrong: an off-cohort BUY is refused by the order
+    # gate, and an eligible-but-unscoreable name is refused too. The charter is
+    # the agent's whole standing account of the game, so a paragraph describing
+    # the other mode is not cosmetic — it is a false premise it would reason
+    # from. Counted and dispatched, never stated.
+    import cohort as _cohort                                   # noqa: PLC0415
+    if _cohort.mode(strat_cfg) == "cohort":
+        cfile, _hfile = _cohort.paths(strat_cfg, repo)
+        try:
+            n = len(_cohort.load(cfile)["names"])
+            size = f"{n} eligible names"
+        except Exception:                                      # noqa: BLE001
+            size = "the eligible names"
+        return (
+            f"Your hunting ground is an ELIGIBILITY COHORT — {size} rescreened "
+            f"weekly from the whole US market on 20-day dollar turnover, above "
+            f"a market-cap floor, on approved US venues. It is not a curated "
+            f"list and nobody types it.\n\n"
+            f"Within it there are two states and the difference decides what you "
+            f"may buy. A SCOREABLE name has enough price history for the "
+            f"momentum signal to produce a number: you may buy any of them — you "
+            f"are not confined to the top of `candidates()`, which is an "
+            f"attention budget. An ELIGIBLE name whose history is PENDING or "
+            f"UNSCOREABLE has no computed score: it is a research lead you may "
+            f"read, watch and form a view on, and the order gate will refuse a "
+            f"buy of it. That is not bureaucracy — this book is cross-sectional "
+            f"momentum, so a name with no score cannot be compared with the ones "
+            f"that have, and buying it would mean choosing on prose where every "
+            f"other holding was chosen on the measurement.\n\n"
+            f"`universe()` shows all three states with reasons and the cohort's "
+            f"own freshness; `candidates()` ranks the top of the scoreable set. "
+            f"A name you HOLD that leaves the cohort is still sellable, still "
+            f"monitored and still carries its stop — eligibility is an entry "
+            f"question only.")
     counts = []
     src = strat_cfg.get("universe", {}).get("source")
     if src and (repo / src).is_file():

@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from mcp.server.fastmcp import FastMCP   # noqa: E402
 
+import cohort                                   # noqa: E402
 import marks                                    # noqa: E402
 from research_store import read_current         # noqa: E402
 from research_store import store                # noqa: E402
@@ -475,17 +476,26 @@ def candidates(n: int = 10) -> str:
     scanning 168 names every session. The full ranked list is one `universe()`
     call away, and you may trade something outside the top n; say why when you do.
 
-    SINGLE NAMES ONLY (config/universe.csv, rescreened every Friday), ranked
-    with the adopted residual tilt — the IDENTICAL ranking the slow loop builds
-    the book from. Until 2026-08-20 it was not: this list was ranked without the
-    tilt and with 18 ETFs pooled in, so it could order the same names
-    differently from the book. There is one universe: config/universe.csv.
+    SINGLE NAMES ONLY, ranked with the adopted residual tilt — the IDENTICAL
+    ranking the slow loop builds the book from, over the IDENTICAL pool. Until
+    2026-08-20 it was not: this list was ranked without the tilt and with 18
+    ETFs pooled in, so it could order the same names differently from the book.
+    `score` is a PERCENTILE, so the pool defines it; both halves now come from
+    `screen.ranking_pool()` + `screen.rank_book()`.
+
+    ⛔ THE TOP `n` IS AN ATTENTION BUDGET AND NOTHING ELSE. You may buy any
+    SCOREABLE name in the pool, not merely one that appears here — `universe()`
+    shows all of them with their statuses. What you may NOT buy is a name that
+    is eligible but not scoreable: the deterministic signal has no number for
+    it, so choosing it would be selecting on prose where every other holding was
+    selected on the signal. Those appear in `universe()` as research leads.
 
     Columns: R (12-month return), sigma (daily volatility), trend (distance above
     the 200-day mean), score (the rank-average), eligible (12-month return > 0).
     """
     panel = _panel()
-    r = screen.rank_book(panel, panel.index[-1], screen.read_universe(UNIVERSE))
+    pool = screen.ranking_pool()
+    r = screen.rank_book(panel, panel.index[-1], pool["tickers"])
     return r.head(int(n)).round(4).to_json(orient="index", indent=2)
 
 
@@ -496,34 +506,93 @@ def universe() -> str:
     do not suit and you want to see the full picture — including what's excluded
     and why.
 
-    Returns a JSON object with two parts:
-    - "ranked": every scoreable single name (config/universe.csv, rescreened
-      every Friday) with its R, sigma, trend, score, eligible, rank — ranked
-      with the adopted residual tilt, exactly as scripts/slow_loop.py ranks it
-    - "unscoreable": names that exist in the price panel but lack sufficient
-      history to compute momentum (need 252+ trading days for the 12-month
-      return, 200 for the trend moving average)
+    ⛔ THREE STATES, AND THE DIFFERENCE DECIDES WHAT YOU MAY BUY:
 
-    This is the whole tradeable universe — there is no second list. The 11
-    sector series the residual tilt regresses on are read-only factor inputs:
-    not tradeable, not ranked, and refused by the order gate's whitelist.
+      scoreable                 eligible AND the price panel satisfies the
+                                momentum window. These are candidates. You may
+                                buy ANY of them — you are not confined to the
+                                top `candidates(n)`.
+      eligible_pending_history  eligible, but the panel cannot score it yet:
+                                too recently listed to have 252 sessions, or its
+                                history is queued behind moomoo's 100-distinct-
+                                symbol quota. A RESEARCH LEAD. Look at it, form
+                                a view, watch it — you cannot buy it, and the
+                                order gate refuses it independently of anything
+                                you decide here.
+      eligible_unscoreable      eligible, and the history repair FAILED for a
+                                provider/data reason. Also research-only.
+
+    The reason a pending name is not buyable is not bureaucratic: the book is
+    cross-sectional momentum, and a name with no computed score cannot be
+    compared with the ones that have. Buying it would mean substituting prose
+    for the measurement every other holding was chosen by.
+
+    Returns a JSON object:
+    - "ranked": every SCOREABLE name with R, sigma, trend, score, eligible, rank
+      — ranked with the adopted residual tilt, over the same pool and with the
+      same implementation scripts/slow_loop.py uses
+    - "pending_history" / "unscoreable": the research leads, with their reasons
+    - "cohort": freshness, provenance and counts, so you can see how current the
+      eligibility evidence is
+    - "no_history": names in the pool with no panel column at all
+
+    The 11 sector series the residual tilt regresses on are read-only factor
+    inputs: not tradeable, not ranked, and refused at the order gate.
     """
     panel = _panel()
-    book_t = screen.read_universe(UNIVERSE)
+    pool = screen.ranking_pool()
+    book_t = pool["tickers"]
     r = screen.rank_book(panel, panel.index[-1], book_t)
 
     # Requested but not scored: present in the panel, dropped by
-    # momentum.compute() for insufficient history.
-    unscoreable = sorted(t for t in book_t
-                         if t in panel.columns and t not in r.index)
+    # momentum.compute() for insufficient history. In cohort mode this should be
+    # empty — the pool is already the scoreable set — so a non-empty list here
+    # means the panel and the history state disagree, which is worth seeing.
+    no_history = sorted(t for t in book_t
+                        if t in panel.columns and t not in r.index)
 
-    return json.dumps({
+    out = {
+        "mode": pool["source"],
+        "note": pool["note"],
         "ranked": json.loads(r.round(4).to_json(orient="index")),
-        "unscoreable": [
-            {"ticker": t, "reason": "insufficient price history (need 252+ trading days)"}
-            for t in unscoreable
+        "no_history": [
+            {"ticker": t, "reason": "in the ranking pool but momentum.compute() "
+                                    "dropped it — insufficient history "
+                                    "(needs 252+ sessions, 200 for the trend MA)"}
+            for t in no_history
         ],
-    }, indent=2)
+    }
+    view = pool["view"]
+    if view is None:
+        # fixed_list mode (or a degraded cohort): there is no eligibility
+        # artifact to describe, and saying nothing is better than inventing
+        # empty keys that read as "no pending names" when the question was
+        # never asked.
+        out["cohort"] = None
+        return json.dumps(out, indent=2)
+
+    def _lead(t):
+        rec = view["by_ticker"][t]
+        return {"ticker": t, "rank": rec["rank"], "status": rec["status"],
+                "history_state": rec["history_state"], "buyable": False,
+                "avg_daily_turnover_usd": rec["avg_daily_turnover_usd"],
+                "reason": cohort.explain(view, t)}
+
+    out["pending_history"] = [_lead(t) for t in view["pending_history"]]
+    out["unscoreable"] = [_lead(t) for t in view["unscoreable"]]
+    # Venue-unverified incumbents: observable and SELLABLE, never buyable. Shown
+    # under their own key rather than folded into the research leads, because
+    # the reason differs and so does the remedy — a pending name becomes buyable
+    # when its history fills in, this one does not become buyable at all.
+    out["observe_only"] = [_lead(t) for t in view.get("observe_only", [])]
+    out["cohort"] = {
+        "as_of": view["as_of"],
+        "freshness": view.get("freshness"),
+        "provenance": view.get("provenance"),
+        "coverage": view.get("coverage"),
+        "counts": view["counts"],
+    }
+    return json.dumps(out, indent=2)
 
 
 @mcp.tool()
@@ -1657,7 +1726,10 @@ def check_order(symbol: str, side: str, amount: float) -> str:
 
     WHAT THIS TOOL CHECKS (buys only where noted): the kill switch (blocks
     everything, buy or sell), HALT-ENTRIES and the [governance] drawdown halt
-    (new buys only), the per-order size cap, and the universe whitelist.
+    (new buys only), the per-order size cap, and BUY ELIGIBILITY — the curated
+    universe under `[universe] mode = "fixed_list"`, or membership of the
+    SCOREABLE eligibility cohort under `"cohort"`. It runs the same
+    governance.vet_plan the gate runs, so the two cannot disagree about this.
 
     WHAT IT DOES NOT CHECK, any of which can still refuse at placement: SHADOW
     mode (which refuses EVERY order, sells included), the live_approved master
@@ -1665,7 +1737,7 @@ def check_order(symbol: str, side: str, amount: float) -> str:
     A clean answer here followed by a refusal there is normal and is not a
     contradiction — read the refusal's reason and decide, never retry blind.
 
-    A SELL is NEVER refused by the drawdown halt, HALT-ENTRIES, the whitelist,
+    A SELL is NEVER refused by the drawdown halt, HALT-ENTRIES, buy eligibility,
     or the order cap -- stops in this system are software-only, so refusing an
     exit would strand a position's only protection. In this tool's own reasons
     only the kill switch can block a sell; at placement SHADOW mode blocks one
@@ -2351,9 +2423,41 @@ def brief() -> str:
                           "call means for this book is your judgement."}
 
     held = state.holdings(v, prod.theses if prod else [], _overrides(), _monitor_prices())
-    # Ranked exactly as the book is built (residual tilt, sections kept apart) —
-    # see screen.rank_sections. These used to be two different rankings.
-    top = screen.rank_book(panel, asof, screen.read_universe(UNIVERSE)).head(10).round(4)
+    # Ranked exactly as the book is built — same signal (residual tilt) AND same
+    # pool (screen.ranking_pool). These used to be two different rankings.
+    pool = screen.ranking_pool()
+    top = screen.rank_book(panel, asof, pool["tickers"]).head(10).round(4)
+
+    # ⛔ THE COHORT'S OWN STATE, NOT JUST ITS CONTENTS. How many names you may
+    # choose from, how many are research leads and WHY, how fresh the evidence
+    # is, and what entered or left since the last screen. Without the freshness
+    # and the counts, a cohort that had quietly stopped being maintained would
+    # look exactly like a healthy one — and it is the thing that decides what
+    # you may buy. In fixed_list mode this is null and `mode` says so.
+    cohort_block = None
+    if pool["view"] is not None:
+        vw = pool["view"]
+        cohort_block = {
+            "mode": pool["source"],
+            "as_of": vw["as_of"],
+            "freshness": vw.get("freshness"),
+            "counts": vw["counts"],
+            "pending_history": vw["pending_history"][:20],
+            "unscoreable": vw["unscoreable"][:20],
+            "observe_only": vw.get("observe_only", [])[:20],
+            "held_outside_cohort": sorted(set(held) - set(vw["by_ticker"])),
+            "note": ("You may buy ANY scoreable name, not only the top 10 in "
+                     "`candidates`. Pending/unscoreable names are research "
+                     "leads: visible, not buyable, because the deterministic "
+                     "signal has no number for them. `observe_only` names are "
+                     "incumbents whose exchange is not a verified US venue — "
+                     "watchable and SELLABLE, never buyable, however complete "
+                     "their history becomes. A HELD name outside the "
+                     "cohort is still sellable, still monitored, and still "
+                     "carries its stop — eligibility is an entry question."),
+        }
+    elif pool["source"] == "cohort_degraded":
+        cohort_block = {"mode": pool["source"], "note": pool["note"]}
 
     # WHAT THE NIGHTLY RE-RANK CHANGED. The slow loop re-ranks every weeknight;
     # before 2026-08-20 that result was discarded on six nights out of seven
@@ -2390,10 +2494,13 @@ def brief() -> str:
         "no_take_profit": [s for s, h in held.items()
                            if "override applied" not in str(h.get("targets_status") or "")],
         "candidates": json.loads(top.to_json(orient="index")),
+        "cohort": cohort_block,
         "rank_diff": rank_diff,
         "regime": regime,
-        "available": "candidates() shows the top 10 single names; universe() "
-                     "shows all of them. terrain(symbol) gives measured "
+        "available": "candidates() shows the top 10 by score — an attention "
+                     "budget, not a boundary; universe() shows every scoreable "
+                     "name you may choose from PLUS the eligible names that are "
+                     "research-only and why. terrain(symbol) gives measured "
                      "excursions for any name.",
     }, indent=2, default=str)
 

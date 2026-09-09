@@ -17,6 +17,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
+import cohort  # noqa: E402
 import strategy  # noqa: E402
 import universe_maint as um  # noqa: E402
 from notify import push  # noqa: E402
@@ -440,6 +441,112 @@ def _validate_before_write(rows, adds, cfg) -> None:
         pass
 
 
+COHORT_OUT = REPO / "research_store" / "universe" / "cohort.json"
+
+
+def write_cohort(ranked, turnovers, coverage, asof, cfg, decision,
+                 incumbents=(), out=None, dry=False) -> str:
+    """Persist the ELIGIBILITY COHORT — or say why the last-known-good stands.
+
+    Returns a one-line note for the run log. Never raises: a cohort write that
+    fails must not take down the CSV path that is still the live whitelist
+    during migration.
+
+    ⛔ IT WRITES ONLY ON A CLEAN SCREEN, AND THAT IS THE LAST-KNOWN-GOOD RULE.
+    The same integrity problems that make `classify()` return NO_CHANGE —
+    duplicates, unusable turnover, a sort that is not descending, a null cap on
+    a row that passed the cap floor, too few venue-clean rows, or the V2 screen
+    being unreachable at all — mean the ranking cannot be trusted. Writing a
+    cohort from it would be strictly worse than writing nothing, because this
+    file is what authorises BUYS in cohort mode: a bad screen would narrow or
+    widen the buyable set on data the screen itself has already disowned.
+    Leaving the previous file byte-identical means a failed Friday costs
+    nothing, and the freshness ceiling in src/cohort.py is what stops that
+    tolerance running for ever.
+
+    ⛔ IT NEVER FALLS BACK TO ANOTHER SOURCE. There is no legacy-pond cohort:
+    `screen_evidence` is produced by the V2 backend only, so a `legacy_v1` run
+    leaves the cohort untouched rather than writing one built from a different
+    discovery mechanism. Two mechanisms writing one artifact under one name is
+    the failure `_v2_pond` already refuses for the CSV.
+    """
+    out = out or COHORT_OUT
+    try:
+        ev = (coverage or {}).get("screen_evidence")
+        if not ev:
+            return ("  cohort: NOT written — no V2 screen evidence in this run "
+                    "(legacy backend or an unavailable screen); last-known-good stands")
+        if (coverage or {}).get("v2_problems"):
+            return (f"  cohort: NOT written — screen reported "
+                    f"{len(coverage['v2_problems'])} integrity problem(s); "
+                    f"last-known-good stands")
+        if decision.get("decision") != "AUTO_APPLY":
+            return (f"  cohort: NOT written — screen decision is "
+                    f"{decision.get('decision')}; last-known-good stands")
+        params = cfg["universe_maintenance"]
+        rank_max = int(params.get("cohort_rank_max", params["keep_rank_max"]))
+        doc = cohort.build(
+            ranked, turnovers, ev.get("market_caps"), ev.get("venues"),
+            as_of=asof,
+            generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            incumbents=incumbents,
+            rank_max=rank_max,
+            allowed=um.ALLOWED_VENUES,
+            provenance={
+                "screen_version": ev.get("screen_version", "v2_turnover/1"),
+                "screen_backend": params.get("screen_backend"),
+                "min_market_cap": float(params["screen_min_mktcap"]),
+                "turnover_days": um.V2_TURNOVER_DAYS,
+                "add_dvol_floor_usd": float(params["add_dvol_floor_usd"]),
+                "add_rank_max": int(params["add_rank_max"]),
+                "keep_rank_max": int(params["keep_rank_max"]),
+                "cohort_rank_max": rank_max,
+                "allowed_venues": list(um.ALLOWED_VENUES),
+                "all_count": ev.get("all_count"),
+                "retrieved_rows": ev.get("retrieved_rows"),
+                "pages": ev.get("pages"),
+            },
+            coverage={
+                # `complete` is EVIDENCE THIS RUN SUPPLIES, not something the
+                # reader can infer: a truncated screen is well-formed. It is
+                # true only when the screen reported no problems AND produced
+                # enough venue-clean rows to establish the rank boundary the
+                # membership rules depend on.
+                "complete": (not coverage.get("v2_problems")
+                             and int(ev.get("ranked_count") or 0) >= rank_max),
+                "problems": list(coverage.get("v2_problems") or []),
+                "ranked_count": ev.get("ranked_count"),
+                "excluded_venue": list(ev.get("excluded_venue") or [])[:50],
+                "unknown_venue": list(ev.get("unknown_venue") or [])[:50],
+            })
+        # ⛔ VALIDATE WITH THE REAL ALLOWLIST. This passed `None` until
+        # 2026-09-09, which meant the producer wrote the artifact without ever
+        # checking venue — and `build_ranked_screen` deliberately exempts
+        # INCUMBENTS from the venue filter, so an incumbent with unknown or
+        # off-allowlist exchange metadata flowed straight through and became
+        # buyable the day its history completed. Passing the allowlist does NOT
+        # reject those rows (validate treats an off-venue row as legitimate and
+        # `cohort.compose` classifies it OBSERVE_ONLY); what it now catches is a
+        # row that CLAIMS `entry_eligible` its own venue evidence denies.
+        problems = cohort.validate(
+            doc, min_turnover_usd=float(params["add_dvol_floor_usd"]),
+            allowed_venues=um.ALLOWED_VENUES)
+        if problems:
+            return ("  cohort: NOT written — the document this run built does "
+                    "not pass its own reader's validation: "
+                    + "; ".join(problems[:3]) + "; last-known-good stands")
+        if dry:
+            return (f"  cohort: [dry] would write {len(doc['names'])} eligible "
+                    f"name(s) to {out} (nothing written)")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(doc, indent=2))
+        return (f"  cohort: wrote {len(doc['names'])} eligible name(s) to {out} "
+                f"(rank<= {rank_max}, as_of {asof})")
+    except Exception as e:                                    # noqa: BLE001
+        return (f"  cohort: NOT written — {type(e).__name__}: {e}; "
+                f"last-known-good stands")
+
+
 def apply_proposal(proposal, asof, cfg) -> None:
     """Stamp as_of, write config/universe.csv, commit. Git = the undo."""
     rows = [dict(r) for r in proposal["result"]]
@@ -574,7 +681,23 @@ def _v2_pond(mm, params, incumbents):
                                         f"{type(e).__name__}: {e}"]}, \
             f"  [v2_turnover] FAILED: {type(e).__name__}: {e}"
 
-    coverage = {"v2_problems": rep["problems"]}
+    # `screen_evidence` rides along so _finish() can persist the ELIGIBILITY
+    # COHORT (research_store/universe/cohort.json) with the cap/venue/turnover
+    # that made each name eligible. classify() reads only `v2_problems` and
+    # `missing`, so the extra key changes no decision — see src/cohort.py for
+    # why a cohort row must carry its own evidence rather than just a ticker.
+    coverage = {"v2_problems": rep["problems"],
+                "screen_evidence": {
+                    "market_caps": rep.get("market_caps") or {},
+                    "venues": rep.get("venues") or {},
+                    "excluded_venue": rep["excluded_venue"],
+                    "unknown_venue": rep["unknown_venue"],
+                    "ranked_count": rep["ranked_count"],
+                    "all_count": data.get("all_count"),
+                    "retrieved_rows": data.get("returned_rows"),
+                    "pages": data.get("pages"),
+                    "screen_version": "v2_turnover/1",
+                }}
     note_bits.append(f"all_count={data['all_count']} retrieved={data['returned_rows']} "
                      f"pages={data['pages']} ranked={rep['ranked_count']}")
     if rep["excluded_venue"]:
@@ -696,6 +819,16 @@ def _finish(mm, cfg, params, current, incumbents, seed_flags,
     # exactly this directory's mtime, so any dry run would have made a screen
     # that never fired report GREEN. A liveness check a rehearsal can satisfy is
     # not a liveness check. Found by the independent reviewer, 2026-08-20.
+    # THE ELIGIBILITY COHORT, written beside the CSV proposal rather than
+    # instead of it. During migration both paths are produced every Friday: the
+    # CSV is still the live whitelist under [universe] mode = "fixed_list", and
+    # the cohort accumulates real runs so that flipping the mode is a switch to
+    # something that has been exercised, not to something written for the first
+    # time on the day it goes live. A dry run writes nothing (same reasoning as
+    # the proposal directory below).
+    print(write_cohort(ranked, turnovers, coverage, asof, cfg, decision,
+                       incumbents=incumbents, dry=dry))
+
     out_dir = (PROP_DIR / "dry") if dry else PROP_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     slim = {k: proposal[k] for k in ("keep", "drop_fills", "add", "flagged_seeds")}

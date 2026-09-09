@@ -12,6 +12,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
 
+import cohort     # noqa: E402
 import momentum   # noqa: E402
 import residual   # noqa: E402
 import strategy   # noqa: E402
@@ -21,6 +22,70 @@ def read_universe(path: Path) -> list:
     """First column of a header-carrying CSV, blank lines skipped."""
     return [ln.split(",")[0].strip()
             for ln in path.read_text().splitlines()[1:] if ln.strip()]
+
+
+def ranking_pool(cfg=None, repo: Path = None, today=None) -> dict:
+    """WHICH names the momentum ranking is computed over, and where they came from.
+
+    ⛔ ONE IMPLEMENTATION, THREE CALLERS, AND THAT IS THE WHOLE POINT.
+    `candidates()`, `universe()` and `scripts/slow_loop.py` must rank the SAME
+    names with the SAME signal, or the agent reads a different list from the one
+    the book is built from. That exact divergence shipped once already: until
+    2026-08-20 the agent-facing screen ranked without the residual tilt and with
+    18 ETFs pooled in, so it could order the same names differently from the
+    book. `rank_book()` fixed the SIGNAL half; this fixes the POOL half, which
+    the cohort migration would otherwise re-open by giving each caller its own
+    reason to read a different file.
+
+    ⛔ `score` IS A PERCENTILE, SO THE POOL DEFINES IT. Two callers ranking
+    slightly different name sets do not produce "almost the same" numbers — they
+    produce different numbers for every name in common. There is no benign
+    version of this drift.
+
+    Returns::
+
+        {"tickers": [...],      # rank these
+         "source": "fixed_list" | "cohort" | "cohort_degraded",
+         "view": composed cohort view | None,
+         "note": one line for the run log / the agent}
+
+    In `cohort` mode the pool is the SCOREABLE cohort only — a name whose panel
+    cannot satisfy the momentum window has no number to rank, and including it
+    would put a NaN row in front of the agent labelled as a candidate.
+    Eligible-but-unscoreable names are reported separately, as research leads.
+
+    ⛔ A DEGRADED COHORT FALLS BACK TO THE CSV **AND SAYS SO**. This is a
+    READ path: ranking is information, not permission, and refusing to rank
+    anything would blind the session rather than protect it. The order gate has
+    the opposite polarity and never falls back — so during a cohort outage the
+    agent can still see a ranking while every BUY is refused. Those two
+    behaviours are meant to differ; do not "fix" one to match the other.
+    """
+    cfg = cfg if cfg is not None else strategy.load()
+    repo = repo or REPO
+    csv_path = repo / cfg["universe"]["source"]
+    if cohort.mode(cfg) != "cohort":
+        return {"tickers": read_universe(csv_path), "source": "fixed_list",
+                "view": None,
+                "note": f"ranking pool: {cfg['universe']['source']} (fixed_list mode)"}
+    import datetime as _dt                                   # noqa: PLC0415
+    today = today or _dt.date.today()
+    try:
+        view = cohort.active_view(cfg, repo, today)
+    except cohort.CohortInvalid as e:
+        return {"tickers": read_universe(csv_path), "source": "cohort_degraded",
+                "view": None,
+                "note": (f"ranking pool: FELL BACK to {cfg['universe']['source']} — "
+                         f"{e}. You are seeing a ranking over the legacy list. "
+                         f"New BUYS are refused by the order gate until the "
+                         f"cohort is valid and fresh; exits are unaffected.")}
+    c = view["counts"]
+    return {"tickers": list(view["scoreable"]), "source": "cohort", "view": view,
+            "note": (f"ranking pool: {c['scoreable']} scoreable of "
+                     f"{c['eligible']} eligible (as of {view['as_of']}); "
+                     f"{c['pending_history']} pending history, "
+                     f"{c['unscoreable']} unscoreable — those are research "
+                     f"leads, not candidates, and are not buyable")}
 
 
 def rank(panel, asof, tickers: list, **compute_kwargs):

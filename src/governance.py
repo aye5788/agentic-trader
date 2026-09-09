@@ -48,6 +48,10 @@ import json
 import math
 from pathlib import Path
 
+# stdlib-only and pandas-free, so this stays importable under the system 3.10
+# the stop watcher runs on. See src/cohort.py's closing docstring paragraph.
+import cohort as _cohort
+
 REPO = Path(__file__).resolve().parents[1]
 STATE = REPO / "research_store" / "governance" / "state.json"
 
@@ -268,11 +272,73 @@ def whitelist(cfg) -> set[str]:
 
     A stale `[etf_sleeve]` table in a local override is IGNORED rather than
     honoured — re-adding it must not silently re-open the whitelist.
+
+    ⛔ THIS IS THE `fixed_list` HALF ONLY (2026-09-09). It reads the curated CSV
+    and nothing else, so it stays exactly what it always was. What a BUY is
+    actually checked against is `buy_eligibility()` below, which dispatches on
+    `[universe] mode`; this function remains the legacy path, the rollback, and
+    the source `announce.needs_announcement` compares against.
     """
     def col(path):
         return {ln.split(",")[0].strip()
                 for ln in (REPO / path).read_text().splitlines()[1:] if ln.strip()}
     return col(cfg["universe"]["source"])
+
+
+def eligible_symbols(cfg, today=None) -> tuple:
+    """-> (symbols | None, refusal_reason | None, view | None). ALWAYS computes.
+
+    THE ONE PLACE THAT ANSWERS "which symbols is a BUY of this book supposed to
+    name?", independent of whether the gate is switched on to enforce it.
+
+    Dispatches on `[universe] mode` (src/cohort.mode):
+
+      fixed_list  the curated `config/universe.csv`, exactly as before. An
+                  unreadable CSV RAISES, as it always has, and the caller turns
+                  that into a refusal.
+      cohort      the persisted eligibility artifact. A symbol must be in the
+                  cohort AND `scoreable` — eligible-but-unscoreable names are
+                  research leads, not candidates (src/cohort.py).
+
+    ⛔ THE COHORT PATH RETURNS A REASON, NEVER AN EMPTY SET. Absent, malformed,
+    stale, incomplete, or built by an unknown schema all produce a refusal
+    STRING, because an empty set and an unreadable file are the same value to a
+    naive caller and mean opposite things. It also never falls back to the CSV:
+    a silent fallback would mean the box was authorising buys from a list nobody
+    had checked against the live screen, while every log said "cohort mode".
+
+    ⛔ SEPARATE FROM `buy_eligibility()` ON PURPOSE. The order gate's
+    announcement path (scripts/hooks/pretooluse_order_gate.announce_if_unusual)
+    needs to know what is off-list even when `require_whitelist` is OFF — an
+    off-list buy is then ANNOUNCEABLE rather than refusable, which is a real
+    configuration and is asserted in that hook's own selftest. Folding the
+    switch into this function silently disabled that announcement.
+    """
+    if _cohort.mode(cfg) != "cohort":
+        return whitelist(cfg), None, None
+    today = today or dt.date.today()
+    try:
+        view = _cohort.active_view(cfg, REPO, today)
+    except _cohort.CohortInvalid as e:
+        return None, (f"eligibility cannot be established ({e}). New BUYS are "
+                      f"refused until the weekly screen produces a valid, fresh "
+                      f"cohort; exits are unaffected."), None
+    return _cohort.buyable(view), None, view
+
+
+def buy_eligibility(cfg, today=None) -> tuple:
+    """`eligible_symbols()` gated by `[governance] require_whitelist`.
+
+    What `vet_plan` consults. Buys only — a SELL never reaches this function and
+    must never be made to: stops here are software, so a gate that can refuse an
+    exit removes an open position's only protection.
+
+    `require_whitelist = false` disables the check entirely, in either mode —
+    unchanged, and still the operator's switch.
+    """
+    if not cfg.get("governance", {}).get("require_whitelist"):
+        return None, None, None
+    return eligible_symbols(cfg, today)
 
 
 def assert_agentic_account(accounts, snapshot_account: str | None = None) -> str:
@@ -565,14 +631,25 @@ def vet_plan(plan: list[dict], account_value: float, cfg) -> tuple[list[dict], l
     say what the agent is allowed to newly BUY; it must never say what it is
     forbidden to sell."""
     g = cfg["governance"]
-    wl = whitelist(cfg) if g.get("require_whitelist") else None
+    # ⛔ RESOLVED ONCE, BEFORE THE LOOP, AND ONLY EVER CONSULTED FOR A BUY.
+    # `elig_error` is the cohort-mode fail-closed path: an absent/malformed/
+    # stale eligibility artifact refuses every BUY with a reason that names the
+    # cause, and touches no SELL. In fixed_list mode this is the CSV read that
+    # has always happened here and `elig_error` is never set.
+    wl, elig_error, view = buy_eligibility(cfg)
     account_value_bad = not math.isfinite(account_value)
     max_order = None if account_value_bad else g["max_order_pct"] * float(account_value)
     approved, blocked = [], []
     for o in plan:
         why = None
-        if wl is not None and o["side"] == "buy" and o["symbol"] not in wl:
-            why = "not in whitelist universe"
+        if elig_error is not None and o["side"] == "buy":
+            why = elig_error
+        elif wl is not None and o["side"] == "buy" and o["symbol"] not in wl:
+            # In cohort mode the cohort itself can say WHICH question failed —
+            # "never screened" and "screened, eligible, not yet scoreable" have
+            # completely different remedies, and one of them is not a remedy.
+            why = (_cohort.explain(view, o["symbol"]) if view is not None
+                   else "not in whitelist universe")
         elif o["side"] == "buy" and _amount_invalid(o.get("amount")):
             why = (f"order amount is invalid ({o.get('amount')!r}) — must be a "
                    "finite number; refusing to size this buy")

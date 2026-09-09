@@ -173,8 +173,19 @@ def build_ranked_screen(rows, exchanges: dict, keep_rank_max: int,
 
     ranked = [s for s, _ in keep]
     turnovers = {s: v for s, v in keep}
+    # ⛔ THE EVIDENCE IS CARRIED OUT, NOT DISCARDED (2026-09-09). Market cap and
+    # venue were validated here and then dropped, so the only thing downstream
+    # ever saw was a ticker and a number -- which is exactly what made
+    # `config/universe.csv` unauditable: a list of names asserting "these are
+    # liquid enough" with no way to re-test the claim. The eligibility cohort
+    # (src/cohort.py) re-validates every row against the configured floors at
+    # READ time, and it can only do that if the row carries what made it
+    # eligible. Additive keys: every existing reader of this report is untouched.
+    caps = {s: c for s, _, c in ordered if s in turnovers}
     report = {"problems": problems, "excluded_venue": excluded_venue,
-              "unknown_venue": unknown_venue, "ranked_count": len(ranked)}
+              "unknown_venue": unknown_venue, "ranked_count": len(ranked),
+              "market_caps": caps,
+              "venues": {s: exchanges.get(s) for s in ranked}}
     return ranked, turnovers, report
 
 

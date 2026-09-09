@@ -198,11 +198,56 @@ maps **with greeks**, IV, rates), `option_expiration_chain`, `movers`
   one-tap disconnect. Options are Level 2 there (long only), so equities +
   fractional/dollar-notional orders are the practical surface.
 
+## Eligibility, scoring, selection — three questions, three owners
+
+Added 2026-09-09, behind `[universe] mode` (still `fixed_list`; the curated CSV
+is what runs today). It exists because ONE file — `config/universe.csv` — was
+simultaneously the ranking pool, the price-panel column set and the order-gate
+buy whitelist, so "what is liquid enough to consider" and "what may be bought"
+could not be told apart, and neither could be wider than a hand-maintained list.
+
+| Question | Who answers | Where it lives | Cadence |
+| --- | --- | --- | --- |
+| **Eligibility** — is this security liquid and safe enough to consider? | deterministic code (moomoo V2 liquidity screen) | `research_store/universe/cohort.json` | weekly, Fri 17:00 |
+| **Scoreability** — can `momentum.compute()` produce a number? | deterministic code (the panel's own window test) | `research_store/universe/history_state.json` | daily, with the price append |
+| **Selection** — which eligible, scored names should this book hold? | **the agent** | its own decisions + the journal | every session |
+| **Authorisation** — may this particular order be placed? | the PreToolUse order gate | `src/governance.py` | per order |
+
+**The three composed states** (`src/cohort.py`) and what each permits:
+
+- `scoreable` — eligible and rankable. A **candidate**; buyable. The agent may
+  pick **any** of these, not merely the top of `candidates(n)`, which is an
+  attention budget rather than a boundary.
+- `eligible_pending_history` — eligible, no computed score yet: too recently
+  listed for a 252-session window, or queued behind moomoo's history quota. A
+  **research lead**. Visible, not buyable.
+- `eligible_unscoreable` — eligible, and the history repair failed for a
+  provider reason. Also research-only.
+
+⛔ **Why a research lead is not buyable.** This book is cross-sectional
+momentum. A name with no computed score cannot be compared with the names that
+have one, so buying it would substitute prose for the measurement every other
+holding was chosen by. The order gate enforces it independently of the agent.
+
+⛔ **Why the cohort can be broad and the candidate set cannot grow as fast.**
+moomoo's screening is unmetered; `request_history_kline` is capped at 100
+distinct symbols per rolling window, account-wide. So discovery over the whole
+market is free and seasoning ~200 names is rationed. `src/quota_planner.py` is
+that rationing: holdings first, then the names closest to scoreable, then cohort
+rank, with the overflow deferred *with a reason* and retried. Full table in
+[`DATA_SOURCES.md`](DATA_SOURCES.md) §5.0.
+
+⛔ **Eligibility is an ENTRY question, always.** A held name that leaves the
+cohort stays sellable, stays priced, stays monitored and keeps its stop. Stops
+here are software — the monitor process *is* the stop — so a gate that could
+refuse an exit would not pause risk, it would remove an open position's only
+protection.
+
 ## Layer 5 — Governance
 
 Mandate (universe, rules, weights), journal (every run + fills), guardrails
-(max % per name, min/max holdings, halt-on-drawdown, whitelist universe), and a
-kill-switch. Persisted so it survives across runs.
+(max % per name, min/max holdings, halt-on-drawdown, buy eligibility — see
+"Eligibility, scoring, selection" above), and a kill-switch. Persisted so it survives across runs.
 
 ## Trade management & risk rules (IBD-SwingTrader-derived)
 
@@ -338,10 +383,17 @@ on a timer, with nobody watching**. Three things make that work:
    layer. *(still open)*
 7. ~~**Same-day catalyst entries**~~ — RESOLVED: **nightly-only for v1** (momentum
    trends persist for weeks; same-day reaction is a later add).
-8. ~~**Universe**~~ — RESOLVED, then NARROWED: **fixed 150 single names**
+8. ~~**Universe**~~ — RESOLVED, then NARROWED, then **SPLIT INTO THREE
+   QUESTIONS (2026-09-09)**. It was **fixed 150 single names**
    (`config/universe.csv`), rescreened WEEKLY (Fridays) since 2026-08-20.
    ⛔ The 18-ETF sleeve that ran beside it at a 70/30 split was **deleted
    2026-08-20**; there is one engine.
+   The 150-name file answered three different questions at once — what is
+   tradeable, what can be scored, and what should be held — which is why the
+   agent's hunting ground could only ever be a list somebody typed. Those are
+   now separable; see **"Eligibility, scoring, selection"** above.
+   ⚠️ **The split ships behind `[universe] mode`, which is still
+   `fixed_list`.** The curated file is what runs today.
 9. ~~**ETF role**~~ — ⛔ **REVERSED AND DELETED 2026-08-20.** The parallel
    rotation sleeve was retired 2026-08-16, its four positions sold 08-17, and
    the machinery removed 08-20. Funds are not buyable. The 11 sector series
@@ -377,6 +429,12 @@ on a timer, with nobody watching**. Three things make that work:
       for the deployed agent in `docs/STRATEGY.md`; params in `config/strategy.toml`
 - [x] **Universe built** — fixed 150 (`config/universe.csv`), rescreened weekly
       since 2026-08-20. The 18-ETF sleeve was deleted the same day.
+- [x] **Eligibility / scoring / selection separated** (2026-09-09) — a persisted,
+      provenance-stamped eligibility cohort from the weekly V2 liquidity screen,
+      a daily scoreability record, and a deterministic quota planner for the
+      metered history. ⚠️ **Built and tested, NOT switched on**: `[universe] mode`
+      is still `fixed_list`. Flipping that one key is the entire activation, and
+      setting it back is the entire rollback.
 - [x] **Backtest the momentum signal** vs history — walk-forward harness built
       (`src/momentum.py` signal SSOT, `scripts/fetch_prices.py`, `scripts/backtest.py`)
       and a sensitivity sweep (`scripts/sweep.py`). First pass (2017–2026, 469 wks,

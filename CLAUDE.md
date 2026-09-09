@@ -410,6 +410,91 @@ scripts/code_seller.py  THE MODEL-FREE EXIT (spec §3, live 2026-09-04): the
                         2026-09-04, clean, before wiring). A Claude-wide
                         outage cannot leave a breached position unsold while
                         the broker is up.
+src/cohort.py           ⛔ THE ELIGIBILITY COHORT — the state model that splits
+                        THREE questions `config/universe.csv` used to answer at
+                        once: ELIGIBILITY (is this liquid/safe enough to
+                        consider — weekly V2 screen -> research_store/universe/
+                        cohort.json), SCOREABILITY (can momentum.compute()
+                        produce a number — daily -> history_state.json), and
+                        SELECTION (which of them to hold — THE AGENT'S, and
+                        nothing here makes it).
+                        Composes them into three statuses: `scoreable`
+                        (a candidate, BUYABLE), `eligible_pending_history` and
+                        `eligible_unscoreable` (RESEARCH LEADS — visible, NOT
+                        buyable, because a name with no computed score cannot be
+                        compared against ones that have and buying it would put
+                        prose where the measurement goes).
+                        ⛔ SHIPS BEHIND `[universe] mode`, WHICH IS STILL
+                        `fixed_list`. That one key is the entire activation
+                        point and setting it back is the entire rollback; an
+                        unrecognised value reads as fixed_list, so a typo fails
+                        toward TODAY'S behaviour, never toward a wider buyable
+                        set. config/universe.csv keeps being maintained every
+                        Friday either way — do not delete it.
+                        ⛔ FAILS CLOSED FOR BUYS, OPEN FOR SELLS. Absent,
+                        malformed, stale (`cohort_max_age_days`, one missed
+                        Friday tolerated), incomplete-coverage, wrong-schema or
+                        below-floor evidence all REFUSE new buys with a named
+                        reason and touch no exit. An empty cohort is a reported
+                        problem, never "nothing eligible". It never falls back
+                        to the CSV — but the RANKING path deliberately does
+                        (screen.ranking_pool), because ranking is information
+                        and refusing it would blind the session rather than
+                        protect it. Two polarities on purpose.
+                        Stdlib-only and pandas-free: governance imports it and
+                        governance is in agentic-monitor's 3.10 closure.
+src/quota_planner.py    THE METERED-HISTORY RATIONING. moomoo caps
+                        request_history_kline at 100 DISTINCT symbols per
+                        rolling window ACCOUNT-WIDE; screening is UNMETERED. So
+                        discovery over the whole market is free and seasoning
+                        ~200 names is not — which is exactly why "eligible" and
+                        "candidate" are different words here. Deterministic
+                        priority: HELD positions first, then names closest to
+                        scoreable (fewest missing sessions), then cohort rank,
+                        ties by ticker so no name starves by flapping. Enforces
+                        BOTH a distinct-NEW-symbol ceiling and an ABSOLUTE
+                        per-run request ceiling, so a wrong ledger cannot raise
+                        the budget. Overflow is DEFERRED with a reason — never
+                        dropped, never truncating the cohort.
+                        ⛔ REMAINING CAPACITY COMES FROM AN AUTHORITY, NEVER A
+                        TIMER (fixed 2026-09-09, second audit). In order:
+                        (1) BROKER TELEMETRY — get_history_kl_quota(), wrapped
+                        as adapters.moomoo.prices.history_quota(); `remain` IS
+                        the answer and `detail_list` names the symbols the
+                        server is counting, so "which repeats are free" stops
+                        being our inference. Unmetered, and the ONLY source that
+                        is genuinely account-wide correct. (2) an
+                        OPERATOR-CONFIRMED RESET (history_quota_reset.json,
+                        dated + attributed, or it is ignored). (3) a DOCUMENTED
+                        `rolling_window_days`. (4) the local ledger with NO
+                        expiry. (5) UNKNOWN -> ZERO new capacity.
+                        ⛔ AN ABSENT LEDGER IS "UNKNOWN", NOT "UNUSED" — it is
+                        the state of a fresh clone or a deleted file, which says
+                        nothing about what the ACCOUNT has spent.
+                        ⛔ AND NOTHING IS PRUNED BY AGE. record() kept a 90-day
+                        prune that reclaimed capacity through the back door: a
+                        REPEAT on day 91 (free, so still permitted) rewrote the
+                        file and dropped the other 99 entries, so the next read
+                        counted 1 and granted 99 new slots. Retention now comes
+                        from the SAME authority as the capacity —
+                        capacity_state() returns `keep_only` (telemetry with
+                        per-symbol detail), `prune_before` (a reset's
+                        effective_from, or a documented window), or `{}` for
+                        every branch that inferred capacity locally or could
+                        not establish it. An unparseable timestamp is KEPT, to
+                        match charged_symbols() counting it.
+                        ⛔ `repeat_credit_days` IS GONE. It was an arbitrary
+                        7-day timer doubling as the capacity window: on day 8 a
+                        symbol dropped out of `charged`, remaining capacity
+                        ROSE, and 100 fresh distinct symbols could be scheduled
+                        while moomoo may still have been counting the originals.
+                        This file previously claimed a shorter assumed window
+                        was safer because it "only schedules fewer names" —
+                        BACKWARDS: fewer symbols counted as charged means MORE
+                        remaining capacity, hence MORE new names. No assumed
+                        duration makes this safe in either direction.
+                        ⚠️ Only telemetry is account-wide; the ledger sees just
+                        this repo. Do not call the fallback account-wide safe.
 config/universe.csv     Fixed 150-name momentum universe (human-seed reconciled
                         with dollar-volume liquidity fill). `flag` col marks
                         adr/micro/spec/fresh-ipo model-caveats. Referenced by
@@ -445,8 +530,19 @@ config/universe.csv     Fixed 150-name momentum universe (human-seed reconciled
                         funds removed.
 src/strategy.py         Strategy-config loader (tomllib) + risk_mandate()
 src/governance.py       Layer-5 guardrails: kill-switch file, drawdown halt,
-                        per-order cap, universe whitelist, live_approved master
+                        per-order cap, BUY ELIGIBILITY, live_approved master
                         switch. The last gate before a live order (every session).
+                        ⛔ `whitelist()` IS NOW THE fixed_list HALF ONLY. What a
+                        buy is actually checked against is `buy_eligibility()`,
+                        which dispatches on `[universe] mode`: the curated CSV
+                        under `fixed_list`, the SCOREABLE eligibility cohort
+                        under `cohort` (src/cohort.py). `eligible_symbols()` is
+                        the same answer WITHOUT the require_whitelist switch —
+                        the order gate's announcement path needs to know what is
+                        off-list even when the blocking check is off, and
+                        folding the switch into one function silently killed
+                        that announcement (caught 2026-09-09 by reading the
+                        hook's own selftest, not by running it).
 scripts/hooks/pretooluse_order_gate.py
                         THE UNBYPASSABLE ORDER GATE — a Claude Code PreToolUse
                         hook on mcp__robinhood-trading__place_equity_order,
@@ -463,6 +559,13 @@ scripts/hooks/pretooluse_order_gate.py
                         still runs (phased-rollout switch); rm to go live. Small
                         JSON + config only — NEVER the price panel (~0.1s
                         budget, on the critical path of every order).
+                        ⛔ IN COHORT MODE THE ELIGIBILITY CHECK IS STILL SMALL
+                        JSON — cohort.json + history_state.json, no parquet, no
+                        network — so the latency contract above is unchanged.
+                        Its refusals NAME WHICH QUESTION FAILED: "not in the
+                        cohort" (never screened) and "eligible but pending
+                        history" (screened, seasoning or quota-queued) have
+                        different remedies, and one of them is not a remedy.
 scripts/market_monitor.py Intraday stop/take-profit watcher.
                         ⛔ AN UNREADABLE overrides.json IS NOT AN EMPTY ONE
                         (2026-08-31). It used to swallow the parse error and
@@ -857,6 +960,27 @@ scripts/fetch_prices.py APPENDS the current session's OHLC row to the cached pan
                         by spending a history unit to discover a name is young —
                         and moomoo's 1970-01-01 is UNKNOWN, not an IPO date, so
                         unknown age fails toward attempting a real backfill.
+                        ⛔ SINCE 2026-09-09 THE REPAIR IS RATIONED BY
+                        src/quota_planner.py AND ITS VERDICT IS PERSISTED. The
+                        order used to be alphabetical (`repair[:quota]` off a
+                        sorted set), which is deterministic but expresses no
+                        priority — a HELD position could be deferred behind
+                        three names starting with 'A'. Now: held first, then
+                        nearest-to-scoreable, then cohort rank. The seasoning
+                        split happens BEFORE the budget, so a name too young to
+                        have bars can never consume a slot a mature name needed.
+                        Every name's outcome is written to research_store/
+                        universe/history_state.json (complete / seasoning /
+                        deferred_quota / repairing / failed_provider) — without
+                        it, "can the signal score this" was answerable only by
+                        re-deriving the window test from a parquet, which the
+                        order gate and the dashboard cannot do. The ledger
+                        (history_quota.json) stamps EVERY requested name
+                        including failures: the meter charges a SYMBOL, not a
+                        successful response. In cohort mode the panel also
+                        carries every HELD name unconditionally — a discovery
+                        cohort must never decide whether an OPEN position is
+                        priced.
                         `--no-repair` opts out. A panel shorter than one window
                         is a REBUILD and is refused (that is `--backfill`, by a
                         human, against prices/backup/).
@@ -926,6 +1050,22 @@ src/agent_env/          THE AGENT'S ENVIRONMENT (Plan 2 of the inversion) — a
                         FastMCP server exposing what the agent can SEE and DO:
                         brief(), positions(), account(), mandate_status(),
                         candidates(n)/universe(), terrain(symbol),
+                        ⛔ ONE POOL AS WELL AS ONE SIGNAL (2026-09-09).
+                        `screen.ranking_pool()` is the single implementation of
+                        WHICH names are ranked, and candidates()/universe()/
+                        scripts/slow_loop.py all call it. `score` is a
+                        PERCENTILE, so the pool DEFINES it — two callers ranking
+                        slightly different sets do not produce almost the same
+                        numbers, they produce different numbers for every name
+                        in common. 2026-08-20 fixed the SIGNAL half of exactly
+                        this divergence; reading the pool from a file in each
+                        caller would have re-opened the other half.
+                        candidates(n) is an ATTENTION BUDGET, not a boundary:
+                        the agent may buy ANY scoreable name. universe() adds
+                        `pending_history`/`unscoreable` with per-name reasons and
+                        the cohort's own freshness/provenance; brief() carries a
+                        `cohort` block including held-but-outside-the-cohort
+                        names (still sellable, still watched).
                         history(symbol,days), set_levels(symbol,stop,targets,reason)
                         (targets: one number, a list, or 0/None/""/"0" for no
                         target — a stop with no target is legal), clear_levels

@@ -384,7 +384,13 @@ def announce_if_unusual(payload: dict, decision: dict, cfg: dict, valued: dict) 
         amount, _how = _notional(ti)
         sym = str(ti.get("symbol") or "").strip().upper()
         try:
-            uni = gov.whitelist(cfg)
+            # THE SAME SET THE GATE JUDGED AGAINST, not a second reading of a
+            # different file. Under [universe] mode = "cohort" this is the
+            # scoreable eligibility cohort; under "fixed_list" it is the CSV,
+            # exactly as before. Comparing the announcement against a list the
+            # verdict did not use would make "unusual" mean something the deny
+            # reason does not.
+            uni, _err, _view = gov.eligible_symbols(cfg)
         except Exception:
             uni = None     # unreadable universe: needs_announcement then SKIPS the
                            # off-list limb rather than firing on every symbol — and,
