@@ -100,10 +100,10 @@ def _pending_universe_proposal():
 def _health_rows() -> list[dict]:
     """Scheduled-job liveness for the header strip.
 
-    use_network=False deliberately: the GitHub Actions probe shells out to `gh`,
-    and a page render must never block on a network call. The daily
-    health_check.py run does the networked version and is what actually alerts —
-    here the adaptive-tune row simply reads as unknown rather than stalling the
+    use_network=False deliberately: the networked probes shell out (`gh`, the
+    broker, the CLI), and a page render must never block on a network call. The
+    daily health_check.py run does the networked version and is what actually
+    alerts — here those rows simply read as unknown rather than stalling the
     dashboard. Never raises: a broken health check must not take the page down.
     """
     try:

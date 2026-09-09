@@ -150,35 +150,23 @@ else: `systemctl status opend`.
 
 ---
 
-## 2. WEEKLY — review & (maybe) apply the stop-loss proposal
+## 2. ~~WEEKLY — review & apply the stop-loss proposal~~ — GONE (2026-09-09)
 
-Every Monday the off-box learner proposes a value for `stop_atr_mult` (how far your
-stops sit). It **never changes anything on its own** — you decide.
+**You have no weekly chore here any more. There is nothing to review.**
 
-**Where to look:** github.com/aye5788/agentic-trader → **Actions** tab →
-**adaptive-tune** → the latest run → read the summary (plain English). Or on the
-droplet:
-```
-cd /opt/agentic-trader
-.venv/bin/python scripts/promote_proposal.py
-```
+An off-box learner used to propose a value for `stop_atr_mult` every Monday on
+GitHub Actions, which you could promote by hand. The whole layer is deleted —
+workflow, scripts, config layer and health check.
 
-**How to read it:** most weeks it says *"Keep your current setting — no change."*
-Do nothing. If it says *"Consider moving your stop X → Y,"* only accept it if **all**
-of these hold:
-- it actually recommends a move,
-- `evidence` shows some **live** trades backing it (not `live_n: 0` — pure history),
-- **overfitting** reads "looks solid" (not "CAUTION"),
-- the winner clearly beats the incumbent (not a flat curve),
-- lean toward accepting a move that **widens** stops more than one that tightens.
+It was removed because you were told it was gone while it was still running: it
+kept firing weekly, kept succeeding, and kept writing proposals into an Actions
+artifact nobody opened. Every one said "no change", so nothing ever reached the
+droplet and nothing ever paged you — which is exactly why the false "it's gone"
+went unchallenged.
 
-**To apply your decision (on the droplet):**
-```
-.venv/bin/python scripts/promote_proposal.py --set 3.0     # the value you approved
-```
-(or `--apply` if you're on the droplet and the proposal file is local). That's it —
-it takes effect on the next Sunday rebalance. **To undo:** `--set 2.5` (the default)
-or delete `config/strategy.adaptive.toml`.
+**`stop_atr_mult` is now set only in `config/strategy.toml`** (or your box-local
+`config/strategy.local.toml`, which wins). Change it by editing that file. No
+code writes it.
 
 ---
 
@@ -369,7 +357,6 @@ this setup is the pull request:
 - **Dashboard** (portfolio, equity curve): **dash.ethobs.uk** (login = `DASH_USER`/
   `DASH_PASS` from `.env`). Locally: `.venv/bin/python dashboard/app.py` → 127.0.0.1:8787.
 - **Recent cron activity:** `tail logs/slow.log logs/fast.log logs/signals.log`
-- **Adaptive runs:** GitHub → Actions → adaptive-tune.
 
 ---
 
@@ -401,12 +388,10 @@ this setup is the pull request:
 STOP BUYING             touch research_store/HALT_ENTRIES  (stops STILL fire)
 STOP EVERYTHING         touch research_store/HALT          (⚠ stops STOP firing —
                                                             sell by hand; rm to resume)
-Review stop proposal    .venv/bin/python scripts/promote_proposal.py
-Apply a stop value      .venv/bin/python scripts/promote_proposal.py --set 2.5
+Change the stop width  edit stop_atr_mult in config/strategy.toml (no learner)
 Gap-fill prices         /usr/bin/python3 scripts/fetch_prices.py --backfill 10
 Check the market feed   systemctl status opend
 Dashboard               dash.ethobs.uk
-Adaptive proposals      github.com/aye5788/agentic-trader  → Actions → adaptive-tune
 ```
 
 *Deeper detail: `CLAUDE.md` (system overview), `docs/DESIGN.md` (architecture),

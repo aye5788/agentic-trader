@@ -240,23 +240,36 @@ Read this before touching `scripts/health_check.py`, `src/health.py`,
   `snapshot_identity` history on 2026-08-21 for the earlier instance).
   Fire-once + `ops` issue + dashboard is the whole channel.
 
-## Adaptive-input layer (self-tuning strategy knobs)
+## ⛔ THERE IS NO ADAPTIVE / SELF-TUNING LAYER — DELETED 2026-09-09
 
-An **off-box** background learner tunes `strategy.toml` knobs from the Decision→
-Outcome Ledger. It NEVER trades — it emits a bounded PROPOSAL a human promotes.
-- **Dial #1 (live): `stop_atr_mult`.** `scripts/tune_stop.py` (Bayesian grid +
-  smoothness prior, `src/adaptive.py`; replay via `src/stop_replay.py`) runs
-  weekly on **GitHub Actions** (`.github/workflows/adaptive-tune.yml`), reads
-  OHLC+journal from the ledger mirror, writes a proposal. Review it in the Actions
-  run; apply with `scripts/promote_proposal.py --apply` / `--set VALUE`, which
-  writes **`config/strategy.adaptive.toml`** (git-ignored) that `strategy.load()`
-  merges UNDER `strategy.local.toml` (**human always overrides the learner**).
-  Band-guarded, provenance-stamped, journalled as `adaptive_apply`.
-- **Methodology rule:** deep-history signals (price → residual momentum, from the
-  survivorship-free pool) are **backtested** dials; shallow-history signals
-  (all moomoo edges) are **forward-logged** into the ledger and validated
-  prospectively (meta-labeling) — never backtested on 1 yr. Spec:
-  `docs/superpowers/specs/2026-07-23-adaptive-input-layer-design.md`.
+**No knob in this system is set by code. Every one is set by a human.** Do not
+build, restore, or propose a learner that tunes `strategy.toml`.
+
+An off-box weekly GitHub Actions job (`adaptive-tune.yml`) used to run a Bayesian
+grid over `stop_atr_mult` and emit a proposal a human could promote into
+`config/strategy.adaptive.toml`, a third merge layer under `strategy.local.toml`.
+All of it is gone: the workflow, `scripts/tune_stop.py`,
+`scripts/promote_proposal.py`, `src/adaptive.py`, `src/stop_replay.py`, the
+`strategy.load()` merge layer, the `.gitignore` entry, and the `adaptive_tune`
+health check.
+
+⛔ **It was removed because it was reported REMOVED WHILE STILL RUNNING.** Earlier
+sessions told the principal the layer was gone; it was not. It kept firing weekly
+on Actions, kept succeeding, and kept writing proposals nobody saw — its verdict
+was always `moved: false`, so nothing ever landed on the box and nothing ever
+paged, which is precisely what let a false "it's gone" survive unchallenged for
+weeks. A retirement that leaves the mechanism running is not a retirement; it is
+a lie the next reader inherits. Same rule as the ETF sleeve above: **the code
+says so by absence, not by a flag.**
+
+- **The methodology rule it carried still stands, and is not about tuning:**
+  deep-history signals (price → residual momentum, from the survivorship-free
+  pool) are **backtested**; shallow-history signals (all moomoo edges) are
+  **forward-logged** into the ledger and validated prospectively — never
+  backtested on 1 yr.
+- `docs/superpowers/specs/2026-07-23-adaptive-input-layer-design.md` and its plan
+  are kept as HISTORY. They describe a system that no longer exists — do not
+  implement them.
 
 ---
 
@@ -868,15 +881,10 @@ scripts/slow_loop.py    SLOW LOOP (deterministic brain, no LLM, no trading): mom
                         restored at the order gate via a write-free
                         governance.drawdown_breach(); the others have not, and
                         are now the session's judgement. See OPSLOG 2026-08-14.)
-src/adaptive.py         ADAPTIVE CORE — dial-agnostic Bayesian grid estimator
-                        (smoothness prior + uncertainty-gated recommendation +
-                        oos_gap). Pure. Reused by every adaptive dial.
-src/stop_replay.py      Pure stop-aware single-position replay → realized-R (models
-                        intra-week stop/target/horizon exits the backtest lacks).
-scripts/tune_stop.py    Adaptive tuner for stop_atr_mult — off-box weekly on GitHub
-                        Actions. PIT-replay + live → bounded proposal artifact.
-scripts/promote_proposal.py  Human promotion of a proposal: --apply / --set writes
-                        config/strategy.adaptive.toml (merged UNDER strategy.local.toml).
+⛔ src/adaptive.py, src/stop_replay.py, scripts/tune_stop.py and
+   scripts/promote_proposal.py are DELETED (2026-09-09), with
+   .github/workflows/adaptive-tune.yml and the config/strategy.adaptive.toml
+   merge layer. There is no self-tuning of any knob. See the section above.
 src/research_store/     Research Store — validated slow→fast handoff (belief +
                         journal). write_product enforces the [risk] mandate.
 src/adapters/alpaca/    Alpaca news client + get_news (data-only, no trading).
@@ -945,8 +953,7 @@ docs/STRATEGY.md        THE TRADING STRATEGY, written for the deployed agent —
                         authoritative for every number; §4 defers to it.
                         Read this before trading. (edge = momentum, options OFF)
 docs/OPERATOR_MANUAL.md THE human-operator manual — step-by-step for every task the
-                        principal (Aaron) does: reviewing/
-                        applying adaptive proposals, phone-alert meanings, the kill
+                        principal (Aaron) does: phone-alert meanings, the kill
                         switch, emergency stop. Start here for "what do I do".
 docs/DESIGN.md          Full architecture (6 layers, two-clock model, scope tables)
 docs/architecture.*     The architecture diagram (svg + excalidraw source)
@@ -961,8 +968,10 @@ Copy `.env.example` → `.env` and fill in credentials. Keys:
 (The `SCHWAB_*` keys are **gone** — removed with the adapter 2026-07-29.)
 - **moomoo** has **no `.env` key** — it authenticates through the running **OpenD**
   gateway (`OpenD.xml`, gitignored, on the box); import needs `/usr/bin/python3`.
-- **GitHub Actions** (adaptive tuner) uses repo secret **`LEDGER_TOKEN`** (a
-  fine-grained PAT with *read* on the `agentic-trader-ledger` mirror).
+- **GitHub Actions** uses repo secret **`LEDGER_TOKEN`** (a fine-grained PAT with
+  *read* on the `agentic-trader-ledger` mirror) — now only for `validate.yml`'s
+  dead-man's switch, which reads the mirror's freshness. The adaptive tuner that
+  was its other consumer was deleted 2026-09-09.
 Market data needs no key: moomoo authenticates via OpenD. There is no longer any
 weekly credential step — that was Schwab's, removed 2026-07-29.
 

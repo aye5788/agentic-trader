@@ -230,14 +230,13 @@ only ever *feeds* them (the ledger mirror push) or is *checked on* by them:
 
 | Workflow | Trigger | What it does | Secrets |
 | -------- | ------- | ------------ | ------- |
-| `adaptive-tune.yml` | Mondays 08:00 UTC + manual | Off-box weekly learner for `stop_atr_mult` — reads price + ledger data from the mirror, surfaces a bounded PROPOSAL. Never trades, never writes config. See `docs/OPERATOR_MANUAL.md` §2. | `LEDGER_TOKEN`; optional `NTFY_TOPIC_OPS` |
-| `validate.yml` | Daily `0 13 * * *` (09:00 ET, after the droplet's own 08:00 check) + push touching `src/repo_checks.py`/itself + manual | TWO independent jobs. `deadman`: droplet dead-man's switch — fails if the ledger mirror hasn't been pushed to in 72h (the one check that survives the droplet dying; `scripts/health_check.py` runs *on* the droplet and can't report its own death). `checks`: runs `src/repo_checks.py`, the static filesystem-only config/CI validator. Each job files/updates its own deduped `bug`+`auto-fix` GitHub issue; `deadman` also phones `NTFY_TOPIC_OPS`. | `LEDGER_TOKEN` (same PAT as adaptive-tune.yml); optional `NTFY_TOPIC_OPS` |
+| `validate.yml` | Daily `0 13 * * *` (09:00 ET, after the droplet's own 08:00 check) + push touching `src/repo_checks.py`/itself + manual | TWO independent jobs. `deadman`: droplet dead-man's switch — fails if the ledger mirror hasn't been pushed to in 72h (the one check that survives the droplet dying; `scripts/health_check.py` runs *on* the droplet and can't report its own death). `checks`: runs `src/repo_checks.py`, the static filesystem-only config/CI validator. Each job files/updates its own deduped `bug`+`auto-fix` GitHub issue; `deadman` also phones `NTFY_TOPIC_OPS`. | `LEDGER_TOKEN`; optional `NTFY_TOPIC_OPS` |
 | `claude.yml` | An issue gets both `bug` and `auto-fix` labels (fires once, whichever lands second) — the droplet's path; **or** a `repository_dispatch` of type `auto-fix` carrying an issue number — the path `validate.yml` must use, because GitHub does not create workflow runs from events triggered by the automatic `GITHUB_TOKEN` (`workflow_dispatch`/`repository_dispatch` are the two documented exceptions). Both entrances run the SAME job. Or a `@claude` mention on an issue/PR | The agent half of the oversight loop the two above feed. Reads the issue, decides operational-vs-code-defect, and — only for a genuine code bug — implements the minimal fix, runs a **mandatory adversarial self-review** (a second pass whose job is to falsify its own fix), re-verifies with real command output, and opens a pull request against `main` written for a non-coder (never pushes to `main` itself). Operational findings get a plain-language comment and no PR. See `docs/OPERATOR_MANUAL.md` §5 for what the PR looks like. | `CLAUDE_CODE_OAUTH_TOKEN` — **without it the workflow is INERT**: issues still get filed by the two workflows above exactly as before, they just draw no PR |
 
-**One-time setup for `validate.yml` + `claude.yml`** (`adaptive-tune.yml`'s
+**One-time setup for `validate.yml` + `claude.yml`** (the deleted `adaptive-tune.yml`'s
 `LEDGER_TOKEN` should already exist from its own setup):
 
-1. `LEDGER_TOKEN` — reuse the same fine-grained PAT `adaptive-tune.yml` uses
+1. `LEDGER_TOKEN` — a fine-grained PAT with *read* (Contents) on the ledger mirror
    (read-only Contents on the private `agentic-trader-ledger` mirror); no new
    secret needed for `validate.yml`'s dead-man's switch.
 2. `CLAUDE_CODE_OAUTH_TOKEN` — install the Claude GitHub App on this repo,

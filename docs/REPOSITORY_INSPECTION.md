@@ -2,6 +2,16 @@
 
 Inspection scope: `aye5788/agentic-trader` at commit `d9ec9ef`, 2026-08-09.
 
+> ⛔ **SUPERSEDED IN PART (2026-09-09).** This report describes the ADAPTIVE-INPUT
+> LAYER as live (§ the weekly tuner, `adaptive-tune.yml`, proposal promotion, and
+> recommendation 15). That whole layer — workflow, `scripts/tune_stop.py`,
+> `scripts/promote_proposal.py`, `src/adaptive.py`, `src/stop_replay.py`, the
+> `config/strategy.adaptive.toml` merge layer and its health check — was DELETED
+> on 2026-09-09. No knob is set by code any more. The body below is left
+> unedited on purpose: it is a dated snapshot, and rewriting it would falsify the
+> record of what the repo actually looked like on 2026-08-09. See CLAUDE.md
+> "THERE IS NO ADAPTIVE / SELF-TUNING LAYER" and docs/OPSLOG.md 2026-09-09.
+
 This is a read-only architectural and operational assessment of the repository as
 it existed at the stated commit. Confirmed facts are identified directly. Where a
 conclusion is interpretive, it is marked as an inference. Items that require live

@@ -113,7 +113,6 @@ REMEDY = {
                            "or record_fills() after a trade"),
     "signal_panel":  "OpenD likely logged out — see OPERATOR_MANUAL §4",
     "ledger_backup": "Check the box still has push access to agentic-trader-ledger",
-    "adaptive_tune": "Check GitHub Actions — the weekly tuner has not run",
     "slow_loop":     "Check logs/slow.log",
     # "fast_loop" and "risk_review" removed 2026-08-14: both jobs are deleted,
     # so their health.SPECS keys are gone and a remedy for them could never
@@ -590,13 +589,13 @@ def _selftest() -> None:
     to_alert, _ = diff([bad], {})
     assert len(to_alert) == 1, "re-break must be audible"
 
-    # a check that was never PERFORMED must not alert (dashboard skips the network
-    # probe; that must never be mistaken for "the tuner has not run")
-    unknown = C("adaptive_tune", "Adaptive tuner", None, "unknown", "not checked here")
+    # a check that was never PERFORMED must not alert (the dashboard skips every
+    # networked probe; that must never be mistaken for "the job has not run")
+    unknown = C("claude_models", "Claude models", None, "unknown", "not checked here")
     to_alert, healed = diff([unknown], {})
     assert to_alert == [], "unknown must not alert"
     assert healed == [], "unknown must not clear an existing flag either"
-    to_alert, healed = diff([unknown], {"adaptive_tune": {}})
+    to_alert, healed = diff([unknown], {"claude_models": {}})
     assert to_alert == [] and healed == [], "unknown leaves a prior flag untouched"
 
     # ...but a SETTLED non-alerting status DOES clear, or the flag sticks forever

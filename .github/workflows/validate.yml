@@ -54,11 +54,13 @@ name: validate
 # workflow FAILS the step (::error:: + exit 1) — it must never `exit 0` on
 # that path, because that would make an expired/missing token look like a
 # green run while the dead-man's switch silently stopped watching. (This is
-# exactly the earlier adaptive-tune.yml bug — see that workflow's comments —
-# and src/repo_checks.py's check_workflow_failure_exits will flag a
+# exactly the bug the deleted adaptive-tune.yml had in 2026-08: a failed step
+# fell through to `exit 0` and CI reported success. That workflow is gone —
+# removed 2026-09-09 with the whole adaptive layer — but the failure class is
+# not, and src/repo_checks.py's check_workflow_failure_exits will flag a
 # regression here: no `exit 0` may appear within 3 lines of a failure marker.)
-# Optional repo secret NTFY_TOPIC_OPS: the ops phone topic (same one
-# adaptive-tune.yml uses). Unset -> the push is skipped silently.
+# Optional repo secret NTFY_TOPIC_OPS: the ops phone topic. Unset -> the push
+# is skipped silently.
 
 on:
   schedule:

@@ -241,7 +241,6 @@ SPECS = {
     # output-not-log switch.
     "universe_refresh": ("Universe refresh (weekly)", 10,
                          "research_store/universe/proposals/"),
-    "adaptive_tune": ("Adaptive tuner (CI)",    10,  "GitHub Actions run"),
     # Design spec 2026-08-09 §8 invariant: "every position has an agent-set
     # stop, or it is loudly flagged unprotected — checked every monitor cycle
     # and in daily health." scripts/market_monitor.py writes this artifact
@@ -776,44 +775,6 @@ def _newest_in_dir(d: pathlib.Path, pattern: str = "*") -> dt.datetime | None:
     return max(times) if times else None
 
 
-def _last_actions_run(workflow: str = "adaptive-tune") -> dt.datetime | None:
-    """Newest SUCCESSFUL run of a workflow, via the already-authenticated `gh` CLI.
-
-    Uses gh rather than a fresh PAT precisely so this adds no new credential:
-    the box is already logged in for ordinary repo work. Any failure (gh missing,
-    logged out, network) returns None -> reported as "never", which is honest:
-    we genuinely do not know that it ran.
-
-    ⚠️ `conclusion == "success"` is the whole point, and it was missing until
-    2026-08-09. This probe read only `createdAt` off `--limit 1`, so ANY run
-    counted as liveness — including a startup failure, which GitHub creates on
-    every push to the default branch when the workflow file will not parse.
-    That inverts the monitor: a workflow broken by bad YAML (adaptive-tune.yml,
-    2026-08-04) generates a fresh failed run per push and thereby reports itself
-    healthy — "last ran 2m ago" for a job structurally incapable of running.
-    The failure was feeding its own alarm. Freshness of an ATTEMPT is not
-    evidence of work; only a successful conclusion is.
-
-    `--limit 20` because the startup-failure runs pile up in front of the last
-    real one; the newest success can be well down the list.
-    """
-    try:
-        out = subprocess.run(
-            ["gh", "run", "list", "--workflow", f"{workflow}.yml",
-             "--limit", "20", "--json", "createdAt,conclusion"],
-            capture_output=True, text=True, timeout=30, cwd=REPO)
-        if out.returncode != 0:
-            return None
-        runs = json.loads(out.stdout or "[]")
-        ok = [r for r in runs if r.get("conclusion") == "success"]
-        if not ok:
-            return None
-        newest = max(r["createdAt"] for r in ok)
-        return dt.datetime.fromisoformat(newest.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
 def _unrecorded_fills_probe(root: pathlib.Path, today: str | None = None):
     """-> (day, [symbols]) for the most recent SETTLED trading day, or None.
 
@@ -1139,7 +1100,6 @@ def gather(root: pathlib.Path | None = None, *, use_network: bool = True) -> dic
         "newsletter":    _newest_in_dir(root / "research_store" / "newsletters", "*.sent"),
         "universe_refresh": _newest_in_dir(
             root / "research_store" / "universe" / "proposals", "*.json"),
-        "adaptive_tune": _last_actions_run() if use_network else SKIPPED,
         "unprotected_positions": _unprotected_probe(root),
         "unrecorded_fills": _unrecorded_fills_probe(root),
         "snapshot_identity": _snapshot_identity_probe(root),
@@ -1507,10 +1467,10 @@ def _selftest() -> None:
     assert all(c.status in ("never",) for c in evaluate(now, {})), "empty probes"
 
     # a probe we chose not to run is "unknown", NOT "never" — and must not alert
-    r = {c.key: c for c in evaluate(now, {"adaptive_tune": SKIPPED})}
-    assert r["adaptive_tune"].status == "unknown", r["adaptive_tune"]
-    assert not r["adaptive_tune"].alertable, "an unperformed check must never alert"
-    assert not r["adaptive_tune"].healthy, "unknown is not a clean bill of health"
+    r = {c.key: c for c in evaluate(now, {"claude_models": SKIPPED})}
+    assert r["claude_models"].status == "unknown", r["claude_models"]
+    assert not r["claude_models"].alertable, "an unperformed check must never alert"
+    assert not r["claude_models"].healthy, "unknown is not a clean bill of health"
     assert r["signal_panel"].alertable, "a genuinely-never-run job must alert"
 
     # evaluate() must emit a row for EVERY spec key on every path, sentinels

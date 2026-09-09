@@ -255,11 +255,16 @@ CRON_SUBSTRINGS = {
 
 # health.SPECS keys that are legitimately NOT cron lines:
 #   monitor               -> systemd service `agentic-monitor` (deploy/agentic-monitor.service)
-#   adaptive_tune         -> GitHub Actions workflow (.github/workflows/adaptive-tune.yml)
 #   unprotected_positions -> written by that same systemd service every
 #                            check_once() tick (scripts/market_monitor.py), not a
 #                            separately-scheduled job of its own
-NOT_CRON = {"monitor", "adaptive_tune", "unprotected_positions"}
+#
+# "adaptive_tune" was here until 2026-09-09, mapping to a GitHub Actions
+# workflow. The whole adaptive layer is deleted, so its health.SPECS key is gone
+# and a mapping here would name a job that does not exist — the same reason
+# fast_loop and risk_review left CRON_SUBSTRINGS above. The mapping goes when
+# the job goes.
+NOT_CRON = {"monitor", "unprotected_positions"}
 
 
 # health.SPECS key -> the systemd timer(s) that arm it. Migrated off cron on

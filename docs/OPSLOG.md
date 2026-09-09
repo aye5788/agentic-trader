@@ -8,6 +8,52 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-09 — the adaptive-input layer is deleted (it was "gone" and still running)
+
+**What happened.** The principal was told by earlier sessions that the adaptive
+tuner had been removed. It had not. `.github/workflows/adaptive-tune.yml` was
+`active` on GitHub and firing on its Monday cron the whole time — the last run,
+`34130314344`, started 2026-09-07T13:57:50Z, concluded `success`, and uploaded a
+`stop_atr_mult-proposal` artifact computed from `replay_n=18480`.
+
+**Why nobody noticed.** Every run recommended `moved: false` (the challenger
+never cleared `p_better >= 0.90`), so nothing was ever promoted,
+`config/strategy.adaptive.toml` never existed on the box, the on-box proposal
+copy stayed frozen at 2026-08-04, and no alert ever fired. A job that runs, does
+real work, decides "no change", and writes the answer to an Actions artifact
+nobody opens is indistinguishable from a deleted job — right up until someone
+checks. That is what let a false "it's gone" stand for weeks.
+
+**Decision (principal, 2026-09-09): remove it.** Not disable, not flag — remove.
+
+**Deleted:** `.github/workflows/adaptive-tune.yml`, `scripts/tune_stop.py`,
+`scripts/promote_proposal.py`, `src/adaptive.py`, `src/stop_replay.py`.
+
+**Unwired:** the `config/strategy.adaptive.toml` merge layer in
+`src/strategy.py` (`load()` now merges base < local, and there is no
+machine-written layer); the `adaptive_tune` key and its `_last_actions_run`
+GitHub-Actions probe in `src/health.py`; its remedy line in
+`scripts/health_check.py`; `adaptive_tune` in `repo_checks.NOT_CRON` (leaving it
+would have named a job that no longer exists, the same reason `fast_loop` and
+`risk_review` left `CRON_SUBSTRINGS`); the `.gitignore` entry; and the
+now-dangling cross-reference in `validate.yml` that sent the reader to a deleted
+workflow's comments for the `exit 0` story.
+
+**Kept deliberately.** `LEDGER_TOKEN` and `NTFY_TOPIC_OPS` remain — `validate.yml`'s
+dead-man's switch still uses both. The ledger mirror still backs up the OHLC
+panel, now for its own sake: the deep panel is Schwab-era and non-regenerable.
+The spec and plan under `docs/superpowers/` are kept as HISTORY and marked "do not
+implement". `docs/REPOSITORY_INSPECTION.md` keeps its body unedited with a
+superseded banner: it is a dated snapshot and rewriting it would falsify the
+record. `research_store/adaptive/proposals/` is left on disk (dead data, not
+deleted by this change).
+
+**The rule that comes out of it, and it is the same one the ETF sleeve wrote:**
+a retirement that leaves the mechanism running is not a retirement. The code says
+so by absence, not by a flag. And a claim that something is gone is not evidence
+that it is gone — check the live surface (`gh api .../actions/workflows` reports
+`state`), not the story.
+
 ## 2026-09-08 — LOOKING AHEAD stops reciting the cron calendar, and `review_by` stops naming a Friday
 
 Two defects in what the system TELLS people, neither of which cost money and
