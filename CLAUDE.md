@@ -646,9 +646,14 @@ research_store/rh/positions.json
                         genuinely recent fill against an old snapshot still reads
                         stale. See OPSLOG 2026-09-09, "a healed fill wore the
                         clock of the day we noticed it".
-                        ⚠️ The three rows ALREADY in the ledger still carry the
-                        wrong day; the code no longer adds more. Repairing them
-                        is a ledger edit, not a code fix — ask first.
+                        ✅ The three rows already in the ledger were REPAIRED
+                        2026-09-09 on Aaron's instruction: `ts` set from the
+                        broker's own execution record, `ts_source` added, and the
+                        overwritten write-time preserved as `healed_at` so the
+                        edit is reversible. 788 lines in, 788 out, exactly 3
+                        changed. Two of them (AMD, DELL) would otherwise have
+                        been counted as THIS week's trades by the letter's
+                        `_in_window`.
                         The EXIT path reaches it via scripts/record_fills.py +
                         research_store/rh/broker_state.json — RUN BY THE MONITOR
                         (src/exit_bookkeeping.py, 2026-09-03), not by the

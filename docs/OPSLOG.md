@@ -77,11 +77,34 @@ matters most — the 2026-08-19 guard still FIRES, with a genuinely recent fill
 against a two-day-old snapshot still reported stale. Loosening that guard would
 have been a worse bug than the one being fixed.
 
-⚠️ NOT done, deliberately: the three rows already in the journal still carry
-the wrong day. Rewriting them is a ledger edit on the live trade record, not a
-code fix, and it is the principal's call. They no longer cause a stand-down
-(each has been superseded by a later real fill), but they do misattribute three
-July trades to September for anything that counts executions by day.
+### The three rows already in the ledger — repaired
+
+Raised as the principal's call rather than done unilaterally, and he authorised
+it the same hour ("make them, narrow scope"). Each row's `ts` now comes from the
+broker's own execution record; `ts_source` records where it came from; and the
+write-time that was overwritten is preserved as `healed_at`, so the edit is
+reversible from the file itself and not only from a backup.
+
+| symbol | was | now |
+| --- | --- | --- |
+| MU | 2026-09-04T19:48:19Z | 2026-07-08T18:43:10.723Z |
+| AMD | 2026-09-08T17:20:13Z | 2026-07-08T18:43:01.814Z |
+| DELL | 2026-09-09T13:53:41Z | 2026-07-08T18:43:05.535Z |
+
+788 lines in, 788 out, exactly three changed, every line still parsing. The
+timestamps were derived from the retained dumps by order_id, never typed in.
+
+⚠️ THIS MATTERED FOR MORE THAN TIDINESS: with the old stamps, AMD and DELL both
+fell inside the letter's `_in_window` for the week of 09-07, so Sunday's issue
+would have reported two July purchases as this week's trades. That was predicted
+in writing on 2026-09-04 and is now closed. `unrecorded_fills` was re-run after
+the edit and reports ok — moving an execution off a September day did not open a
+gap on that day, because these rows were never the record of a September action.
+
+⚠️ The repaired rows now sit out of chronological order in the file (a July `ts`
+late in the journal). Nothing reads the journal positionally — freshness takes a
+max, the letter and health filter by date — so the file was NOT resorted, which
+would have rewritten all 788 lines to fix a cosmetic problem.
 
 ## 2026-09-09 — the stop watcher could not tell a live price from a three-day-old one
 
