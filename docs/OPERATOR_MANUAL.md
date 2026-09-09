@@ -188,7 +188,27 @@ market-cap and liquidity floors already in use, written to
 - A name **you already hold** is always sellable and always watched, even after
   it drops out of the cohort. Eligibility only ever restricts *buying*.
 
-**To switch it on** — this is the only change required, and it is one line in
+**⏰ A ONE-SHOT JOB IS ARMED TO DO THIS FOR YOU: Fri 2026-09-11 17:30 ET.**
+It runs `scripts/activate_cohort.py --run` and flips the mode ONLY if every gate
+passes — market closed, no exit in flight, no HALT/HALT_ENTRIES/SHADOW, a clean
+committed tree, and a cohort artifact carrying **Friday's own as_of** produced by
+the normal 17:00 screen (it polls up to 45 min rather than trusting the clock).
+It then runs the normal price path in cohort mode, requires a healthy scoreable
+cohort, and reloads via the supported workflow. Any failed gate removes its own
+override and holds at `fixed_list`.
+
+```
+systemctl list-timers agentic-cohort-activate.timer --all   # when it fires
+systemctl status agentic-cohort-activate.service            # how it went
+journalctl -u agentic-cohort-activate.service --no-pager    # full transcript
+cat research_store/universe/activation_status.json          # every gate + counts
+tail logs/cohort_activation.log
+```
+
+A RED `systemctl status` after Friday means it HELD — deliberately, at
+`fixed_list`, with nothing changed. The status file says which gate refused.
+
+**To switch it on by hand instead** — this is the only change required, and it is one line in
 your box-local override (`config/strategy.local.toml`, git-ignored, wins over
 the committed config):
 
