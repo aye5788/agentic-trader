@@ -1239,8 +1239,15 @@ def outcome_sets(rows, act_symbols) -> dict:
         if sym in by["ambiguous"] or sym in by["terminal_no_fill"]:
             by["filled"].discard(sym)
             by["live"].discard(sym)
+    # ⛔ `no_fill` IS NOT `retry`. Both get retried, but they are different
+    # FACTS: `no_fill` means the broker answered and executed nothing, which is
+    # a settled outcome worth recording; the rest of `retry` is the executor
+    # saying NOTHING about a symbol, which is an unknown and must never be
+    # written down as "did not execute" (that would suppress the one alarm that
+    # catches an unrecorded fill — see health.unrecorded_fills).
     return {"latch": by["filled"] | by["live"],
             "retry": by["terminal_no_fill"] | (set(act_symbols) - seen),
+            "no_fill": by["terminal_no_fill"] - by["ambiguous"],
             "paused": by["ambiguous"],
             "live": by["live"], "filled": by["filled"]}
 
@@ -2686,6 +2693,24 @@ def check_once(cfg, client) -> int:
         # fractional minimum). A terminal no-fill means nothing executed and
         # nothing is live: it is the ordinary retry path.
         failed = _out["retry"] - _out["paused"]
+        # ⛔ RECORD THAT NOTHING EXECUTED (2026-09-09). Until now the exit path
+        # journalled an `exit_signal` when an order was ATTEMPTED and an
+        # `execution` when one FILLED, and NOTHING AT ALL when the broker took
+        # the order and executed zero — cancelled, rejected, failed, voided.
+        # So the journal could not distinguish "sold and nobody wrote it down"
+        # from "never sold at all", and health.unrecorded_fills — whose whole
+        # job is the first — reported the second as a missing fill. That is
+        # GitHub #16: MU's Labor Day target1 order 6a9ebc9b was cancelled at
+        # the broker with cumulative_quantity 0.000000, and the check called it
+        # an unrecorded trade. The fact was never wrong; it was never written.
+        # Only a symbol the broker ANSWERED about lands here (`no_fill`);
+        # executor silence stays unknown and keeps alarming.
+        if _out["no_fill"]:
+            store.append_journal({"event": "exit_no_fill", "ts": ts,
+                                  "symbols": sorted(_out["no_fill"]),
+                                  "reason": "the broker accepted and terminated these exit "
+                                            "orders with zero executed quantity — nothing "
+                                            "was sold, so there is no fill to record"})
         if failed:
             notify("Exit executor result",
                    f"FAILED/skipped (backing off, will retry): {', '.join(sorted(failed))}"

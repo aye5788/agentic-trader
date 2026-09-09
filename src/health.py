@@ -298,10 +298,20 @@ def unrecorded_fills(journal: list, day: str) -> list:
     """
     traded = {"exit", "trim", "sell", "buy", "add", "open", "increase", "reduce"}
     want, got = set(), set()
+    # `last_try` = when a trade was last ATTEMPTED for a symbol; `no_fill_at` =
+    # when the broker last said it executed NOTHING. See the tail of this
+    # function for why both timestamps are needed and not just the sets.
+    last_try: dict = {}
+    no_fill_at: dict = {}
     for e in journal:
         if str(e.get("ts", ""))[:10] != day:
             continue
-        if e.get("event") == "exit_signal":
+        if e.get("event") == "exit_no_fill":
+            for sym in (e.get("symbols") or []):
+                sym = str(sym).strip().upper()
+                if sym:
+                    no_fill_at[sym] = max(no_fill_at.get(sym, ""), str(e.get("ts", "")))
+        elif e.get("event") == "exit_signal":
             if not e.get("armed") or e.get("halted"):
                 continue          # nothing was meant to be placed
             # ⛔ AND ONLY IF THE EXECUTOR ACTUALLY LAUNCHED. The signal is
@@ -318,6 +328,7 @@ def unrecorded_fills(journal: list, day: str) -> list:
                 sym = str(t.get("symbol") or "").strip().upper()
                 if sym:
                     want.add(sym)
+                    last_try[sym] = max(last_try.get(sym, ""), str(e.get("ts", "")))
         elif e.get("event") == "agent_decision":
             sym = e.get("symbol")
             if sym and sym != "PORTFOLIO" and str(e.get("action", "")).lower() in traded:
@@ -325,6 +336,7 @@ def unrecorded_fills(journal: list, day: str) -> list:
                     one = one.strip()
                     if one and one != "PORTFOLIO":
                         want.add(one)
+                        last_try[one] = max(last_try.get(one, ""), str(e.get("ts", "")))
         elif e.get("event") == "execution":
             for f in (e.get("fills") or []):
                 if f.get("symbol"):
@@ -348,7 +360,31 @@ def unrecorded_fills(journal: list, day: str) -> list:
                 for f in (e.get("fills") or []):
                     if f.get("symbol"):
                         got.add(str(f["symbol"]).upper())
-    return sorted(want - got)
+    # ⛔ AN ORDER THE BROKER EXECUTED NOTHING ON IS NOT A MISSING FILL, BUT ONLY
+    # IF IT IS THE LAST WORD ON THAT SYMBOL (2026-09-09, GitHub #16).
+    #
+    # This check asks "did something execute that nobody wrote down?" and read
+    # every attempted-but-unfilled exit as a yes, because the exit path
+    # journalled an `exit_signal` when an order was ATTEMPTED and an `execution`
+    # when one FILLED — and nothing whatsoever when the broker terminated it
+    # having executed zero. MU's Labor Day target1 (order 6a9ebc9b, state
+    # cancelled, cumulative_quantity 0.000000) fired this: nothing was sold, so
+    # nothing was missing. market_monitor now journals `exit_no_fill` for
+    # exactly that case, and ONLY when the broker answered — executor silence
+    # stays unknown and keeps alarming, because silence is the case where an
+    # order may really have filled unseen.
+    #
+    # ⛔ THE TIMESTAMP COMPARISON IS LOAD-BEARING, NOT DEFENSIVE. A no-fill is
+    # followed by a RETRY, and that retry can fill. Excusing the symbol on the
+    # mere presence of an `exit_no_fill` would let the sequence
+    # signal -> no_fill -> signal -> (fill nobody records) go silent, which is
+    # precisely the failure this whole check exists to catch. A no-fill excuses
+    # a symbol only while it is still the most recent thing said about it; the
+    # next attempt re-arms the alarm. `>=` not `>`: the signal and its no-fill
+    # are journalled in the same tick under the same `ts`.
+    missing = {s for s in want - got
+               if not (s in no_fill_at and no_fill_at[s] >= last_try.get(s, ""))}
+    return sorted(missing)
 
 
 def evaluate(now: dt.datetime, probes: dict) -> list[Check]:
