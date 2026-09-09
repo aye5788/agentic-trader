@@ -8,6 +8,123 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-09 — the stop watcher could not tell a live price from a three-day-old one
+
+Four fixes, all on the exit path, all found by starting from one GitHub issue
+the principal was tired of seeing.
+
+### The morning's state
+
+`agentic-monitor` had been running 19-hour-old code since the previous
+afternoon: 253 lines sat UNCOMMITTED in the working tree, and
+`scripts/reload_stale.py` refuses to deploy from a dirty checkout by design, so
+the 10-minute backstop had been logging `REFUSED — checkout is DIRTY` all night
+and the 08:00 health check paged about it. Committed as `24b0f6b` and deployed.
+
+### `24b0f6b` — a queued exit order latched its trigger and was never re-read
+
+The latch answered the wrong question. `sold`/`placed` decide "should the
+recorders run?" and deliberately fail TOWARDS recording; the latch asks "is this
+trigger spent?", where failing towards yes means NEVER SELLING THIS AGAIN. One
+variable carried both directions, so a REJECTED order marked its level spent and
+dropped out of the retry path. `classify_outcome()` now splits an order row into
+filled / live / terminal_no_fill / ambiguous, and `sweep_pending()` expires a
+latch taken on a `queued` order that never became a fill — which is MU into the
+Labor Day close.
+
+⚠️ Known and NOT fixed, deliberately: the unresolved cleanup deletes a `paused`
+entry whose symbol is not breaching on that tick, so a pause can lift without
+anyone reconciling. Investigated in full this session and judged NOT worth
+building: all three pause paths already phone the principal, the harm needs a
+specific sequence (pause -> price recovers -> re-breaches -> original outcome
+still unknown), and the fix needs a manual release step whose absence would
+leave a position with no working stop indefinitely. Cheaper to leave than to
+build. The narrower gap that remains is that the third path's alert is the
+escalation one, which fires after repeated failures rather than on first pause.
+
+### `e38271b` — an exit the broker never filled read as an unrecorded fill
+
+GitHub #16, and a FALSE POSITIVE. MU's Labor Day target1, order `6a9ebc9b`, came
+back from the broker `state: cancelled`, `cumulative_quantity: 0.000000`,
+`executions: []`. Nothing sold, so nothing was missing.
+
+The fact was never wrong — it was never written. The exit path journalled
+`exit_signal` when an order was ATTEMPTED and `execution` when one FILLED, and
+NOTHING when the broker terminated one having executed zero, so the journal
+could not tell "sold and nobody recorded it" from "never sold at all".
+`exit_no_fill` is now journalled for exactly that case, and only when the broker
+ANSWERED — executor silence stays unknown and keeps alarming. `unrecorded_fills`
+honours it only while it is the LAST word on the symbol, because a no-fill is
+followed by a retry and that retry can fill.
+
+### `d7d0216` — a stale feed silently disabled the stop
+
+The one this all led to, and the one OPSLOG 2026-09-07 called the bigger of the
+two holes it left open. `live_quotes()` built each quote from a moomoo record
+and discarded `update_time`, while `snapshot_ohlc()` — reading the IDENTICAL
+record 60 lines above — uses it and errors when it is absent. `QuoteFeedError`
+and the feed-down ladder fire only when the CALL fails, so a wedged-but-
+answering OpenD reads as perfectly healthy: on 09-07 it returned Friday's closes
+and the monitor compared them to every stop, found no breach, and logged a
+healthy tick.
+
+⛔ THE FEED IS NOW CHECKED AGAINST ITSELF, NOT AGAINST OUR CLOCK. The earlier
+entry treated `update_time`'s undocumented timezone as a blocker needing a
+phased fix. It is not one: a wedged feed is a timestamp that stops moving, and
+you do not need to know what timezone a clock is in to see it is not ticking.
+`newest_feed_ts()` takes the newest stamp across the book by string compare (the
+format sorts chronologically, so it is never parsed); `feed_stalled()` counts
+consecutive polls on which it has not advanced. Book-wide, never per-symbol — a
+thin name can legitimately go minutes without a print. Immune to the timezone
+question, to DST and to half-day closures alike.
+
+(Incidentally settled while verifying: `update_time` is ET. At 08:43 EDT the
+live stamps read 08:43, not 12:43. The fix does not depend on it.)
+
+### `3aea226` — the stop watcher polled all day on market holidays
+
+`market_open()` tested weekday and clock alone. `is_trading_day()` has existed
+since 2026-08-10 for exactly this and `fetch_prices` adopted it; the monitor
+never did. `market_open()` STAYS PURE — the calendar is a separate cached gate,
+`trading_day()`, applied alongside it at both call sites in `main()`.
+
+⛔ UNKNOWN MEANS RUN, NEVER HALT. `is_trading_day` returns None for "could not
+tell", and a calendar lookup that fails must never be what stops the stop
+watcher on a real trading day. Asked once per ET date, not once per 15s poll;
+only definitive answers cached; an inconclusive one retried at most every 15
+minutes so a transient failure cannot silently disable the gate for a day.
+
+This also settles the holiday noise `d7d0216` would otherwise create: a frozen
+feed on a holiday would trip the new stall detector all day. The monitor now
+never polls on a holiday, so there is nothing to trip.
+
+⚠️ NOT covered: `is_trading_day` returns True for HALF days, whose 13:00 close
+the clock check does not know about, so the stall detector will alert through a
+half-day afternoon. Two or three days a year.
+
+### The judgement this overturned, and why it is recorded
+
+OPSLOG 2026-09-07 left the holiday gap open on the reasoning that the case is
+"harmless (a shut market can breach no stop)". True of the stop — but not of the
+ORDER it placed, which sat live at the broker good for the next session and
+would have sold at Tuesday's open had the 10:35 session not cancelled it by
+hand; and not of the take-profit latch that order then held spent, which is
+`24b0f6b`. "No money moved" was true because a session caught it, not because
+the design prevented it. A backstop holding is not a gate working.
+
+### `health_check.py` — one issue per finding
+
+The title IS the dedupe key, and it was one constant string, so twelve unrelated
+findings wore one name and none could be closed on its own. The principal raised
+this on 2026-09-04; the half fixed then was detectors no longer spending a model
+run. This is the other half. `issue_title()` gives each finding
+`🔴 {label} [{key}]`, and the refile check now asks per finding instead of
+asking whether THE one shared issue is open.
+
+⛔ THE KEY SUFFIX IS LOAD-BEARING. Every repo-state finding shares the label
+"Repo state drift" and differs only by digest; titling by label alone would
+merge distinct drifts straight back into one issue.
+
 ## 2026-09-09 — the adaptive-input layer is deleted (it was "gone" and still running)
 
 **What happened.** The principal was told by earlier sessions that the adaptive

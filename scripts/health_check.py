@@ -55,8 +55,27 @@ STATE = REPO / "research_store" / "health_state.json"
 
 # The issue title is the dedupe key: an open issue with this exact title gets
 # a comment instead of a new issue, so a still-broken condition doesn't spam a
-# fresh issue every day. Keep it stable.
-ISSUE_TITLE = "\U0001F534 Scheduled job unhealthy"  # "🔴 Scheduled job unhealthy"
+# fresh issue every day. It must therefore be STABLE PER FINDING.
+#
+# ⛔ IT USED TO BE ONE CONSTANT STRING FOR EVERYTHING (until 2026-09-09):
+# "🔴 Scheduled job unhealthy", with every finding appended to the same issue as
+# a comment. Deduplication worked, but the principal's issue list read as twelve
+# identical lines for twelve unrelated problems — a stale Schwab token, a dead
+# service, a missed universe refresh and a false unrecorded-fill all wearing one
+# name — so nothing could be told apart or closed on its own, and the list
+# looked like a single bug nobody ever fixed. He raised that on 2026-09-04; the
+# half that was fixed then was detectors no longer spending a model run (they
+# file `bug`+`ops`, never `auto-fix`). This is the other half.
+#
+# ⛔ THE KEY SUFFIX IS LOAD-BEARING, NOT DECORATION. Every repo-state finding
+# shares ONE label ("Repo state drift") and differs only by key
+# (`repo_check:<digest>` — a digest of the finding text). Titling by label alone
+# would silently merge distinct drifts back into a single issue, which is the
+# very defect this replaces. The key is what makes each title unique and stable.
+def issue_title(c) -> str:
+    """The dedupe key for one finding's issue. Stable for as long as the
+    finding is, unique across findings. Pure."""
+    return f"\U0001F534 {c.label} [{c.key}]"
 
 # Created idempotently before filing — a fresh repo (or a fresh mirror) may not
 # have these labels yet, and `gh issue create --label` needs them to exist.
@@ -384,39 +403,54 @@ def file_issue(to_alert, *, dry: bool) -> bool:
     Wrapped so any `gh` failure prints a diagnostic and returns — filing is a
     bonus channel, never allowed to break the check or the phone push (the
     primary channel), which have already run by the time this is called.
+
+    ⛔ ONE ISSUE PER FINDING (2026-09-09). This filed a single issue for the
+    whole batch, so unrelated problems accumulated in one thread under one
+    generic name and none could be closed on its own. Each finding now gets its
+    own issue, deduped on its own title — see issue_title(). A day with three
+    findings opens three issues, which is the point: they are three problems.
+
+    Returns True iff EVERY alerting finding reached GitHub. A partial success
+    returns False so the run is retried later, which is safe: the ones that did
+    land are found open by title next time and are commented, never duplicated.
     """
     if not to_alert:
         return False
-    body = issue_body(to_alert)
     if dry:
-        print(f"--- would file/comment issue (dry) ---\n{ISSUE_TITLE}\n{body}\n"
-              f"{'-' * 30}")
+        for c in to_alert:
+            print(f"--- would file/comment issue (dry) ---\n{issue_title(c)}\n"
+                  f"{issue_body([c])}\n{'-' * 30}")
         return False
-    try:
-        number = _find_open_issue(ISSUE_TITLE)
-        if number is not None:
-            ok, _, err = _gh(["issue", "comment", str(number), "--body", body])
+    filed = 0
+    for c in to_alert:
+        title, body = issue_title(c), issue_body([c])
+        try:
+            number = _find_open_issue(title)
+            if number is not None:
+                ok, _, err = _gh(["issue", "comment", str(number), "--body", body])
+                if ok:
+                    print(f"gh: commented on existing issue #{number} ({c.key})")
+                    filed += 1
+                else:
+                    print(f"gh: could not comment on issue #{number} (continuing): "
+                          f"{err.strip()[:200]}")
+                continue
+            # Labels are only needed on the create path (`gh issue create --label`
+            # requires them to exist); skip the two extra API calls on the far
+            # more common comment path above.
+            _ensure_labels()
+            ok, out, err = _gh(["issue", "create", "--title", title,
+                                 "--body", body, "--label", "bug",
+                                 "--label", ISSUE_LABEL])
             if ok:
-                print(f"gh: commented on existing issue #{number}")
-                return True
-            print(f"gh: could not comment on issue #{number} (continuing): "
-                  f"{err.strip()[:200]}")
-            return False
-        # Labels are only needed on the create path (`gh issue create --label`
-        # requires them to exist); skip the two extra API calls on the far
-        # more common comment path above.
-        _ensure_labels()
-        ok, out, err = _gh(["issue", "create", "--title", ISSUE_TITLE,
-                             "--body", body, "--label", "bug",
-                             "--label", ISSUE_LABEL])
-        if ok:
-            print(f"gh: filed issue {out.strip()}")
-            return True
-        print(f"gh: could not create issue (continuing): {err.strip()[:200]}")
-        return False
-    except Exception as e:  # belt-and-braces: filing must never break the run
-        print(f"gh: issue filing crashed unexpectedly (continuing): {e}")
-        return False
+                print(f"gh: filed issue {out.strip()} ({c.key})")
+                filed += 1
+            else:
+                print(f"gh: could not create issue (continuing): {err.strip()[:200]}")
+        except Exception as e:  # belt-and-braces: filing must never break the run
+            print(f"gh: issue filing crashed unexpectedly for {c.key} "
+                  f"(continuing): {e}")
+    return filed == len(to_alert)
 
 
 def main() -> None:
@@ -547,8 +581,15 @@ def main() -> None:
         adopted = [k for k, e in flagged.items()
                    if k not in new_keys and e.get("filed", True)
                    and not e.get("refiled", False) and k in rows_by_key]
-        if adopted and _find_open_issue(ISSUE_TITLE) is None:
-            orphaned = [rows_by_key[k] for k in adopted]
+        # ⛔ ASKED PER FINDING SINCE 2026-09-09. This used to ask whether THE one
+        # shared issue was open, so one still-open issue about condition A
+        # suppressed the re-file of condition B. With an issue per finding the
+        # question is per finding, which is both correct and simpler. `adopted`
+        # is almost always empty (it needs a human to have closed an issue while
+        # its condition is still live), so the extra lookups cost nothing in the
+        # normal case.
+        orphaned = [rows_by_key[k] for k in adopted
+                    if _find_open_issue(issue_title(rows_by_key[k])) is None]
 
         to_file = to_alert + retry + orphaned
         if to_file:
@@ -708,13 +749,23 @@ def _selftest() -> None:
     # branch must not shadow it
     assert _remedy(bad) == NEVER_REMEDY and _remedy(blocked) == BLOCKED_REMEDY
 
+    # --- issue_title (the dedupe key: stable per finding, unique across them) ---
+    _a = health.Check("unrecorded_fills", "Unrecorded fills", None, "unrecorded", "x")
+    _b = health.Check("repo_check:a03b64cd", "Repo state drift", None, "drift", "y")
+    _c = health.Check("repo_check:deadbeef", "Repo state drift", None, "drift", "z")
+    assert issue_title(_a) == "\U0001F534 Unrecorded fills [unrecorded_fills]", issue_title(_a)
+    assert issue_title(_a) == issue_title(_a), "the same finding must dedupe to itself"
+    assert issue_title(_b) != issue_title(_c), \
+        "two repo-state drifts share a LABEL and must NOT share an issue title"
+
     # --- _match_issue (pure dedupe-lookup logic, no subprocess) ---
-    items = [{"number": 7, "title": ISSUE_TITLE}, {"number": 9, "title": "unrelated"}]
-    assert _match_issue(items, ISSUE_TITLE) == 7, "exact match must be found"
+    _t = issue_title(_a)
+    items = [{"number": 7, "title": _t}, {"number": 9, "title": "unrelated"}]
+    assert _match_issue(items, _t) == 7, "exact match must be found"
     assert _match_issue(items, "no such title") is None, "no match must return None"
-    assert _match_issue([], ISSUE_TITLE) is None, "empty list must return None"
-    near_miss = [{"number": 3, "title": ISSUE_TITLE + " "}]  # trailing-space drift
-    assert _match_issue(near_miss, ISSUE_TITLE) is None, \
+    assert _match_issue([], _t) is None, "empty list must return None"
+    near_miss = [{"number": 3, "title": _t + " "}]  # trailing-space drift
+    assert _match_issue(near_miss, _t) is None, \
         "a near-miss title must NOT match (avoids soaking up a different issue)"
 
     print("health_check selftest: PASS")

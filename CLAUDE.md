@@ -755,7 +755,15 @@ scripts/health_check.py THE UPKEEP REMINDER (daily 08:00). Runs health.checks() 
                         job leave evidence it ran"; since 2026-08-31 two ask
                         whether what it produced is USABLE — see src/health.py.
                         `--open-issue` files a deduped `bug`+`ops` GitHub issue
-                        FOR THE RECORD. ⛔ NEVER `auto-fix` (2026-09-04): that
+                        FOR THE RECORD — ⛔ ONE PER FINDING SINCE 2026-09-09,
+                        titled `🔴 {label} [{key}]` by issue_title(). It was one
+                        constant title for everything, and the title IS the
+                        dedupe key, so twelve unrelated problems wore one name
+                        and none could be closed on its own. The KEY SUFFIX is
+                        load-bearing: every repo-state finding shares the label
+                        "Repo state drift" and differs only by digest, so
+                        titling by label alone would merge them straight back.
+                        ⛔ NEVER `auto-fix` (2026-09-04): that
                         label runs a Claude Code session on Actions billed to
                         the principal's subscription, and 9 such runs since
                         08-10 all ended "ops, no PR". The agent runs only when
