@@ -126,7 +126,9 @@ decision was already made — by you, earlier.
 `enforcement.stop.enforced: true` is the only evidence the monitor will act. It
 will be **false** — and the position unprotected overnight — whenever your stop
 is looser than the one already set, or the target list you supplied does not
-match the number of targets the thesis carries. `positions()` shows you that
+match the number of targets the thesis carries, or your stop sits at or above
+the live price — the monitor refuses that one outright, because arming it would
+fire an immediate market sell. `positions()` shows you the thesis's target
 list; supply all of them. A name with no thesis is NOT one of these causes: the
 monitor watches an owned position on your own stop whether or not tonight's
 book carries a thesis for it.
@@ -134,8 +136,10 @@ book carries a thesis for it.
 **One cause of `false` is transient and expected: the broker has not yet
 confirmed you own the position.** That is the normal reading for a level you
 wrote before placing the order, which is where a level should be written — see
-SIZING AND STOPS. It clears once your fill reaches the snapshot. The causes above
-do not clear on their own; tell them apart by whether you have just ordered.
+SIZING AND STOPS. It clears once your fill reaches the snapshot. Two of these
+clear on their own — an unconfirmed fill, and a stop the monitor has no quote to
+check yet. The rest need you to act, and the `note` on the enforcement object
+says which you have.
 
 **A name outside the configured universe is watched on your own stop like any
 other owned position** — the gate refuses those buys, so this only ever applies
