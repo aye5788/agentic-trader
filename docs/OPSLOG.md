@@ -61,6 +61,22 @@ sandbox. `~/.codex/config.toml` already rules it out in terms that apply here
 verbatim: *"it removes the read-only sandbox, which is the safety property being
 protected."*
 
+⚠️ **And be precise about WHY read-only custody cannot write through MCP**,
+because the obvious reason is the wrong one. It is NOT that the sandbox blocks
+the write: the MCP server runs OUTSIDE the sandbox as its own process, which is
+exactly what would have made custody's writes safe. It is that under
+`approval_policy="never"` **no MCP call is permitted at all** — the refusal
+lands at the approval boundary before the server is asked to do anything, so
+`set_levels` and `positions()` fail identically. Custody would be a session that
+can call nothing.
+
+**Status, recorded 2026-09-11 at the principal's instruction: §5 is BLOCKED, not
+deferred** — deferred means we chose not to build it; blocked means it cannot be
+built as designed. Unblocking requires an UPSTREAM Codex CLI/MCP capability that
+permits the restricted tool calls without disabling the sandbox or bypassing the
+approval boundary. When that lands, the §8.5 spike is re-run FIRST. The spec's
+§5 now carries the full status block.
+
 **Outcome B (route through `scripts/agent_view.py`)** does not rescue it, and
 this is the finding that was not in the spec. **Custody has to WRITE** —
 `set_levels`, `record_decision`, `open_question` are the whole point of the

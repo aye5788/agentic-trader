@@ -3,13 +3,10 @@
 **Date:** 2026-09-03
 **Status:** approved by the principal (Aaron) 2026-09-03. LANDED 2026-09-04
 before the open: §1, §2, §3, §4, §6, §7, §8.1–8.4 (OPSLOG 2026-09-04, three
-entries). **§5 custody mode DEFERRED** by the principal 2026-09-04: the
-code seller already covers the money-critical piece (a Claude outage
-cannot leave a breached position unsold), and the §8.5 spike — a headless
-`codex exec` calling one MCP tool on Codex 0.148 — produced no output in
-180 s, consistent with the 08-14 cancellation bug still standing. If
-wanted later, that spike is the first step. Budget step: INERT by the
-principal's decision 2026-09-04. Session chain therefore ends at Fable.
+entries). **§5 custody mode is BLOCKED** — see the status block at the head
+of §5; it was DEFERRED 2026-09-04 and reclassified BLOCKED 2026-09-11 after
+the spike was re-run. Budget step: INERT by the principal's decision
+2026-09-04. Session chain therefore ends at Fable.
 **Trigger:** the 2026-09-03 Claude model outage (`docs/OPSLOG.md`, same date).
 
 ## 0. What happened and what it exposed
@@ -51,6 +48,15 @@ of the morning entry): **fallback is automatic, only on a clean failure, across
 a cross-family chain; the exit path ends in a model-free code seller; sessions
 end in a Codex custody mode that cannot trade.** Full cross-vendor *trading*
 (a harness-independent order gate) is explicitly OUT of scope — see §10.
+
+⛔ **THE LAST CLAUSE OF THAT POLICY IS NOT IN FORCE AND CANNOT BE BUILT TODAY.**
+Sessions do NOT end in a custody mode: the chain ends at
+`claude-fable-5-1`, and `[terminal] session` is `"none"`. §5 is BLOCKED
+(2026-09-11) — read its status block before relying on this paragraph. The
+first two clauses ARE in force. Left in place because it records what was
+decided on 2026-09-03; marked because a policy sentence read as a description
+of the running system is how this repo has twice inherited a feature that did
+not exist.
 
 ## 1. Model config with a local override
 
@@ -246,7 +252,85 @@ restart between the sale and the bookkeeping is safe.
 The monitor restarts via `scripts/reload_stale.py`, which refuses while an
 exit is in flight.
 
-## 5. Custody mode (sessions, terminal step, Codex) — DEFERRED 2026-09-04 (see Status)
+## 5. Custody mode (sessions, terminal step, Codex) — ⛔ BLOCKED 2026-09-11
+
+> **STATUS: BLOCKED, not deferred.** Deferred means "we chose not to build this
+> yet". Blocked means "it cannot be built as designed", and that is now the
+> case. Reclassified by the principal 2026-09-11 after the §8.5 spike was
+> re-run. **Nothing in this section is implemented**, and it must not be marked
+> implemented: `[terminal] session` is `"none"`, `scripts/session.py` does not
+> read `models.terminal` at all, and no custody charter, `--custody` flag or
+> launch path exists.
+>
+> **What would unblock it:** a Codex CLI/MCP capability that permits the
+> restricted tool calls below **without disabling the sandbox and without
+> bypassing the approval boundary**. That is an upstream change, not a
+> configuration we have missed — see the evidence below. When upstream behaviour
+> changes, **re-run the §8.5 spike first**; it remains step 1 and this section
+> stays blocked until it passes.
+>
+> ### The evidence, 2026-09-11
+>
+> **Version and observed failure.** `codex-cli 0.154.0` (the 2026-09-04 spike
+> was 0.148). Cron PATH, auth present, the reviewer's own proven flags
+> `--sandbox read-only -c approval_policy="never"`, calling one read tool:
+>
+> ```
+> mcp: agentic-trader/ping (failed)
+> MCP tool call requires approval, but approval policy is never
+> ```
+>
+> The wording has moved on from 2026-08-14's "user cancelled MCP tool call";
+> the effect has not. `openai/codex#16685` remains OPEN. Re-confirmed dead one
+> at a time: `mcp_servers.<n>.auto_approve`, `mcp_servers.<n>.trust_level`,
+> `tools.mcp.auto_approve`, and `default_tools_approval_mode = "auto"` (already
+> recorded as dead in `~/.codex/config.toml` on 2026-08-14). `--full-auto` is
+> not a flag `codex exec` accepts in 0.154.
+>
+> **Why read-only custody cannot write through the MCP surface.** Not because
+> the sandbox blocks the write — the MCP server runs OUTSIDE the sandbox, as
+> its own process, which is precisely what would have made custody's writes
+> safe. It is simpler and more total than that: under `approval_policy="never"`
+> **no MCP call is permitted at all.** Reads and writes fail identically, at the
+> approval boundary, before the server is ever asked to do anything. Custody's
+> whole purpose — `set_levels`, `record_decision`, `open_question` — is
+> unreachable, and so is `positions()`.
+>
+> **Why the Outcome B shim is unsafe, and this is the finding that decides it.**
+> Routing the same tool set through `scripts/agent_view.py` does not rescue the
+> mode. A shim invoked by Codex runs as Codex's child and inherits Codex's
+> sandbox, so under `--sandbox read-only` its writes are blocked — the shim
+> cannot set a level. Raising the sandbox to `workspace-write` makes the writes
+> succeed and simultaneously lets the session write `research_store/` files
+> DIRECTLY, including `overrides.json`, which the monitor acts on — bypassing
+> `set_levels`' own price guards (finite-positive stop, strictly below spot,
+> `widen` requires a reason). That is a WIDER blast radius than the MCP surface
+> custody exists to narrow, not a smaller one. This section's original text
+> assumed Outcome A's containment without noticing that the containment came
+> from the MCP server being a separate process; no shim inherits that property.
+>
+> **Why `--dangerously-bypass-approvals-and-sandbox` is unacceptable.** It is
+> the only setting that makes the MCP calls go through, and it removes the
+> read-only sandbox — the safety property the whole mode is built on.
+> `~/.codex/config.toml` already rules it out for the reviewer in terms that
+> apply here verbatim: *"it removes the read-only sandbox, which is the safety
+> property being protected. A reviewer that can act is a second trader."* A
+> custody session that can act outside its tool surface is the same objection
+> with money attached.
+>
+> ### What stands in its place
+>
+> - **The fallback chain remains `claude-opus-5 → claude-sonnet-5 →
+>   claude-fable-5-1`.** Unchanged, and the session chain ends at Fable.
+> - **`code_seller` remains the live terminal fallback for money-critical
+>   exits** (§3, live 2026-09-04). So the consequence that actually costs money
+>   — a breached position with no Claude available — is covered without this
+>   section. Custody only ever added level management on a day no Claude session
+>   can run.
+>
+> Full write-up: `docs/OPSLOG.md` 2026-09-11, "custody mode: the spike is the
+> spec's step 1, and it still fails".
+
 
 **Spike first.** A headless `codex exec` against the reviewer's existing
 read-only `agentic-trader` server, launched with the cron PATH, calling

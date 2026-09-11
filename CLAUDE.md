@@ -394,7 +394,27 @@ src/fallback.py         THE CHAIN WALK (2026-09-04). One rule: the next model
                         Claude model at once: the budget step is declared
                         INERT (principal, 2026-09-04). The EXIT chain ends in
                         the code seller below; the SESSION chain ends at Fable
-                        (Codex custody mode DEFERRED 2026-09-04).
+                        — `claude-opus-5 → claude-sonnet-5 → claude-fable-5-1`,
+                        and `[terminal] session = "none"`.
+                        ⛔ CODEX CUSTODY MODE (spec §5) IS **BLOCKED**, not
+                        merely deferred, since 2026-09-11. `codex exec` cannot
+                        call an MCP tool at all under
+                        `approval_policy="never"` — 0.154.0 returns "MCP tool
+                        call requires approval, but approval policy is never",
+                        and openai/codex#16685 is still open. The only setting
+                        that lifts it is
+                        `--dangerously-bypass-approvals-and-sandbox`, which
+                        removes the read-only sandbox that is the whole point.
+                        Routing through scripts/agent_view.py instead does NOT
+                        rescue it: a shim inherits codex's sandbox, so
+                        read-only blocks the writes custody exists to make, and
+                        workspace-write would let it write overrides.json
+                        directly, bypassing set_levels' price guards — a WIDER
+                        blast radius than the MCP surface. Nothing is
+                        implemented and nothing may be marked implemented.
+                        Unblocking needs an UPSTREAM change, then the §8.5
+                        spike re-run FIRST. See docs/OPSLOG.md 2026-09-11 and
+                        the §5 status block.
 scripts/code_seller.py  THE MODEL-FREE EXIT (spec §3, live 2026-09-04): the
                         exit chain's terminal step, reached ONLY after every
                         model failed cleanly. Same request id (the hook's own
