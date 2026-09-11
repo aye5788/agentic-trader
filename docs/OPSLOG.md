@@ -8,6 +8,86 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-11 (later) — the charter did not lose a safety claim; the test was pinning behaviour the code outgrew
+
+Follow-up on `c1842d3`. A charter assertion requiring the phrase **"could not be
+given an enforced stop"** fails. The question was whether the rendered charter
+had dropped a required safety statement or the assertion had gone stale. It is
+stale, and establishing that corrected a claim I had made the same day and got
+wrong.
+
+### The timeline, from the commits
+
+| When | What | Effect on the claim |
+| --- | --- | --- |
+| 2026-08-12 `4004768` | charter phrase + assertion added: a name with no thesis "could not be given an enforced stop … no thesis, nothing watching" | TRUE as written |
+| 2026-08-20 `de55a69` | *"enforce agent-set stops with no thesis"* — adds `market_monitor.arm_standalone()` | claim becomes FALSE |
+| 2026-09-02 `fce6497` | charter rewritten to "watched on your own stop like any other owned position" | charter now CORRECT; assertion left behind |
+
+So the charter **gained** an accurate claim on 09-02 and the test kept pinning
+the pre-08-20 world. Thirteen days at the charter level, twenty-two at the code
+level, and nothing reported it — `deploy/run_selftests.sh` is manual and on no
+schedule, which is the same gap the flag-retirement entry above records.
+
+### ⛔ AND IT CORRECTED ME, NOT THE OTHER WAY ROUND
+
+Earlier the same day, auditing the off-book-holdings question, I traced the
+monitor's watched set as `prod.theses` → ownership filter → `apply_overrides`,
+observed that `apply_overrides` iterates `held.items()` and can only modify
+existing theses, and concluded that **an agent-set stop on a held name with no
+thesis is inert**. I wrote that into the principal's memo.
+
+**That is wrong.** The trace stopped too early. Roughly a hundred lines further
+down the same tick, `standalone_candidates(owned, overrides, set(held))` collects
+owned names that have an override and are not already watched, and
+`arm_standalone()` turns them into watchable theses. Exercised against the real
+functions, one book with MU and an owned, thesis-less XYZ carrying an
+override-only stop of 50:
+
+| live price for XYZ | result |
+| --- | --- |
+| 60 (above the stop) | **watched** — `held` gains XYZ |
+| 40 (at or below the stop) | refused: *"stop 50 is at or above spot 40 — arming it would fire an immediate market sell"* |
+| absent | refused: *"no live price yet — cannot verify the stop is below spot"* |
+| non-finite | refused: *"price is not a finite positive number"* |
+
+A refused name stays in `unprotected`, where it is already alarmed. The price
+guard is the whole safety argument and every refusal is the safe direction.
+
+The lesson is the one this log keeps recording in other people's code: a partial
+trace reads exactly like a complete one. The `apply_overrides` reading was
+correct and the conclusion drawn from it was not, because the pipeline had
+another stage.
+
+### The change
+
+`src/charter.py` now asserts the CURRENT wording —
+`"watched on your own stop like any other owned position"` — with the timeline
+above recorded beside it, the arming condition stated, and the production
+evidence quoted. Option chosen deliberately: the charter text is **not**
+reverted, because reverting it would put a false safety claim back in front of
+the agent every session.
+
+Matched against whitespace-normalised text via `_flat()`. Written first as the
+sentence reads on screen, which failed at once — the charter hard-wraps after
+"like any". That is the second time today a hand-written anchor broke on a wrap;
+both are now normalised.
+
+Confirmed the replacement still bites: substituting the pre-08-20 sentence back
+into the rendered charter makes the assertion fail.
+
+### ⚠️ Open, and a charter question rather than a code one
+
+**The charter states the arming and not the refusal.** Nothing in
+`prompts/charter.md` tells the agent that a stop at or above spot will be
+REFUSED and leave the position unprotected — the monitor pushes "Agent-set stop
+NOT enforceable" to a phone, and the charter is silent. An agent setting a stop
+above spot on a name it holds would read the charter's sentence and believe it
+protected. Recorded, not fixed: adding it is a charter edit the principal has
+not asked for, and this session was scoped to the discrepancy.
+
+---
+
 ## 2026-09-11 — four of the eleven deferred items were already fixed; the list was the stale part
 
 The principal asked for an audit of every remaining deferred item. Four of them

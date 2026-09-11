@@ -666,7 +666,36 @@ def _selftest() -> None:
     # dangerous class of error here, because the agent cannot check and will rely.
     assert "a level is not enforced until the tool says it is" in out.lower()
     assert "enforcement.stop.enforced: true" in out
-    assert "could not be given an enforced stop" in out
+    # ⛔ REPLACED 2026-09-11 — THE OLD ASSERTION PINNED A CLAIM THE CODE OUTGREW.
+    # It required "could not be given an enforced stop", which was TRUE when it
+    # was written on 2026-08-12 (4004768): a name with no thesis was unwatched
+    # however carefully the agent set its levels. `de55a69` (2026-08-20) added
+    # market_monitor.arm_standalone() -- "enforce agent-set stops with no
+    # thesis" -- and `fce6497` (2026-09-02) updated the charter to match. The
+    # assertion was left pinning the pre-08-20 behaviour and has been failing
+    # ever since. This is a stale TEST, not a lost safety statement: the charter
+    # gained a correct claim, it did not drop a required one.
+    #
+    # Established from the PRODUCTION PATH, not from a suite. With MU in the book
+    # and XYZ owned with an override-only stop of 50:
+    #   standalone_candidates(owned, overrides, set(held)) -> ['XYZ']
+    #   arm_standalone({'XYZ': ...}, {'XYZ': 60.0})        -> held gains XYZ
+    # so an owned, thesis-less symbol IS watched on the agent's own stop.
+    #
+    # ⚠️ CONDITIONALLY. It arms ONLY when a live price proves the stop sits below
+    # spot. Measured on the same call: a stop at or above spot is refused ("would
+    # fire an immediate market sell"), and so are an absent price and a
+    # non-finite one. A refused name stays UNPROTECTED, and is alarmed there.
+    # ⚠️ THE CHARTER STATES THE ARMING AND NOT THE REFUSAL. Nothing in
+    # prompts/charter.md tells the agent a stop at or above spot will be refused
+    # and leave the position unprotected -- the monitor pushes "Agent-set stop
+    # NOT enforceable" to a phone, and the charter is silent. Recorded here
+    # rather than quietly assumed away; it is a charter question for the
+    # principal, not something to fix inside a test.
+    # Matched against WHITESPACE-NORMALISED text: the sentence hard-wraps after
+    # "like any", so the literal fragment is absent from `out` even though the
+    # charter says it. Written first as it reads on screen and caught here.
+    assert "watched on your own stop like any other owned position" in _flat(out)
     # ⚠️ THE CHARTER MUST NOT GRANT A PERMISSION THE GATE REFUSES. Three passages
     # told the agent it could trade off-universe ("you may act on one", "if you
     # take one", and an announce-first class for it) while require_whitelist=true
