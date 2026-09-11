@@ -167,6 +167,13 @@ REPO_CHECK_REMEDY = ("Run `.venv/bin/python src/repo_checks.py` on the box for t
                      "full list — a config/CI/permission file drifted from what the "
                      "system assumes")
 
+# ⛔ THE ONE MARKER THAT SAYS "THE REPO CHECKS DID NOT RUN", shared by the only
+# two places that may care: repo_check_rows() writes it, retired_repo_flags()
+# reads it. It was a bare literal in both, 300 lines apart, and the second one
+# decides whether a standing finding keeps its flag — so a reworded failure
+# message would have silently turned a crashed run into "everything healed".
+REPO_CHECK_FAILED_PREFIX = "src/repo_checks.py could not run:"
+
 
 def _rows_from_findings(findings: list[str]) -> list:
     """Pure: repo_checks findings -> health.Check rows. No filesystem, no clock.
@@ -175,8 +182,17 @@ def _rows_from_findings(findings: list[str]) -> list:
     keys off `Check.key`: an aggregate "repo_checks" key would alert on the first
     drift and then stay silent about every later, different one until someone
     fixed the first. The key is a digest of the message, so a resolved finding
-    disappears from `rows` and diff()'s retired-check clause drops its flag,
+    disappears from `rows` and its flag is dropped by retired_repo_flags(),
     while a NEW finding is a new key and is audible immediately.
+
+    ⚠️ NOT by diff()'s retired-check clause, which this docstring named until
+    2026-09-11. That clause refuses any key `health.is_known_key` says the
+    system can still emit, and "repo_check:" is one of its prefixes — so from
+    2026-08-21 (a4e20a9) to 2026-09-01 (660df9d) a repaired drift kept its flag
+    for ever, and fire-once then permanently silenced that drift if it returned.
+    Three flags sat that way. retired_repo_flags() is the clause that does it
+    now, and it is separate because it needs one fact diff() cannot see: whether
+    the checks RAN.
 
     `last_seen` is None: these are not scheduled jobs and have no "ran at" time —
     they are statements about the repo as it is right now.
@@ -201,7 +217,7 @@ def repo_check_rows(root: pathlib.Path) -> list:
         findings = repo_checks.checks(root)
     except Exception as e:
         return _rows_from_findings(
-            [f"src/repo_checks.py could not run: {type(e).__name__}"])
+            [f"{REPO_CHECK_FAILED_PREFIX} {type(e).__name__}"])
     return _rows_from_findings(findings)
 
 
@@ -272,6 +288,58 @@ def diff(rows, flagged: dict) -> tuple[list, list]:
     healed += [k for k in flagged
                if k not in live and not health.is_known_key(k)]
     return to_alert, healed
+
+
+def repo_checks_ran(rows) -> bool:
+    """Did src/repo_checks.py actually complete this run? Pure.
+
+    It never raises — repo_check_rows() turns its own crash into a FINDING —
+    so the only evidence that it did not run is that synthetic row. Absence of
+    repo rows is NOT evidence either way: a clean repo produces none.
+    """
+    return not any(c.key.startswith(REPO_CHECK_PREFIX)
+                   and str(c.detail).startswith(REPO_CHECK_FAILED_PREFIX)
+                   for c in rows)
+
+
+def retired_repo_flags(rows, healed: list, flagged: dict) -> list:
+    """Pure: which repo_check flags are retired because their drift is REPAIRED.
+
+    ⛔ THIS IS SEPARATE FROM diff() ON PURPOSE, not by oversight. diff() refuses
+    to drop any key `health.is_known_key` says the system can still emit, and
+    "repo_check:" is one of its prefixes — the rule that stops a probe which
+    merely went quiet (`_unrecorded_fills_probe`, `_deployed_probe`) from being
+    reported "healed". A repo_check key is different in kind: it is a DIGEST OF
+    THE FINDING TEXT, so once the drift is repaired that exact key can never be
+    emitted again and its absence really is retirement.
+
+    Between 2026-08-21 (a4e20a9 added the prefix) and 2026-09-01 (660df9d added
+    this clause inside main()) that flag outlived its finding. Three sat stuck
+    with their drifts already repaired — reentry_review, trails.json and the
+    exit-executor exit_result.json (af89c05 moved the deny to the directory;
+    bb1ff7b corrected which settings file is checked). A stuck flag is not
+    inert: fire-once keys off `flagged`, so it permanently silences that finding
+    should the same drift ever return. That is the schwab_token leak diff()'s
+    own docstring was written about, reintroduced through the prefix.
+
+    ⛔ ONLY WHEN THE CHECKS ACTUALLY RAN. On a crashed run repo_check_rows()
+    emits one synthetic row and none of the real keys, which would otherwise
+    read as every repo finding healing at once on the strength of a run that
+    never happened — the same mistake is_known_key exists to prevent. So the
+    answer there is "retire nothing", and it is guarded here rather than by
+    relaxing is_known_key, which still protects the two silent probes.
+
+    Lives outside main() since 2026-09-11 so the contract is one named function
+    that can be exercised directly; it was twelve lines of inline policy that
+    scripts/health_check.py's own logic tests could not reach, which is why they
+    asserted diff() did it and had been failing since a4e20a9.
+    """
+    if not repo_checks_ran(rows):
+        return []
+    live_keys = {c.key for c in rows}
+    return [k for k in flagged
+            if k.startswith(REPO_CHECK_PREFIX)
+            and k not in live_keys and k not in healed]
 
 
 def compose(to_alert) -> tuple[str, str]:
@@ -477,37 +545,7 @@ def main() -> None:
 
     to_alert, healed = diff(rows, flagged)
 
-    # ⛔ A CONTENT-HASHED repo_check FLAG CANNOT HEAL ON ITS OWN, and diff() has
-    # no way to know that. Its retired-flag clause refuses to drop any key
-    # `health.is_known_key` says this system can still emit, and KEY_PREFIXES
-    # carries "repo_check:" -- so the flag outlives the finding. But a
-    # repo_check key is a DIGEST OF THE FINDING TEXT (_rows_from_findings):
-    # once the drift is repaired that exact key can never be emitted again, so
-    # its absence really is retirement, not a check that went quiet. The
-    # docstring there already claimed diff() dropped these; is_known_key was
-    # silently preventing it.
-    #
-    # Left alone this is precisely the schwab_token leak diff()'s own docstring
-    # was written about, reintroduced through the prefix. Three such flags --
-    # reentry_review, trails.json and the exit-executor exit_result.json -- sat
-    # in health_state.json with their drifts ALREADY repaired (af89c05 moved the
-    # deny to the directory; bb1ff7b corrected which settings file is checked).
-    # A stuck flag is not inert: fire-once keys off `flagged`, so it permanently
-    # silences that finding should the same drift ever return.
-    #
-    # ONLY WHEN THE CHECKS ACTUALLY RAN. repo_check_rows() reports its own
-    # failure AS a finding rather than raising, and on that path emits one
-    # synthetic row and none of the real keys -- which would otherwise read as
-    # every repo_check finding healing at once, on the strength of a run that
-    # never happened. That is the same mistake is_known_key exists to prevent,
-    # so it is guarded here rather than relaxed there.
-    if not any(c.key.startswith(REPO_CHECK_PREFIX)
-               and str(c.detail).startswith("src/repo_checks.py could not run:")
-               for c in rows):
-        live_keys = {c.key for c in rows}
-        healed += [k for k in flagged
-                   if k.startswith(REPO_CHECK_PREFIX)
-                   and k not in live_keys and k not in healed]
+    healed += retired_repo_flags(rows, healed=healed, flagged=flagged)
 
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     for key in healed:
@@ -729,10 +767,57 @@ def _selftest() -> None:
     assert [c.key for c in to_alert] == [r1.key], to_alert
     to_alert, _ = diff([ok, r1], {r1.key: {}})
     assert to_alert == [], "a still-present finding must not re-alert"
-    # a FIXED finding vanishes from rows entirely -> diff's retired-check clause
-    # clears its flag, so the same drift is audible again if it comes back
+    # --- flag retirement: the four rules, and WHICH function owns each ---
+    #
+    # ⛔ THIS BLOCK ASSERTED THE WRONG OWNER FROM 2026-08-21 TO 2026-09-11 and
+    # was failing the whole time. It read `diff([ok], {r1.key: {}})` and expected
+    # the flag cleared; a4e20a9 had just put "repo_check:" into
+    # health.KEY_PREFIXES, so diff() correctly refuses it and retired_repo_flags()
+    # is what clears it. Nothing caught that: deploy/run_selftests.sh is manual
+    # and on no schedule. The rules below are stated by owner for that reason.
+
+    # RULE 1 — a genuinely retired check clears. Only diff() can know this: the
+    # key is one `health.is_known_key` says nothing can emit any more.
+    to_alert, healed = diff([ok], {"schwab_token": {}})
+    assert healed == ["schwab_token"] and to_alert == [], (to_alert, healed)
+
+    # RULE 2 — a live derived key absent because its PROBE returned None keeps
+    # its flag. Both of these emit NO ROW AT ALL on failure (`if fills is not
+    # None`, `if svcs:`), so absence is the only thing diff() sees, and
+    # is_known_key is the only thing that tells it apart from retirement.
+    for silent in ("unrecorded_fills", "deployed_agentic-monitor"):
+        to_alert, healed = diff([ok], {silent: {}})
+        assert healed == [], f"{silent}: a probe that did not run must not heal it"
+        assert to_alert == [], silent
+
+    # RULE 3 — a REPAIRED repo drift clears, because its key is a digest of the
+    # finding text and cannot be emitted again. diff() alone must NOT do it...
     to_alert, healed = diff([ok], {r1.key: {}})
-    assert healed == [r1.key], healed
+    assert healed == [], "diff() must not retire a key is_known_key still claims"
+    # ...retired_repo_flags() does, and only it.
+    assert retired_repo_flags([ok], healed=healed, flagged={r1.key: {}}) == [r1.key]
+    # a still-present finding is never retired
+    assert retired_repo_flags([ok, r1], healed=[], flagged={r1.key: {}}) == []
+    # and it never double-reports one diff() already healed
+    assert retired_repo_flags([ok], healed=[r1.key], flagged={r1.key: {}}) == []
+
+    # RULE 4 — repo_checks CRASHED: prior findings keep their flags. The crash
+    # arrives as one synthetic row and none of the real keys, which would read
+    # as every repo finding healing at once on the strength of a run that never
+    # happened. The marker is a shared constant so the writer and this reader
+    # cannot drift apart.
+    (crash,) = _rows_from_findings([f"{REPO_CHECK_FAILED_PREFIX} OSError"])
+    assert not repo_checks_ran([crash]), "the crash row must be recognised"
+    assert repo_checks_ran([ok, r1]), "a real finding is not a crash"
+    assert repo_checks_ran([ok]), "a CLEAN repo emits no rows and still RAN"
+    assert retired_repo_flags([crash], healed=[], flagged={r1.key: {}}) == [], \
+        "a crashed repo_checks run must retire nothing"
+    assert crash.alertable, "the crash itself must be audible"
+
+    # a REAPPEARING drift is audible again — the whole point of retiring the
+    # flag. Same text, same digest, and `flagged` no longer holds it.
+    to_alert, _ = diff([ok, r1], {})
+    assert [c.key for c in to_alert] == [r1.key], to_alert
 
     # the message reaches BOTH channels verbatim — that is the whole point of
     # running this on-box, and repo_checks' publishing rule is what makes the

@@ -386,6 +386,127 @@ def render(mandate_cfg: dict, strat_cfg: dict, tool_names,
     return text
 
 
+
+# --- the announce contract, held across two documents -----------------------
+#
+# ⛔ THE FAILURE THIS EXISTS TO CATCH (OPSLOG 2026-09-01). announce()'s docstring
+# in src/agent_env/server.py authorised a class the charter never names —
+# "anything a person reading the journal tomorrow would wish they had known
+# today" — and a session followed the TOOL and broke the CHARTER. Two documents
+# describing one obligation, with no check between them, is the same shape as
+# the theme-concentration contradiction at the top of CLAUDE.md.
+#
+# ⛔ AND THE OBVIOUS REPAIR WAS WRONG. Narrowing the docstring to the three items
+# under WHAT TO ANNOUNCE BEFORE YOU ACT would FORBID TWO THINGS THE CHARTER
+# REQUIRES: the charter imposes five obligations and states two of them
+# elsewhere — the external-flow rule in the 10:35 block, and the blocked-out-of-
+# top-ranked-names rule, which it states TWICE (in the rule_out rules and again
+# in THE DIVISION OF LABOUR). So the list is COMPLETED, never trimmed.
+#
+# Each entry: (name, an anchor phrase in the rendered charter, an anchor phrase
+# in announce()'s docstring). Anchors are PROSE, never numbers — the two
+# config-derived figures in this section are interpolated and would make any
+# literal here drift on the next config change.
+#
+# ⚠️ MATCHED AGAINST WHITESPACE-NORMALISED TEXT, because both documents are
+# hard-wrapped and the wrap point is not part of the contract. Two anchors were
+# written first as they appear on screen and failed immediately on "80% of\n
+# the concentration limit" — encoding a line break would have made this check
+# fail the next time someone reflowed a paragraph, which trains people to
+# weaken it.
+ANNOUNCE_OBLIGATIONS = (
+    ("wholesale",      "Abandoning the house view wholesale",
+                       "abandoning the house view wholesale"),
+    ("off_universe",   "Entering a name outside the configured universe",
+                       "outside the configured universe"),
+    ("concentration",  "the concentration limit that will refuse you outright",
+                       "crossing the announce line"),
+    ("external_flow",  "is an EXTERNAL FLOW",
+                       "an EXTERNAL CASH FLOW"),
+    ("blocked_ranked", "If you cannot buy several top-ranked names",
+                       "unable to buy SEVERAL top-ranked names"),
+)
+
+# Phrases that must NOT be in the docstring. An open-ended class is not a
+# smaller version of a contract — it replaces it.
+ANNOUNCE_FORBIDDEN = (
+    "would wish they had known",
+)
+
+# Every place the rendered charter asks for an announcement, counted so a SIXTH
+# obligation cannot be added to the charter without this check failing and
+# sending its author to the docstring. Counts occurrences of the tool call and
+# of the imperative form; see _announce_mentions().
+ANNOUNCE_MENTION_COUNT = 5
+
+
+def _flat(text: str) -> str:
+    """Whitespace collapsed to single spaces, so a hard wrap is not a contract
+    change. Pure."""
+    return " ".join(str(text).split())
+
+
+def _announce_mentions(rendered: str) -> int:
+    """How many times the rendered charter ASKS for an announcement. Pure.
+
+    Counts the two forms the charter uses to impose one — "`announce()` it" /
+    "call `announce()`" / "and announce it" — and deliberately not every
+    appearance of the word, because the charter also DESCRIBES announcements
+    (the order gate pushing them, the unprotected-positions watcher, the "not a
+    veto" paragraph) and those impose nothing on the agent.
+    """
+    pat = re.compile(r"(?:`announce\(\)` it"
+                     r"|call `announce\(\)`"
+                     r"|and announce it"
+                     r"|carries the WHOLESALE burden)")
+    return len(pat.findall(_flat(rendered)))
+
+
+def check_announce_contract(rendered: str, docstring: str) -> list[str]:
+    """Findings where the charter and announce()'s docstring disagree. Pure.
+
+    Returns [] when every obligation the charter imposes is represented in the
+    docstring, the docstring claims no class the charter does not impose, and
+    the charter has not grown a new obligation since this list was written.
+    """
+    out = []
+    rend, doc = _flat(rendered), _flat(docstring)
+    for name, in_charter, in_doc in ANNOUNCE_OBLIGATIONS:
+        if _flat(in_charter) not in rend:
+            out.append(f"{name}: the charter no longer says {in_charter!r} — "
+                       f"reword the anchor, and check the obligation still exists")
+        if _flat(in_doc) not in doc:
+            out.append(f"{name}: the charter imposes it and announce()'s "
+                       f"docstring does not carry {in_doc!r}")
+    for bad in ANNOUNCE_FORBIDDEN:
+        if _flat(bad) in doc:
+            out.append(f"announce()'s docstring authorises {bad!r}, a class the "
+                       f"charter does not impose (OPSLOG 2026-09-01)")
+    n = _announce_mentions(rendered)
+    if n != ANNOUNCE_MENTION_COUNT:
+        out.append(f"the charter now asks for {n} announcements, not "
+                   f"{ANNOUNCE_MENTION_COUNT} — a class was added or removed; "
+                   f"update ANNOUNCE_OBLIGATIONS and announce()'s docstring "
+                   f"together, never one of them")
+    return out
+
+
+def announce_docstring(repo: Path | None = None) -> str:
+    """announce()'s docstring, read as TEXT. Thin I/O.
+
+    Read rather than imported: importing src/agent_env/server.py boots a FastMCP
+    server and pulls in the whole tool surface, which a pure document check has
+    no business doing.
+    """
+    src = ((repo or REPO) / "src" / "agent_env" / "server.py").read_text()
+    i = src.find("def announce(")
+    if i < 0:
+        return ""
+    j = src.find('"""', i)
+    k = src.find('"""', j + 3)
+    return src[j + 3:k] if j >= 0 and k > j else ""
+
+
 def _selftest() -> None:
     MCFG = {"drawdown": {"max_pct": 0.20},
             "concentration": {"max_position_pct": 0.15},
@@ -729,6 +850,26 @@ def _selftest() -> None:
     assert (f"up to {int(strategy.load()['monitor']['poll_secs'])}\nseconds later" in real
             or f"up to {int(strategy.load()['monitor']['poll_secs'])} seconds later" in real), \
         "monitor poll interval vanished from the real render"
+
+    # --- the announce contract, across BOTH documents (2026-09-11) ------------
+    # ⛔ NOT A SPELLING CHECK. It asserts that every class the charter REQUIRES
+    # announcing is carried by announce()'s docstring, that the docstring claims
+    # no class the charter does not impose, and that the charter has not grown a
+    # new obligation since the list was written. The 2026-09-01 defect was a
+    # session obeying the TOOL where the two disagreed; nothing compared them.
+    drift = check_announce_contract(real, announce_docstring())
+    assert not drift, "announce contract drift:\n  " + "\n  ".join(drift)
+    # ...and it must actually FAIL when either side drifts, or it is decoration
+    _doc = announce_docstring()
+    assert check_announce_contract(real, _doc.replace("an EXTERNAL CASH FLOW", "x")), \
+        "a docstring that drops a required class must be caught"
+    assert check_announce_contract(real, _doc + " would wish they had known"), \
+        "the open-ended class the charter never imposed must not be allowed back"
+    assert check_announce_contract(real + "\n- `announce()` it.\n", _doc), \
+        "a SIXTH obligation in the charter must force the docstring to be revisited"
+    # a hard wrap is not a contract change
+    assert not check_announce_contract(real.replace("\n", " "), _doc), \
+        "reflowing the charter must not trip the check"
 
     print("charter: OK — every number derived, nothing dropped, unknown placeholder raises")
 

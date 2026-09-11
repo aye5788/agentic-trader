@@ -1583,16 +1583,37 @@ def announce(headline: str, detail: str = "") -> str:
     silence as refusal. The operator's actual intervention is the kill switch,
     exercised after the fact on a position that is already open.
 
-    Use it for the unusual, before you act on it:
+    ⛔ THE CHARTER IS THE CONTRACT, AND THIS LIST IS ITS WHOLE CONTENT. It used
+    to end with an open-ended catch-all — a class that appears NOWHERE in the
+    charter, and which a session followed into an announcement the charter did
+    not ask for (OPSLOG 2026-09-01; the exact wording is quoted in
+    src/charter.py:ANNOUNCE_FORBIDDEN, which now refuses to let it back in, and
+    is deliberately not repeated here so that check stays unambiguous).
+    Narrowing it to the three items under WHAT TO ANNOUNCE
+    BEFORE YOU ACT was considered and is WRONG: the charter imposes five
+    obligations, two of them stated outside that section, and a three-item list
+    would forbid two things the charter REQUIRES. So the list is completed here
+    rather than trimmed. src/charter.py:check_announce_contract() holds the two
+    documents to each other.
+
+    THREE YOU CALL YOURSELF:
       - abandoning the house view wholesale, not a single-name deviation. This
         is the one class nothing else can detect — it is a property of YOUR
         reasoning, invisible in any single order — so it is yours to announce.
-      - anything a person reading the journal tomorrow would wish they had known
-        today.
-    Off-universe entries and positions crossing the announce line are pushed
-    automatically by the order gate as the order goes out; you do not need to
-    duplicate those, and duplicating them trains the operator to ignore the
-    channel.
+        Rejecting most of the ranked screen on ONE criterion applied to all of
+        them is this class, however carefully it is recorded name by name.
+      - an EXTERNAL CASH FLOW: cash that moved with no fill of yours to explain
+        it (a deposit, a withdrawal, a dividend). It is not performance, and an
+        equity curve read as a gain nobody earned is the harm. Say it in
+        `record_decision` too — that is the durable half.
+      - being unable to buy SEVERAL top-ranked names. That is a symptom, not a
+        nuisance: it is evidence the accreted rule-outs have drifted from the
+        mandate. `open_question()` it as well.
+
+    TWO THE ORDER GATE PUSHES FOR YOU, as the order goes out — entering a name
+    outside the configured universe, and any single position crossing the
+    announce line. Do not duplicate them; duplicating trains the operator to
+    ignore the channel.
 
     Do NOT announce the routine: every fill is already pushed with its reason,
     and a buying-power deferral self-heals and is deliberately silent.

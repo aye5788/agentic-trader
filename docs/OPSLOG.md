@@ -8,6 +8,307 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-11 — four of the eleven deferred items were already fixed; the list was the stale part
+
+The principal asked for an audit of every remaining deferred item. Four of them
+describe defects that no longer exist, and each was fixed WITHOUT the note that
+recorded it being closed. Recorded here because a to-do list that outlives its
+items costs exactly what a stale comment costs: the next reader re-fixes
+something, or works around a problem that is gone.
+
+| Deferred item, as written | Reality |
+| --- | --- |
+| `health_check.diff()` clears a flag for any absent key (filed 2026-08-21 10:29) | Fixed `a4e20a9`, 12:08 the SAME DAY — 99 minutes later. See today's flag-retirement entry. |
+| `score_reviews.py` is blind to baskets (raised 2026-08-18) | Implemented since; a four-name decision scores four rows, per symbol. Verified today with a mixed tape. |
+| The monitor polls all day on a market holiday (2026-09-07) | Fixed `2026-09-09` — `trading_day()` + `mmp.is_trading_day`, fail-open on unknown. |
+| A stale feed silently disables the stop (2026-09-07) | Fixed `d7d0216` — `newest_feed_ts` / `feed_stalled`. |
+
+**The basket policy, checked against its seven stated properties** rather than
+taken on trust, using `symbol: "IWM,XLK,XLE,XLV"` with a deliberately mixed tape
+(+8% / -7% / +0.4% / no price column): four rows, one per symbol; outcomes per
+symbol (`agent_wrong` / `agent_right` / `tie` on the dead band / `unscoreable`);
+the reviewer scored per symbol from one DISSENT, so it wins one and loses one;
+**bias counted ONCE** (`reduce: 1`, not 4); `from_basket`/`basket_size` on every
+row, and `from_basket: False` on a single-name control; `PORTFOLIO` unscoreable
+because there is no price to settle it. The review→decision join is on the
+decision TIMESTAMP via `reviewed`, not on the day — 52 claimed timestamps in the
+live journal, **zero** matching no decision.
+
+Three things worth knowing about it, none a defect and none a contradiction with
+what the module documents, so nothing was changed:
+
+- **The reviewer tally and head-to-head inherit PER-SYMBOL counting** from the
+  outcome, while the reviewer emitted ONE verdict. That is coherent — it keeps
+  the reviewer's hit rate comparable with the agent's, which is per symbol by
+  explicit choice — but the module states its granularity rule only for outcomes
+  and for bias, so a reader cannot find the reviewer's stated anywhere.
+- **`unscoreable` conflates two causes**: "no price for this symbol" and "this
+  action has no direction". `PORTFOLIO` is unscoreable for the right reason, and
+  the scorecard cannot say which reason it was.
+- **The join is exact-string on the timestamp.** Clean today, and nothing asserts
+  the format, so a writer emitting `...Z` where the other emits `...+00:00`
+  would produce silently unscoreable rows rather than an error.
+
+The remaining live items from the audit are unchanged and listed in the
+principal's memo: whole-history reconciliation (see the July 8 entry above), the
+session holiday gate, half-day early closes, reviewer feedback, custody mode,
+off-book holdings, and the charter's thesis/falsifier wording.
+
+---
+
+## 2026-09-11 — announce() authorised a class the charter never named, and completing the list was the only safe repair
+
+`src/agent_env/server.py:announce()` told the agent to use it for "anything a
+person reading the journal tomorrow would wish they had known today". That class
+appears NOWHERE in `prompts/charter.md`. OPSLOG 2026-09-01 found a session
+following the TOOL and breaking the CHARTER, and left it **NOT FIXED, with the
+obvious fix marked wrong**: narrowing the docstring to the three items under
+WHAT TO ANNOUNCE BEFORE YOU ACT would FORBID TWO THINGS THE CHARTER REQUIRES.
+
+That judgement held up. The rendered charter — read end to end, 1,087 lines, not
+grepped — imposes **five** announcement obligations:
+
+| # | Obligation | Where the charter says it | Who pushes |
+| --- | --- | --- | --- |
+| 1 | Abandoning the house view wholesale | WHAT TO ANNOUNCE, item 1 | the agent |
+| 2 | Entering a name outside the configured universe | WHAT TO ANNOUNCE, item 2 | the order gate |
+| 3 | A position crossing the announce line | WHAT TO ANNOUNCE, item 3 | the order gate |
+| 4 | An EXTERNAL CASH FLOW — cash that moved with no fill to explain it | the 10:35 block, on `refresh_broker_snapshot`'s deltas | the agent |
+| 5 | Being unable to buy SEVERAL top-ranked names | the `rule_out` rules, and AGAIN in THE DIVISION OF LABOUR | the agent |
+
+Obligation 5 is stated twice, in two sections, which is why a three-item
+docstring would have read as complete while contradicting both.
+
+A sixth passage — rejecting most of the ranked screen on ONE criterion "carries
+the WHOLESALE burden and the announcement in 'What to announce before you act'"
+— is a POINTER to obligation 1, not a class of its own. It is now named inside
+obligation 1 in the docstring rather than counted separately.
+
+### The change
+
+The docstring lists all five, split by who pushes: three the agent calls, two
+the order gate pushes as the order goes out (unchanged — "do not duplicate
+them"). Every existing distinction is preserved verbatim: notification-not-gate,
+nobody waiting, silence is neither approval nor refusal, journal-first,
+best-effort delivery, and settlement/buying-power deferrals deliberately silent.
+
+### And a check, because prose in two files is how this happened
+
+`src/charter.py:check_announce_contract(rendered, docstring)` — pure — holds the
+two documents to each other in three directions:
+
+1. every obligation the charter imposes is carried by the docstring;
+2. the docstring claims **no class the charter does not impose**
+   (`ANNOUNCE_FORBIDDEN`, which is where the banned wording is now quoted);
+3. the charter has not GROWN an obligation since the list was written
+   (`_announce_mentions` counts the imperative forms; a sixth fails the check
+   and sends its author to the docstring).
+
+Anchors are matched against whitespace-normalised text. Two were first written
+as they appear on screen and failed at once on "80% of\n the concentration
+limit" — encoding a line break would have made the check fail on the next
+reflow, which is how a check gets weakened instead of fixed.
+
+⛔ **The check caught something on its first real run: my own docstring.** The
+new text explained the defect by QUOTING the banned phrase, which is
+indistinguishable from authorising it. The explanation stays; the verbatim
+wording moved to `ANNOUNCE_FORBIDDEN`, where it belongs as the check's own
+justification.
+
+**Verification** — `--selftest` is blocked by hook here, so this is not "a suite
+passed". `check_announce_contract` was evaluated against the REAL rendered
+charter and the REAL docstring: clean. Then against four deliberate drifts:
+docstring drops a required class → caught; the banned catch-all restored →
+caught; the charter grows a sixth obligation → caught ("asks for 6 announcements,
+not 5"); the whole charter reflowed onto one line → correctly clean. The
+assertions are in `charter._selftest` so the manual runner covers them too.
+
+Charter text is UNCHANGED. This was a docstring brought up to the charter, never
+the reverse.
+
+---
+
+## 2026-09-11 — the July 8 fills were never unjournalled; the FILL confirmation was, and only an exit can find one
+
+Forensic audit of the last open piece of the 2026-09-04 reconcile item — "why a
+July fill went eight weeks unjournalled at all". **The premise was wrong**, and
+the real chain is worse in one way and better in another than the note assumed.
+
+### The orders were journalled the day they were placed
+
+`research_store/journal.jsonl` line 4 is an `execution` event, `as_of:
+2026-07-08`, carrying a **`placed[]` array of all fourteen orders** with
+`state: "unconfirmed"` — IWM, SPY, XLK, ALAB, AMD, BE, DELL, INTC, LRCX, MU,
+SNDK, STX, WDC, EEM. Line 3 is its predecessor from the same afternoon, the
+single EEM order that was cut short by `halt_reason` "RH blocked second trade:
+investor profile incomplete". The three orders healed in September —
+AMD `6a4e9a35`, DELL `6a4e9a39`, MU `6a4e9a3e` — are all in that list.
+
+So the placement was recorded. What was never recorded is that any of them
+**FILLED**: `placed`/`unconfirmed` is a record of sending an order, with no
+price and no executed quantity. The fill-confirmation step never ran for that
+batch, and `scripts/reconcile_ledger.py` did not exist yet — it was created
+2026-07-22, two weeks later (`69ac04b`).
+
+`journaled_order_ids()` reads only `e["fills"][*]["order_id"]`. The legacy
+`placed[]` key is invisible to it. That is not a bug: those orders genuinely
+have no fill record, so healing them is CORRECT. The reconciler has been right
+every time it fired.
+
+### Why it took eight weeks, and why it will take longer still
+
+**Reconciliation in this system is incident-driven, and its input is
+per-symbol.** `research_store/rh/orders_dump.json` is written by the exit path
+for the ONE symbol being exited, and `get_equity_orders(symbol)` returns that
+symbol's whole history. Measured on the archived dumps:
+
+| dump | symbol | orders | `created_at` span |
+| --- | --- | --- | --- |
+| 2026-09-04 13:56 (`NOT-RECONCILED`) | INTC | 6 | 2026-07-08 → 09-04 |
+| 2026-09-04 19:46 | MU | 11 | 2026-07-08 → 09-04 |
+| 2026-09-08 17:17 | AMD | 8 | 2026-07-08 → 09-08 |
+| 2026-09-09 13:51 | DELL | 13 | 2026-07-08 → 09-09 |
+
+So an old unconfirmed order is discovered **only when its own symbol is next
+exited**. MU, AMD and DELL surfaced on the three days those names were trimmed.
+Nothing anywhere sweeps the broker's full order history against the journal, so
+there is no path by which the remaining eleven could be found deliberately.
+
+**Nothing detected it, and the checks that look nearest cannot.**
+`health.unrecorded_fills` judges only the most recent SETTLED day and keys off
+`agent_decision` events plus armed `exit_signal` triggers; 2026-07-08 has
+neither, and is not that day. It was never in scope.
+
+### What is still exposed, by order
+
+**CONFIRMED — one.** INTC `6a4e9a3b-e67a-4830-8d07-7476b6fc4847`, buy,
+`cumulative_quantity 0.039037`, created 2026-07-08T18:43:07, `state: filled` in
+the 09-04 dump and absent from every `fills` row today. It escaped because that
+dump is the one the reconcile REFUSED on the raw-vs-reshaped shape contradiction
+(`unwrap_orders`' docstring) and was archived `NOT-RECONCILED`. INTC is still
+held (0.07724), so its next exit will heal it.
+
+**SUSPICIOUS — eleven**, in the 07-08 `placed[]` batch, never fill-confirmed,
+fill state not establishable from anything on disk: IWM, SPY, XLK, ALAB, BE,
+LRCX, SNDK, STX, WDC and EEM (`6a4e9a45`, plus the halted `6a4e98b1`). Of these
+SNDK and STX are HELD TODAY and LRCX has both a `position_opened` and a
+`position_closed`, so those three near-certainly filled. Settling the rest needs
+a broker read per symbol; it is not in the repository.
+
+**RULED OUT — the class that looked worst.** Twenty-five `fills` rows across
+fourteen events (2026-07-14 → 2026-08-13) carry no `order_id`, which would make
+them invisible to `journaled_order_ids()` in exactly the same way. Every one of
+them is `status: "skipped"` — `pending_settlement` or
+`insufficient_buying_power` — so no broker order exists to heal against them.
+Checked explicitly: zero id-less rows claim `status: "filled"`.
+
+### What September actually fixed, and what it did not
+
+`fill_ts()`/`heal_events()` (2026-09-09) fixed the CONSEQUENCE, not the cause: a
+healed fill now carries the time it executed, so the next heal cannot trip
+`snapshot_freshness` (the monitor standing down) or be counted by the letter's
+`_in_window` as this week's trade. With `memory.RECORD_FLOOR` at 2026-08-20 the
+agent's own record is unaffected either way.
+
+**So a future heal is now benign** — it completes the record and nothing else.
+The discovery mechanism is still accidental, and that is the part left open:
+nothing schedules a whole-history reconciliation, and a heal remains a
+side-effect of selling something.
+
+⚠️ Healed rows carry `price: null` — the broker dump's executions were not
+mined for an average price. Anything computing realised P&L from a healed row
+gets a quantity and no cost. Not repaired here; recorded so it is not
+rediscovered as a new defect.
+
+Nothing was repaired and no code changed in this audit, per the principal's
+instruction.
+
+---
+
+## 2026-09-11 — the flag-retirement rule was right in production and wrong in the only place that describes it
+
+Audit of the "filed, not fixed" item above, which had been on the deferred list
+since 2026-08-21. **Both halves of it were already fixed.** What was actually
+broken was the test that describes the contract, and a docstring naming the
+wrong function — which is how a solved problem stayed on a to-do list for three
+weeks and how the next reader would have "fixed" it again.
+
+### What the audit found, in the order it happened
+
+1. **2026-08-21 10:29** — the note above is written: `diff()` drops a flag for
+   any absent key, unsafe for the two probes that return `None`.
+2. **2026-08-21 12:08 (`a4e20a9`)** — fixed. `health.is_known_key()` now decides
+   retirement, so a key the system can still emit keeps its flag. Verified live
+   today: an absent `unrecorded_fills` or `deployed_*` flag is retained, an
+   absent `schwab_token` is dropped. Neither this OPSLOG note nor the assistant's
+   own memory index was updated, and both still said "not fixed" on 09-11.
+3. **The same commit introduced a regression**, because `KEY_PREFIXES` gained
+   `"repo_check:"`. A repo_check key is a DIGEST OF THE FINDING TEXT: once the
+   drift is repaired that key can never be emitted again, so its absence really
+   is retirement. Treating it as "still emittable" made the flag outlive the
+   finding — and fire-once keys off `flagged`, so the same drift could never be
+   audible again. Three flags sat stuck that way with their drifts already
+   repaired (`reentry_review`, `trails.json`, the exit-executor
+   `exit_result.json`). That is the `schwab_token` leak, reintroduced through a
+   prefix.
+4. **2026-09-01 (`660df9d`)** — that regression was fixed too, inline in
+   `main()`, correctly: repo digests are retired on absence, but ONLY when
+   `repo_checks` actually ran, because a crash emits one synthetic row and none
+   of the real keys and would otherwise read as everything healing at once.
+
+So the live behaviour has been correct since 09-01. The four rules were
+exercised against the real functions today, one at a time, and all four hold.
+
+### What was still broken, and why nothing said so
+
+The logic test asserted `diff()` cleared a repaired repo flag. It has not since
+`a4e20a9`; `main()` does. **That assertion has been failing for three weeks and
+nothing reported it** — `deploy/run_selftests.sh` is a manual runner on no
+schedule, and no workflow runs it. A suite nobody runs is documentation with a
+false claim of enforcement.
+
+`_rows_from_findings`'s docstring said the same wrong thing in prose ("diff()'s
+retired-check clause drops its flag"), which is the sentence a reader would have
+trusted while re-fixing a problem that no longer existed.
+
+### The change
+
+Production behaviour is **unchanged** — deliberately. What moved is where the
+contract lives:
+
+- `retired_repo_flags(rows, healed, flagged)` and `repo_checks_ran(rows)` are
+  now named, pure functions, lifted verbatim out of `main()`. Twelve lines of
+  policy inline in `main()` could not be reached by any test, which is precisely
+  why the tests asserted the wrong owner and nobody noticed.
+- `REPO_CHECK_FAILED_PREFIX` replaces a bare literal that appeared in two places
+  300 lines apart. The second one decides whether a standing finding keeps its
+  flag, so a reworded failure message would have silently turned a crashed run
+  into "everything healed".
+- The tests now state all four rules **by owner**: a retired key clears
+  (`diff`); a silent probe keeps its flag (`diff`); a repaired drift clears
+  (`retired_repo_flags`); a crashed run retires nothing (`repo_checks_ran`).
+  Plus: a reappearing drift is audible again, a still-present finding is never
+  retired, and the crash row is itself alertable.
+- The two stale docstrings now name the right function, and say what the wrong
+  one was.
+
+**Verification** — `--selftest` is blocked by hook in this repo, so the claim is
+not "a suite passed". Each rule was evaluated against the edited module and its
+return value printed: retired key `(['schwab_token'])`; both silent probes `[]`;
+repaired drift `[]` from `diff` and `['repo_check:…']` from `retired_repo_flags`;
+crash row `repo_checks_ran → False` and retires `[]`; clean repo
+`repo_checks_ran → True` (a clean repo emits no rows and still RAN — the case an
+absence-based test would get backwards). The live script then ran end to end:
+`all clear (13/18 healthy)`, `flagged: {}` untouched, and `reload_stale.py`
+reports nothing stale (this is a cron script, in no service's import closure).
+
+**Not changed, on purpose:** `is_known_key` still protects the two silent
+probes. Relaxing it to let repo digests through would have re-opened the hole it
+exists to close — which is why `660df9d` guarded at the call site, and why this
+change kept that decision and only gave it a name.
+
+---
+
 ## 2026-09-09 — a 7-day timer was handing back quota the broker may still be counting
 
 **⚠️ STILL NOT ACTIVATED.** `[universe] mode` remains `fixed_list`. This corrects
@@ -2978,6 +3279,12 @@ scope expands without end.
 absent from the current rows, which is unsafe for other optional probes that can
 return `None` (`_unrecorded_fills_probe`, `_deployed_probe`). The two snapshot
 checks no longer take that path; the general rule remains.
+
+> ✅ **FIXED THE SAME DAY, 99 MINUTES AFTER THIS PARAGRAPH WAS WRITTEN** —
+> `a4e20a9` 12:08 ET, against this note's 10:29. Nobody came back to say so, so
+> it read as open for three weeks and was still on the principal's deferred list
+> on 2026-09-11. See that date's entry: the fix was real, it had a regression of
+> its own, and the regression was also already fixed.
 
 
 ### "How do we know it will reconcile?" — we did not, and now we do
