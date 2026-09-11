@@ -8,6 +8,96 @@ journal `notes`, or by hand). One `##` heading per entry.
 
 ---
 
+## 2026-09-11 (later) — custody mode: the spike is the spec's step 1, and it still fails
+
+Asked to implement the deferred Codex custody fallback (spec §5). §5 opens with
+**"Spike first"** and makes everything else conditional on it. The spike was run
+and it fails, so **no custody code was written**. The audit §5 asks for, and the
+evidence, are below.
+
+### 1. Where the Claude chain ends — the audit, confirmed
+
+- `models.chain("session")` resolves to **`claude-opus-5 → claude-sonnet-5 →
+  claude-fable-5-1`**. It ends at Fable.
+- `models.terminal("session")` is **`"none"`**; `[budget] step` is `"none"`.
+- Stronger than inert: **`scripts/session.py` never reads `models.terminal` at
+  all.** Only the exit path consumes a terminal step
+  (`scripts/market_monitor.py:1799`, gated `== "code_seller"`).
+- The insertion point, if it is ever built, is `scripts/session.py:1072` — the
+  existing `if not ok and walk["stopped"] in ("exhausted", "budget")` branch,
+  mirroring the exit path's precedent exactly.
+- The clean/ambiguous rule needs no new work: `fallback.clean_failure()` is
+  `(not ok) and tool_calls == 0`, and `run_chain` already returns `stopped` as
+  one of `ok | ambiguous | exhausted | budget | empty`. Custody would gate on
+  `exhausted`/`budget` and would be unreachable on `ambiguous`, which returns
+  early. That is the existing contract, unchanged.
+
+### 2. The spike, on the current binary
+
+`codex-cli 0.154.0` (the config's existing notes are 0.148-era), cron PATH, auth
+present, `--sandbox read-only -c approval_policy="never"`, calling `ping`:
+
+```
+mcp: agentic-trader/ping (failed)
+MCP tool call requires approval, but approval policy is never
+```
+
+The wording has changed since 2026-08-14 ("user cancelled MCP tool call"); the
+effect has not. Also re-confirmed dead, one at a time: `auto_approve`,
+`trust_level`, `tools.mcp.auto_approve`, and `--full-auto` (not a flag `codex
+exec` accepts in 0.154). **openai/codex#16685 is still open.**
+
+⚠️ **Two of those probes were a dead end `~/.codex/config.toml` already
+documented** — "Left in place only so nobody re-derives the same dead end; do not
+spend time on it again until openai/codex#16685 closes." Read the config before
+probing it. What is genuinely new is only the 0.154 confirmation and the changed
+error string, and both are now appended there.
+
+### 3. Why neither spec path survives, which is the part that decides it
+
+**Outcome A (the MCP surface §5 specifies)** needs
+`--dangerously-bypass-approvals-and-sandbox`. That removes the read-only
+sandbox. `~/.codex/config.toml` already rules it out in terms that apply here
+verbatim: *"it removes the read-only sandbox, which is the safety property being
+protected."*
+
+**Outcome B (route through `scripts/agent_view.py`)** does not rescue it, and
+this is the finding that was not in the spec. **Custody has to WRITE** —
+`set_levels`, `record_decision`, `open_question` are the whole point of the
+mode. A shim invoked by codex runs as codex's child and inherits codex's
+sandbox, so under `--sandbox read-only` those writes are blocked. Raising it to
+`workspace-write` would let the session write `research_store/` files directly —
+including `overrides.json`, which the monitor acts on — **bypassing
+`set_levels`' own price guards**. That is a WIDER blast radius than the MCP
+surface custody exists to narrow, not a smaller one.
+
+The spec assumed Outcome A's containment without noticing that the MCP server
+runs OUTSIDE the sandbox as its own process, which is exactly what made its
+writes safe. No shim inherits that property.
+
+### 4. What was NOT done, and why that is the right answer
+
+No custody charter, no `--custody` server flag, no terminal wiring, no
+`config/models.toml` change. Building the plumbing for a mechanism that cannot
+execute a single tool call would produce a feature that reads as done and is
+inert — the failure this log has already recorded twice (the adaptive layer,
+"gone" and still running, 2026-09-09; the ETF sleeve, retired with its machinery
+left in place, 2026-08-20). `[terminal] session = "none"` already makes custody
+inert, so there is nothing to switch off and no urgency to switch on.
+
+The reviewer was not touched: `SHOW_REVIEW_TO_AGENT` unchanged, the
+`research_store/disabled/review` marker unchanged, `deploy/run_session.sh`'s
+commented-out invocation unchanged.
+
+**The open decision, which is the principal's:** accept a weaker sandbox for
+custody (and say which), wait for openai/codex#16685, or drop §5 and let the
+session chain end at Fable permanently. The exit path already has its
+model-free terminal step (`code_seller`), so the money-critical case — a
+breached position with no Claude available — is covered either way. Custody only
+ever added level management on a day no Claude session can run.
+
+---
+
 ## 2026-09-11 (later) — the charter did not lose a safety claim; the test was pinning behaviour the code outgrew
 
 Follow-up on `c1842d3`. A charter assertion requiring the phrase **"could not be
