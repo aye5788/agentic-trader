@@ -29,9 +29,11 @@ minute on 2026-07-27) and once by refusing new entries -- and both are gone.
 Nothing-eligible -> an empty book is still a valid, intended state (cash).
 """
 import argparse
+import json
+import os
 import pathlib
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -259,6 +261,73 @@ def held_positions(path: Path | None = None) -> set[str] | None:
                 if float((v or {}).get("qty") or 0) > 0}
     except Exception:                                 # noqa: BLE001
         return None
+
+
+# ---- QUARANTINE: a holding this system cannot explain is not ADOPTED --------
+#
+# ⛔ THE DISTINCTION IS WHO CHOSE THE LEVEL. protective_theses() below hands a
+# sigma-derived stop to every held name the ranking did not select, and
+# market_monitor's breach scan sells on it. For a position the agent opened
+# that is exactly right. For a position NOBODY HERE OPENED -- a transfer, a
+# corporate action, a stray -- it means the machine invents a level nobody
+# decided and then liquidates on it. Adoption is the step nobody chose, so
+# adoption is the step withheld.
+#
+# ⛔ WHAT THIS DOES NOT DO. It clears no stop and no override, and it touches
+# NOTHING on the standalone-arming path: market_monitor.standalone_candidates()
+# reads overrides.json and the broker snapshot and never consults theses, so a
+# valid agent-set stop on an unexplained holding stays fully eligible for
+# arming AND for automatic exit. Quarantine withholds a level the system would
+# have invented; it never withholds protection somebody chose.
+QUARANTINE = REPO / "research_store" / "quarantine.json"
+
+
+def explained_holdings(journal: list) -> set:
+    """Symbols the journal can account for owning. Pure.
+
+    A holding is EXPLAINED when some execution event carries a fill for it that
+    is not a `skipped` row. `skipped` is excluded deliberately: those rows record
+    an order that was NOT placed (pending_settlement, insufficient_buying_power),
+    so they explain the absence of a position, never its presence.
+
+    ⚠️ Deliberately NOT keyed on `placed[]`. A legacy placed/unconfirmed row is a
+    record of SENDING an order and is not evidence that anything filled -- the
+    same rule the July-8 reconciliation works under. Using it here would let an
+    order that never filled explain a holding it did not create.
+    """
+    out = set()
+    for e in journal or []:
+        if not isinstance(e, dict) or e.get("event") != "execution":
+            continue
+        for f in (e.get("fills") or []):
+            if isinstance(f, dict) and f.get("symbol") and f.get("status") != "skipped":
+                out.add(str(f["symbol"]).upper())
+    return out
+
+
+def _write_quarantine(symbols: set) -> None:
+    """Publish the quarantine set for scripts/market_monitor.py. Never raises.
+
+    A small JSON on purpose: the monitor polls every few seconds and IS the stop,
+    so it must not gain a journal read. This loop already holds the journal and
+    already makes the adoption decision, so it is the one writer -- the same
+    shape as every other belief file here.
+
+    ⚠️ ALWAYS WRITTEN, including when the set is empty. A reader must be able to
+    tell "nothing is quarantined" from "this file is stale"; writing it only when
+    non-empty would leave yesterday's set standing, which is the defect
+    _publish_enforcement was fixed for on 2026-08-18.
+    """
+    try:
+        QUARANTINE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = QUARANTINE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "unexplained": sorted(symbols),
+        }, indent=2))
+        os.replace(tmp, QUARANTINE)
+    except Exception as e:                                       # noqa: BLE001
+        print(f"  ⚠️ could not publish quarantine.json ({type(e).__name__}: {e})")
 
 
 def protective_theses(owned: set, covered: set, scored, closes, asof, tm,
@@ -831,6 +900,30 @@ def main() -> None:
         print("  ⚠️ positions snapshot unreadable — no protective geometry added "
               "for held names outside the selection")
     else:
+        # ---- QUARANTINE (see explained_holdings) ---------------------------
+        # Withhold ADOPTION from holdings the journal cannot account for. The
+        # filter is applied ONCE, here, so both protective_theses() passes below
+        # and the `stray` rescue in between all work from the same set -- a name
+        # quarantined from the first pass must not be adopted by the second.
+        # Fails OPEN: an unreadable journal quarantines nothing, because
+        # "cannot tell" must never silently strip protection from the whole book.
+        try:
+            from research_store import store as _store           # noqa: PLC0415
+            _explained = explained_holdings(_store.read_journal())
+            quarantined = {s for s in owned if s not in _explained}
+        except Exception as e:                                   # noqa: BLE001
+            print(f"  ⚠️ journal unreadable ({type(e).__name__}) — quarantine not "
+                  f"applied this run; every held name keeps its protective geometry")
+            quarantined = set()
+        if quarantined:
+            print(f"  ⛔ NOT ADOPTED (no execution in the journal explains the "
+                  f"holding): {', '.join(sorted(quarantined))} — no protective "
+                  f"geometry is generated for these. A stop you set for one "
+                  f"yourself still arms and still exits; only the level this "
+                  f"loop would have invented is withheld.")
+            owned = {s for s in owned if s not in quarantined}
+        _write_quarantine(quarantined)
+
         covered = {t.symbol for t in theses}
         extra = protective_theses(owned, covered, book_scored, closes, asof, TM, 200)
 

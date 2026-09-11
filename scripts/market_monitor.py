@@ -1170,6 +1170,63 @@ def standalone_candidates(owned, overrides, thesis_syms) -> dict:
     return out
 
 
+# ---- QUARANTINE: an unexplained holding, deliberately not adopted ----------
+QUARANTINE = REPO / "research_store" / "quarantine.json"
+
+
+def quarantine_finding(unexplained, owned, watched) -> list:
+    """Unexplained holdings that currently have NO protection. -> sorted list. Pure.
+
+    "No protection" is measured against the FINAL watched set, after standalone
+    arming -- so an unexplained holding carrying a valid agent-set stop is armed,
+    is watched, and is NOT a finding. That is the whole point: quarantine
+    withholds the level this system would have INVENTED (slow_loop's protective
+    geometry), never a level somebody chose.
+
+    Returns [] when ownership is unknown: a torn snapshot tells you nothing about
+    what is held, and inventing a finding from it would page about a position
+    that may not exist.
+    """
+    if owned is None:
+        return []
+    return sorted(s for s in (unexplained or []) if s in owned and s not in watched)
+
+
+def _quarantine_alert(st: dict, owned, watched) -> None:
+    """Fire ONCE per change of the finding set, across restarts. Never raises.
+
+    ⛔ THE LATCH IS ON DISK, NOT IN A GLOBAL. Every other fire-on-transition
+    guard in this module (_LAST_UNPROTECTED, _LAST_DROPPED, _LAST_SOLO) is a
+    module global, so a monitor restart re-fires them. That is tolerable for a
+    condition the operator is already watching; it is not tolerable for this one,
+    which is a standing state that can persist for days. state.json is written
+    atomically and survives restarts, so the latch lives there.
+
+    The set is the latch, not a boolean: a NEW unexplained symbol appearing beside
+    an existing one is a change and must be audible, and a symbol being explained
+    or protected clears it silently.
+    """
+    try:
+        q = _load(QUARANTINE, {}) or {}
+        found = quarantine_finding(q.get("unexplained") or [], owned, watched)
+        prev = list(st.get("quarantine_alerted") or [])
+        if found == sorted(prev):
+            return
+        st["quarantine_alerted"] = found
+        _save(STATE, st)              # persist BEFORE pushing: a crash mid-push
+        if found:                     # must not re-fire the same set next tick
+            names = ", ".join(found)
+            print(f"  ⛔ quarantined and unprotected: {names}")
+            notify("⛔ Unexplained holding with no protection",
+                   f"{names}. No execution in the journal explains owning "
+                   f"{'these' if len(found) > 1 else 'this'}, so no protective "
+                   f"stop was generated — and none has been set by hand either. "
+                   f"Set a stop to protect it, or close it.",
+                   tags="rotating_light")
+    except Exception as e:            # noqa: BLE001 -- never break the stop watcher
+        print(f"  ⚠️ quarantine check failed ({type(e).__name__}: {e})")
+
+
 def arm_standalone(candidates: dict, prices: dict, start_rank: int = 900):
     """Turn override-only candidates into watchable theses. -> (armed, refused).
 
@@ -2383,6 +2440,12 @@ def check_once(cfg, client) -> int:
                 "no_target": unprot2.get("no_target", []),
                 "suspect_empty_snapshot": unprot2["suspect_empty_snapshot"],
             })
+
+    # ⛔ BEFORE the empty-book return. A book whose every position is
+    # unexplained and unprotected leaves `held` empty, which is exactly the
+    # state that most needs the alert -- returning first would make the finding
+    # unreachable in the only case where it is urgent.
+    _quarantine_alert(st, owned, set(held))
 
     if not held:
         return 0        # wakes-only tick: nothing to stop-watch
