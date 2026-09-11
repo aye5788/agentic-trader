@@ -125,6 +125,24 @@ def merge_levels(existing: dict, symbol: str, stop, targets, reason: str, ts: st
 _PRICE_UNSET = object()   # sentinel, distinct from None -- see `price` below.
 
 
+def _finite_pos(v):
+    """-> float if `v` is a finite number strictly above zero, else None. Pure.
+
+    ⛔ MIRRORS scripts/market_monitor.py:_finite_pos() EXACTLY, because
+    evaluate_enforcement()'s no-thesis branch must refuse every stop
+    arm_standalone() refuses. `v > 0` alone is not enough: `float("inf") > 0` is
+    True and an infinite stop sits above every price, and `bool` is excluded
+    because it is an int subclass, so `True` would read as a stop of 1.0.
+    """
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) and f > 0 else None
+
+
 def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
                          owned, current_stop, current_targets,
                          verdict: str = "", price=_PRICE_UNSET,
@@ -224,14 +242,25 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
       - otherwise -> ENFORCED. The monitor arms it, and the nightly rebuild
         supplies a full thesis afterwards.
 
-    ⚠️ THIS BRANCH DOES NOT RE-CHECK THAT THE STOP IS POSITIVE, and
-    arm_standalone() does (`_finite_pos`: finite and > 0). They agree in
-    production only because merge_levels()/write_levels() raise ValueError on a
-    non-finite or non-positive level BEFORE set_levels() ever calls this, so a
-    stop of 0 cannot arrive by that route. A caller that skipped that write
-    would be told `enforced: true` for a stop arm_standalone() refuses. Stated
-    rather than fixed: changing it here is a behaviour change, and the live
-    call site cannot reach it.
+    The stop itself is validated FIRST among the price-dependent tests, through
+    the same `_finite_pos` rule arm_standalone() uses -- finite, strictly above
+    zero, `bool` excluded. Zero, a negative, NaN, infinity, a non-numeric value
+    and None are all reported not-enforced with a "not a finite positive number"
+    note, matching the monitor's own refusal.
+
+    ⛔ THAT GUARD WAS MISSING UNTIL 2026-09-11 and the gap was reachable. A stop
+    of 0, a negative one or `True` reported `enforced: true` while
+    arm_standalone() refused them, and a non-numeric or None stop RAISED out of
+    this function. It could not arrive from set_levels(), which writes through
+    merge_levels() and raises on a non-positive level first -- but positions()
+    calls this at READ time with the stop taken straight from the PERSISTED
+    overrides file, which nothing revalidates on the way in. A torn, legacy or
+    hand-edited row was therefore enough to make the agent's own position view
+    either claim protection the monitor refuses, or crash.
+
+    ⚠️ The ownership test still runs BEFORE it, deliberately: a confirmed
+    not-held position reports the ownership reason rather than the stop reason,
+    because that is the more fundamental fact and it was the existing behaviour.
 
     `current_stop`/`current_targets` are the thesis's own stop/targets (None /
     [] when `has_thesis` is False). `owned` is a tri-state: True = confirmed
@@ -277,6 +306,22 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
         if owned is False:
             note = ("not held at the broker -- the monitor only watches "
                     "positions you own")
+        elif _finite_pos(stop) is None:
+            # ⛔ arm_standalone() VALIDATES THE STOP AND THIS DID NOT (fixed
+            # 2026-09-11). The branch went straight to `float(price) > float(stop)`,
+            # which reported a stop of 0, a negative stop or `True` as ENFORCED --
+            # all three refused by the monitor as "not a finite positive number" --
+            # and RAISED ValueError/TypeError on a non-numeric or None stop,
+            # taking positions() down with it. NaN and inf happened to report
+            # not-enforced, but for the wrong reason ("at or above the live
+            # price"), because every comparison against NaN is False.
+            #
+            # It was unreachable from set_levels(), which writes through
+            # merge_levels() and raises on a non-positive level first. It was NOT
+            # unreachable from positions(), which passes the stop straight out of
+            # the PERSISTED overrides file at read time with no revalidation.
+            note = (f"stop {stop!r} is not a finite positive number -- the "
+                    "monitor refuses to arm it")
         elif price is None:
             note = ("no thesis and no live price yet -- the monitor cannot "
                     "verify the stop is below spot, so it will not arm it. "
