@@ -654,16 +654,43 @@ def set_levels(symbol: str, stop: float,
     """Set YOUR stop and take-profit(s) for a position. `reason` is required.
 
     This WRITES to the override file the monitor merges every poll -- it does
-    NOT force the monitor to act on it. scripts/market_monitor.py only ever
-    looks at a symbol's overrides if it is in the monitor's `held` set, which
-    requires: a thesis with target_weight > 0 and a stop (the BOOK filter),
-    AND that the position is actually owned per the broker snapshot (the
-    OWNERSHIP filter) -- a name in tonight's book whose buy has not filled yet
-    is invisible to the monitor no matter what levels you set here. Within
-    that set, your stop is applied only if it RAISES the thesis's current
-    stop, and your targets are applied only if the COUNT matches the thesis's
-    existing targets -- apply_overrides then moves them in EITHER direction,
-    so a raise is applied exactly like a lower.
+    NOT force the monitor to act on it. (What proves it will act is the
+    `enforcement` object; see the end of this docstring, where that is already
+    said -- not repeated here.)
+
+    ⛔ THIS PARAGRAPH SAID A THESIS WAS REQUIRED, AND IT HAS NOT BEEN SINCE
+    2026-08-20 (`de55a69`). It read: "market_monitor.py only ever looks at a
+    symbol's overrides if it is in the monitor's `held` set, which requires: a
+    thesis with target_weight > 0 and a stop". Both halves were wrong by then --
+    the book filter is `target_weight > 0 OR verdict == "hold"`, and a
+    thesis-less owned position is watched on your stop alone. Corrected
+    2026-09-11.
+
+    TWO WAYS YOUR STOP GETS WATCHED:
+
+    1. **Through the thesis**, when tonight's book carries one for the symbol.
+       It must pass the monitor's BOOK filter -- `target_weight > 0` OR
+       `verdict == "hold"`, the second being a PROTECTIVE thesis for a name you
+       hold that the ranking did not select -- and carry a stop of its own.
+       Within that set your stop is applied only if it RAISES the thesis's
+       current stop, and your targets only if the COUNT matches the thesis's
+       existing targets; apply_overrides then moves them in EITHER direction,
+       so a raise is applied exactly like a lower.
+    2. **On its own**, when there is no thesis. An OWNED position carrying your
+       stop is armed directly (standalone_candidates/arm_standalone), so a name
+       you bought intraday is protected the same session rather than waiting for
+       the nightly rebuild. The stop must be a positive number and must sit
+       STRICTLY BELOW a known live price: a stop at or above spot is refused,
+       because arming it would fire an immediate market sell, and no known price
+       fails closed until a poll has a quote. A refused position stays
+       unprotected and the monitor alarms it.
+
+    BOTH paths require the position to be OWNED per the broker snapshot -- a
+    name in tonight's book whose buy has not filled yet is invisible to the
+    monitor no matter what levels you set here. Confirmed non-ownership stops
+    enforcement; ownership that cannot be determined at all (a torn or absent
+    snapshot) FAILS OPEN, and the enforcement note says so rather than claiming
+    a clean pass.
 
     `targets` accepts a single number or a list -- pass ALL of a multi-target
     thesis's targets together. `positions()` shows you the current list; a

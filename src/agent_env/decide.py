@@ -142,13 +142,29 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
         if owned is not None:
             held = {s: t for s, t in held.items() if s in owned}
         held = apply_overrides(held, overrides)
+        # ...and then, for OWNED symbols that reached none of the above:
+        pending = standalone_candidates(owned, overrides, set(held))
+        held.update(arm_standalone(pending, prices)[0])
 
-    So a level can be enforced only if ALL of these hold:
-      - the symbol has a thesis, that thesis's `target_weight` is positive, AND
-        it carries a (truthy) stop -- the monitor's BOOK filter. Any one of
-        these missing means the symbol is never placed in `held` at all, so
-        overrides for it are never evaluated, regardless of what was just
-        written.
+    THERE ARE THEREFORE TWO WAYS TO BE WATCHED, and this function reports both.
+
+    ⛔ A LEVEL DOES NOT REQUIRE A THESIS (since 2026-08-20, `de55a69`). This
+    docstring said it did -- "a level can be enforced only if ... the symbol has
+    a thesis ... Any one of these missing means the symbol is never placed in
+    `held` at all" -- and that was true only until arm_standalone() shipped. The
+    function's own first branch has mirrored the new behaviour since; the prose
+    did not, and was corrected 2026-09-11.
+
+    **Path 1 -- the THESIS path**, when `has_thesis` is True. Enforced only if
+    ALL of these hold:
+      - the thesis passes the monitor's BOOK filter, which is
+        `target_weight > 0 OR verdict == "hold"` -- NOT the weight alone. A
+        PROTECTIVE thesis (slow_loop.protective_theses: a name the agent holds
+        that the ranking did not select) carries weight 0.0 with verdict
+        "hold", and the monitor does watch it. Reporting those unenforced was
+        a real false negative on four live positions, 2026-08-16.
+      - the thesis carries a (truthy) stop of its own. Without one the symbol
+        never enters `held`, so overrides for it are never evaluated.
       - the position is currently OWNED per the broker snapshot
         (research_store/rh/positions.json, the same file and interpretation
         `owned_symbols()` uses) -- the monitor's OWNERSHIP filter. If ownership
@@ -182,6 +198,40 @@ def evaluate_enforcement(stop: float, target, has_thesis: bool, target_weight,
         adds no risk of loss, since the stop is unchanged), so a raise is
         applied exactly like a lower. Any count mismatch, or a list identical
         to the current targets, is ignored.
+
+    **Path 2 -- the STANDALONE path**, when `has_thesis` is False. An OWNED
+    position with an agent-set stop and no thesis is watched on that stop
+    alone. This branch mirrors market_monitor.arm_standalone() exactly, and
+    must: reporting such a position unprotected is not a harmless
+    under-report. On 2026-08-20 a wake session read the old "not watching it
+    at all" note about JNJ, announced "NO enforced stop", and pushed a false
+    alarm about a position the monitor was already watching.
+
+    Its conditions, in the order this branch tests them:
+      - `owned is False` -> not enforced. The monitor only watches positions
+        you hold, and this is the confirmed-not-held case.
+      - `price is None` (asked, none known) -> not enforced, FAIL CLOSED. The
+        monitor cannot verify the stop is below spot, so it will not arm it --
+        and it arms on the next poll that has a quote, so this one clears
+        itself rather than needing an action.
+      - `price` not supplied at all (the `_PRICE_UNSET` sentinel) -> not
+        enforced, and the note says the price was never supplied to the check.
+        Not reachable from set_levels(), which always passes one.
+      - stop AT OR ABOVE the live price -> not enforced. arm_standalone()
+        REFUSES it, because arming a stop at or above spot fires an immediate
+        market sell. The comparison is strict: the stop must be BELOW spot,
+        so equality is refused.
+      - otherwise -> ENFORCED. The monitor arms it, and the nightly rebuild
+        supplies a full thesis afterwards.
+
+    ⚠️ THIS BRANCH DOES NOT RE-CHECK THAT THE STOP IS POSITIVE, and
+    arm_standalone() does (`_finite_pos`: finite and > 0). They agree in
+    production only because merge_levels()/write_levels() raise ValueError on a
+    non-finite or non-positive level BEFORE set_levels() ever calls this, so a
+    stop of 0 cannot arrive by that route. A caller that skipped that write
+    would be told `enforced: true` for a stop arm_standalone() refuses. Stated
+    rather than fixed: changing it here is a behaviour change, and the live
+    call site cannot reach it.
 
     `current_stop`/`current_targets` are the thesis's own stop/targets (None /
     [] when `has_thesis` is False). `owned` is a tri-state: True = confirmed
